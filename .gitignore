@@ -1,0 +1,40 @@
+﻿# Local temporary research repositories
+.tmp_*/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+
+# Model and training artifacts
+runs/
+weights/
+*.pt
+*.onnx
+*.engine
+*.tflite
+*.openvino
+
+# Datasets and large media
+ datasets/
+datasets/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and runtime data
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
