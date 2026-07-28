@@ -16,7 +16,9 @@
 
 - [零基础视觉识别与机械臂项目学习规划](./零基础视觉识别与机械臂项目学习规划.md)
 - [Python 与 NumPy 10 天速学方案](./Python与NumPy十天速学方案.md)
-- [Day 1：Python 对象模型、容器和常用表达式](./Day1-Python对象模型容器与常用表达式.md)
+- [Python 与 NumPy 10 天逐日教程](./docs/python-numpy/README.md)
+  - [Day 01：Python 对象模型、容器和常用表达式](./docs/python-numpy/Day01-Python对象模型容器与常用表达式.md)
+  - Day 02～Day 10 请从课程索引按顺序学习
 
 ## 项目原则
 
@@ -27,4 +29,4 @@
 
 ## 当前状态
 
-项目处于学习规划与技术验证阶段。
+已完成 Python 与 NumPy 10 天学习规划及 Day 01～Day 10 逐日教程，下一阶段可进入 OpenCV 图像处理与视频采集实践。

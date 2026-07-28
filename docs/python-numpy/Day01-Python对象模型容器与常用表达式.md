@@ -1,6 +1,6 @@
 # Day 1：Python 对象模型、容器和常用表达式
 
-> 所属阶段：[Python 与 NumPy 10 天速学方案](./Python与NumPy十天速学方案.md)
+> 所属阶段：[Python 与 NumPy 10 天速学方案](../../Python与NumPy十天速学方案.md)
 >
 > 适用对象：具有其他语言编程经验，不需要重新学习变量、循环和条件语句，希望快速建立 Python 工程直觉的人。
 >
