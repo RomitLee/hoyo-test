@@ -1,40 +1,27 @@
-﻿# Local temporary research repositories
-.tmp_*/
-
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-.env
-.env.*
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
 
-# Model and training artifacts
-runs/
-weights/
-*.pt
-*.onnx
-*.engine
-*.tflite
-*.openvino
-
-# Datasets and large media
- datasets/
-datasets/
+# Runtime data
+runtime/
+output/
+recordings/
+frames/
 *.mp4
+*.mkv
 *.avi
 *.mov
-*.mkv
+*.jpg
+*.jpeg
+*.png
+*.webp
 
-# IDE / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-
-# Logs and runtime data
-*.log
-logs/
-*.db
-*.sqlite
-*.sqlite3
+# Local secrets and settings
+.env
+*.local.toml

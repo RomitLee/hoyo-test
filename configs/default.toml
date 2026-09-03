@@ -1,0 +1,26 @@
+[capture]
+source = "video"
+path = "recordings/demo.mp4"
+device_index = 0
+source_id = "obs"
+
+[sampling]
+normal_fps = 5.0
+battle_fps = 10.0
+burst_fps = 20.0
+burst_duration_ms = 1500
+queue_size = 120
+
+[evidence]
+pre_buffer_ms = 2000
+post_buffer_ms = 3000
+directory = "runtime/evidence"
+
+[output]
+event_log = "runtime/events/events.jsonl"
+console = true
+
+# 模板匹配命中后会产生同名 signal，可在此配置图片路径。
+# [templates]
+# game_visible = "assets/templates/game_visible.png"
+# inventory_open = "assets/templates/inventory_open.png"
