@@ -75,8 +75,24 @@ class LatestFrameQueue:
             self._items.append(packet)
 
     def get(self) -> FramePacket | None:
+        """Return the newest frame and discard any older frames waiting behind it.
+
+        This queue is used by the live pipeline, where freshness is more
+        important than processing every captured frame. Returning from the
+        left side would turn the queue into a FIFO backlog: if capture runs
+        at 60 FPS and analysis runs at 5 FPS, a queue of 120 frames can add
+        roughly two seconds of latency.
+        """
         with self._lock:
-            return self._items.popleft() if self._items else None
+            if not self._items:
+                return None
+
+            latest = self._items.pop()
+            discarded = len(self._items)
+            if discarded:
+                self.dropped += discarded
+                self._items.clear()
+            return latest
 
     def __len__(self) -> int:
         with self._lock:

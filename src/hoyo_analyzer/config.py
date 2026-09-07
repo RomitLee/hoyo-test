@@ -9,10 +9,11 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class CaptureConfig:
-    source: str = "video"
+    source: str = "windows-graphics-capture"
     path: str = "recordings/demo.mp4"
     device_index: int = 0
-    source_id: str = "obs"
+    source_id: str = "wgc-window"
+    window_title_keyword: str = "梦幻西游"
 
 
 @dataclass(slots=True)
@@ -21,7 +22,8 @@ class SamplingConfig:
     battle_fps: float = 10.0
     burst_fps: float = 20.0
     burst_duration_ms: int = 1500
-    queue_size: int = 120
+    # Live analysis keeps only the newest frame; a tiny buffer avoids stale-frame latency.
+    queue_size: int = 3
 
 
 @dataclass(slots=True)

@@ -1,15 +1,16 @@
 [capture]
-source = "video"
+source = "windows-graphics-capture"
 path = "recordings/demo.mp4"
 device_index = 0
-source_id = "obs"
+source_id = "wgc-window"
+window_title_keyword = "梦幻西游"
 
 [sampling]
 normal_fps = 5.0
 battle_fps = 10.0
 burst_fps = 20.0
 burst_duration_ms = 1500
-queue_size = 120
+queue_size = 3
 
 [evidence]
 pre_buffer_ms = 2000
@@ -20,7 +21,9 @@ directory = "runtime/evidence"
 event_log = "runtime/events/events.jsonl"
 console = true
 
-# 模板匹配命中后会产生同名 signal，可在此配置图片路径。
-# [templates]
+# 模板匹配命中后会产生同名 signal。当前内置背包标题栏模板，
+# 用于将“画面变化”进一步识别为 inventory_opened。
+[templates]
+inventory_open = "assets/templates/inventory_open.png"
+# 后续可继续添加：
 # game_visible = "assets/templates/game_visible.png"
-# inventory_open = "assets/templates/inventory_open.png"

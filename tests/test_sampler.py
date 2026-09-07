@@ -15,8 +15,26 @@ def test_sampler_5fps_from_10fps():
     assert [p.timestamp_ms for p in selected] == [0, 200, 400, 600, 800, 1000]
 
 
-def test_latest_queue_discards_oldest():
+def test_latest_queue_returns_newest_and_discards_stale_frames():
+    queue = LatestFrameQueue(3)
+    for packet in packets(3):
+        queue.put(packet)
+
+    latest = queue.get()
+
+    assert latest is not None
+    assert latest.frame_index == 2
+    assert len(queue) == 0
+    assert queue.dropped == 2
+    assert queue.get() is None
+
+
+def test_latest_queue_still_drops_when_buffer_is_full():
     queue = LatestFrameQueue(2)
     for packet in packets(3):
         queue.put(packet)
-    assert len(queue) == 2 and queue.dropped == 1 and queue.get().frame_index == 1
+
+    assert len(queue) == 2
+    assert queue.dropped == 1
+    assert queue.get().frame_index == 2
+    assert queue.dropped == 2

@@ -80,6 +80,7 @@ class RealtimeAnalyzer:
         self.producer_done = ThreadEvent()
         self.stats = LiveStats()
         self._producer: Thread | None = None
+        self._producer_error: Exception | None = None
         self._last_observation: Observation | None = None
 
     def _produce(self) -> None:
@@ -90,6 +91,8 @@ class RealtimeAnalyzer:
                 self.queue.put(packet)
                 self.stats.captured_frames += 1
                 self.stats.last_timestamp_ms = packet.timestamp_ms
+        except Exception as exc:  # noqa: BLE001 - preserve producer failures for the caller thread
+            self._producer_error = exc
         finally:
             self.producer_done.set()
 
@@ -127,6 +130,8 @@ class RealtimeAnalyzer:
                     sleep(0.002)
                     continue
                 self._process(packet)
+            if self._producer_error is not None:
+                raise self._producer_error
         finally:
             self.request_stop()
             if self._producer is not None:

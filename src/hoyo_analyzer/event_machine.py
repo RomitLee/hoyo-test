@@ -20,6 +20,9 @@ class SignalRule:
 
 DEFAULT_RULES = (
     SignalRule("game_visible", "application_opened"),
+    # 基础 MVP 即使还没有 YOLO/OCR，也能把明显的画面变化记录下来，
+    # 方便验证“采集 → 抽帧 → 识别 → 输出”链路是否真正工作。
+    SignalRule("frame_changed", "screen_changed", confirm_frames=2, cooldown_ms=1500),
     SignalRule("inventory_open", "inventory_opened", exit_event_type="inventory_closed", emit_exit=True),
     SignalRule("battle_active", "battle_started", cooldown_ms=3000, exit_event_type="battle_ended", emit_exit=True),
 )
@@ -74,10 +77,16 @@ class EventMachine:
             active = bool(raw.get("active", False) if isinstance(raw, dict) else raw)
             if not self._transition(rule, active):
                 continue
+            payload: dict[str, Any] = {}
+            # 模板/帧变化信号可能携带分数；保留它便于用户判断事件是否可信。
+            if isinstance(raw, dict) and "score" in raw:
+                payload["score"] = round(float(raw["score"]), 4)
+            if isinstance(raw, dict) and "change_score" in raw:
+                payload["change_score"] = round(float(raw["change_score"]), 4)
             if active:
-                event = self._emit_if_allowed(self._new_event(obs, rule.event_type), rule.cooldown_ms)
+                event = self._emit_if_allowed(self._new_event(obs, rule.event_type, payload), rule.cooldown_ms)
             elif rule.emit_exit and rule.exit_event_type:
-                event = self._emit_if_allowed(self._new_event(obs, rule.exit_event_type), rule.cooldown_ms)
+                event = self._emit_if_allowed(self._new_event(obs, rule.exit_event_type, payload), rule.cooldown_ms)
             else:
                 event = None
             if event:

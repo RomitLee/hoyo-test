@@ -2,7 +2,7 @@
 
 > 面向《梦幻西游》游戏画面的实时视频理解与数据化记录项目。
 >
-> 当前版本是一个**只读、实时分析 MVP**：通过 OBS Virtual Camera 或普通视频设备获得游戏画面，使用 OpenCV 读取视频、抽帧、执行基础视觉分析，再将“打开背包、进入战斗”等候选行为转换成带时间戳的结构化事件日志。
+> 当前版本是一个**只读、实时分析 MVP**：默认通过 Windows Graphics Capture 直接采集指定游戏窗口，无需额外视频采集软件；随后将窗口画面转换为 NumPy/OpenCV 帧，执行抽帧与基础视觉分析，并把“打开背包、进入战斗”等候选行为转换成带时间戳的结构化事件日志。
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
@@ -66,20 +66,20 @@
 
 项目可以接收以下输入：
 
-1. **OBS Virtual Camera 实时视频**：当前推荐的单机 MVP 方案。
-2. **普通摄像头或 HDMI 采集卡设备**：通过 OpenCV 视频设备编号读取。
+1. **Windows Graphics Capture 游戏窗口**：当前唯一的桌面实时采集方案，直接按窗口句柄读取梦幻西游画面。
+2. **普通摄像头或 HDMI 采集卡设备**：保留为底层 CLI/未来双机方案的兼容输入，不属于当前桌面 MVP 主链路。
 3. **已经录制的视频文件**：用于离线回放、调试和制作训练数据。
 
 典型的单机 MVP 链路如下：
 
 ```text
-梦幻西游窗口
-  → OBS 窗口采集/游戏采集
-  → OBS Virtual Camera
-  → OpenCV VideoCapture
-  → 采集线程
+梦幻西游窗口（HWND）
+  → Windows Graphics Capture
+  → BGRA GPU采集帧
+  → BGR NumPy数组
+  → FramePacket
   → 有界最新帧队列
-  → 抽帧
+  → 自适应抽帧
   → 感知模块
   → 事件状态机
   → 实时界面、控制台和 JSONL
@@ -107,13 +107,29 @@
 }
 ```
 
+### 2.3 当前 MVP 能输出什么
+
+当前默认识别器还没有接入梦幻西游专用 YOLO、中文 OCR 或训练好的模板图片，因此它**不能仅凭普通帧差分准确判断“北俱芦洲”“背包物品”“横扫千军”或“伤害 12445”**。现在先提供两类可验证的事件：
+
+- `application_opened`：采集到有效游戏画面并连续确认后产生。
+- `screen_changed`：画面发生明显变化并连续确认后产生，payload 中包含 `change_score`。打开背包、进入战斗等操作通常会触发此事件，但它目前只是“画面变化”，不是语义识别。
+
+事件会同时出现在右侧事件列表、底部运行动态、控制台（开启 `output.console` 时）以及：
+
+```text
+runtime/events/events.jsonl
+```
+
+要输出 `inventory_opened`、`battle_started`、`map_entered`、`skill_used` 和 `damage_dealt`，下一步需要分别接入模板检测、YOLO 目标检测和 OCR，并把识别结果填入 `Observation`，再由事件状态机确认。
+
 ### 2.3 计划识别的游戏行为
 
 | 行为 | 计划使用的技术 | 当前状态 |
 |---|---|---|
-| 游戏已打开 | 场景检测、固定区域模板匹配 | 已有事件框架，识别器仍是基础版本 |
+| 游戏已打开 | 有效帧接入 + 场景检测/模板匹配 | MVP 已可输出 `application_opened` |
 | 进入地图 | 地图名称 ROI + OCR + 状态变化 | 待接入中文 OCR |
-| 打开背包 | 背包面板模板/目标检测 | 已支持模板信号接入 |
+| 画面发生明显变化 | 帧差分 + 时序确认 | MVP 已可输出 `screen_changed`，用于验证链路 |
+| 打开背包 | 背包标题栏模板/目标检测 | 已内置背包标题栏模板，可输出 inventory_opened |
 | 背包物品 | 物品格定位 + OCR/图标分类 | 待开发 |
 | 切入战斗 | 战斗 UI 检测 + 多帧确认 | 已有状态机规则 |
 | 使用技能 | 技能区域变化 + 技能名 OCR/图标分类 | 待开发 |
@@ -159,9 +175,10 @@
 
 ```mermaid
 flowchart LR
-    A[游戏窗口/游戏画面] --> B[OBS Window/Game Capture]
-    B --> C[OBS Virtual Camera]
-    C --> D[OpenCV Capture]
+    A[游戏窗口 HWND] --> B[Windows Graphics Capture]
+    A --> C[Windows Graphics Capture/采集卡/视频文件输入]
+    B --> D[BGR NumPy Frame]
+    C --> D
     D --> E[FramePacket]
     E --> F[LatestFrameQueue]
     F --> G[AdaptiveSampler]
@@ -266,7 +283,12 @@ EventMachine：完成时间和业务逻辑判断
 
 当前版本已经完成以下基础能力：
 
-- OBS Virtual Camera、普通摄像头和采集卡统一使用 OpenCV 读取。
+- Windows Graphics Capture 按 HWND 直接采集指定游戏窗口。
+- 桌面程序只展示标题包含“梦幻西游”的窗口，其他应用窗口不会成为采集目标。
+- 启动时自动检测梦幻西游窗口；检测到后自动选择并开始实时采集。
+- 未检测到游戏时禁止开始监控，并每约 3 秒自动重新检测。
+- 实时计算游戏窗口遮挡比例，遮挡达到 1% 时直接在“窗口被遮挡”状态标签后显示百分比，并将主要遮挡来源放入悬浮提示。
+- 普通摄像头和采集卡继续作为 CLI/底层代码的兼容输入；桌面主链路不依赖外部采集软件。
 - 视频文件离线读取。
 - 采集线程与分析线程分离。
 - 有界最新帧队列。
@@ -277,9 +299,14 @@ EventMachine：完成时间和业务逻辑判断
 - 连续多帧确认的事件状态机。
 - JSONL 事件输出和控制台输出。
 - 事件证据帧保存。
-- PySide6 Windows 桌面界面。
-- OBS 进程状态检测。
-- 实时视频预览。
+- PySide6 Windows 桌面界面，窗口标题为“梦幻子霖AI分析工具”。
+- 面向边玩游戏边查看结果的场景，桌面窗口固定为 `880×600`，不可拖拽改变大小或宽高比例。
+- 顶部登录状态是公共区域：未登录时显示“未登录”和紧凑的登录按钮；登录后可显示头像、昵称和登录提示，不随页面切换消失。
+- 左侧增加社交化导航栏，包含“AI分析、聊天室、装备鉴赏、子霖商行、个人中心”五个入口。
+- 当前采集与事件识别内容属于“AI分析”页面；其他四个入口暂时显示功能占位提示，为后续社交功能保留扩展位置。
+- AI分析页面左侧使用 `300×300` 的 1:1 正方形预览幕布，下面是“运行状态”；右侧依次展示“当前窗口 + 开始/暂停”、“采集状态”、游戏连接提示、遮挡提示和事件采集结果。
+- “采集状态”固定放在“当前窗口 + 开始/暂停”控制栏下方，包含“采集中、窗口被遮挡、未采集”三种状态；发生遮挡时会在“窗口被遮挡”后直接显示遮挡百分比。
+- 梦幻西游 4:3 画面（640×480、800×600、1024×768、1280×960）在预览幕布中保持原比例缩放，不拉伸、不裁剪。
 - 采集帧数、分析帧数、丢帧数和分析 FPS 展示。
 
 ### 当前识别能力边界
@@ -305,8 +332,8 @@ EventMachine：完成时间和业务逻辑判断
 - Windows 10/11，推荐使用 Windows 11。
 - Python 3.11 或更高版本。
 - [uv](https://docs.astral.sh/uv/)：用于创建环境、安装依赖和运行项目。
-- OBS Studio：仅当使用 OBS Virtual Camera 时需要。
-- 摄像头、OBS Virtual Camera 或 HDMI 采集卡中的任意一种视频输入设备。
+- Windows Graphics Capture：Windows 10/11 系统内置，不需要单独安装。
+- 采集卡或摄像头：仅当主动选择对应采集方式时需要。
 
 ### Python 依赖
 
@@ -315,6 +342,7 @@ EventMachine：完成时间和业务逻辑判断
 - `numpy`：数组和基础数值处理。
 - `opencv-python`：视频读取、图像处理、模板匹配和图片保存。
 - `PySide6`：Windows 桌面界面。
+- `windows-capture`：通过 Windows Graphics Capture 按窗口句柄采集画面。
 
 开发依赖：
 
@@ -354,7 +382,7 @@ python -m pip install pytest ruff
 
 ```powershell
 uv run python -c "import cv2, numpy; print('OpenCV and NumPy ok')"
-uv run python -c "import PySide6; print('PySide6 ok')"
+uv run python -c "import PySide6, windows_capture; print('PySide6 and WGC ok')"
 uv run python -m hoyo_analyzer --help
 ```
 
@@ -364,89 +392,78 @@ uv run python -m hoyo_analyzer --help
 
 ### 8.1 启动桌面界面
 
-推荐使用桌面界面进行第一次操作：
+推荐直接使用 Windows 窗口采集，无需打开或安装额外采集软件：
 
 ```powershell
 cd C:\Users\李锐\Documents\hoyo-test
 uv run python -m hoyo_analyzer desktop
 ```
 
+使用步骤：
+
+1. 启动桌面程序；程序会立即在后台检测标题包含“梦幻西游”的窗口。
+2. 如果已经打开《梦幻西游》，程序会自动选择一个非最小化的游戏窗口并自动开始实时采集。
+3. 如果没有检测到游戏，界面显示黄色提示“当前不能监控”，“开始”按钮保持禁用。
+4. 此时再启动《梦幻西游》即可；程序每约 3 秒自动重新检测，发现游戏后自动开始采集，不需要用户选择或刷新。
+5. 自动启动成功后，界面在右侧事件列表上方显示绿色提示“已开始自动采集”，较长提示不会挤占状态字段。
+6. 左上角显示登录状态：未登录时提供“登录”按钮；真实账号服务接入前，该按钮仅显示功能预告。登录后这里会显示头像、昵称和分享状态。
+7. 登录信息下方显示三个采集状态：`已采集`、`窗口被遮挡`、`未采集`，当前状态会以彩色标签高亮。
+8. 游戏窗口被其他窗口遮挡达到 1% 时，“窗口被遮挡”状态标签直接显示遮挡比例；将鼠标悬停在标签上可以查看主要遮挡来源。
+9. 游戏窗口可以移动或调整大小，因为采集绑定的是 HWND，而不是固定屏幕坐标。
+10. 如需暂时停止本次监控，可以点击“暂停”；手动暂停后不会立刻自动重启。
+
 界面包含以下区域：
 
 | 区域 | 作用 |
 |---|---|
-| 实时输入 | 选择 OBS Virtual Camera、HDMI 采集卡或普通摄像头，填写设备号 |
-| 刷新设备 | 扫描 OpenCV 可以打开的视频设备编号 |
-| 测试设备 | 尝试读取一帧，提前确认设备编号和视频源可用 |
-| 开始实时分析 | 启动采集线程、分析线程和事件输出 |
-| 停止分析 | 停止实时分析并释放视频设备 |
-| 视频预览 | 显示最近收到的视频帧 |
-| 运行状态 | 显示 OBS、视频采集和事件输出状态 |
-| 事件列表 | 显示本次运行过程中产生的结构化事件 |
-| 调试日志 | 显示设备扫描、启动、停止和异常信息 |
+| 登录状态 | 位于界面左上角；未登录时显示登录入口，登录后显示头像、昵称和可分享状态 |
+| 采集状态 | 位于登录信息下方，以 `已采集`、`窗口被遮挡`、`未采集` 三个状态标签反馈当前采集情况 |
+| 游戏连接 | 以紧凑文本形式显示程序自动检测到的梦幻西游窗口，无采集方式或窗口下拉框 |
+| 开始/暂停 | 控制采集线程、分析线程和事件输出；无需手动测试或刷新采集源 |
+| 视频预览 | 左侧使用 `300×300` 的 1:1 预览幕布显示最近画面；游戏的 800×600、640×480、1024×768、1280×960 等 4:3 分辨率会自动等比例缩放并留黑边 |
+| 运行状态 | 位于视频预览下方，显示目标窗口、窗口遮挡、视频采集、事件输出和 FPS |
+| 事件列表 | 右侧占据主要空间；“当前窗口”控制栏和游戏连接状态提示位于事件列表上方，并与事件列表保持相同宽度 |
 
-#### OBS Virtual Camera 使用步骤
+如果游戏窗口最小化，程序会保持 WGC 会话：游戏仍在后台渲染时继续采集；游戏暂停渲染时等待新画面，并在窗口恢复后自动续采。只有窗口被关闭或 WGC 会话异常结束时才停止并提示错误。
 
-1. 打开 OBS Studio。
-2. 新建一个场景。
-3. 添加“窗口采集”或“游戏采集”。
-4. 选择梦幻西游窗口。
-5. 确认 OBS 预览中能看到完整游戏画面。
-6. 点击“启动虚拟摄像机”。
-7. 启动本项目桌面界面。
-8. 点击“刷新设备”。
-9. 选择 `OBS Virtual Camera` 和对应设备编号。
-10. 点击“测试设备”。
-11. 测试成功后点击“开始实时分析”。
-
-当前界面有启动保护：选择 `OBS Virtual Camera` 时，如果没有检测到 `obs64.exe` 或 `obs.exe`，开始按钮会被禁用；即使在按钮状态刷新间隔内点击，也会再次拦截启动。
-
-注意：
-
-> “OBS 进程运行中”不等于“虚拟摄像机已经启动”。最终应该同时确认 OBS 预览正常、设备测试成功、视频预览有画面，并且“视频采集”状态显示“正常采集”。
-
-### 8.2 枚举视频设备
+### 8.2 枚举可采集窗口
 
 ```powershell
-uv run python -m hoyo_analyzer list-devices --max-index 10
+uv run python -m hoyo_analyzer list-windows
 ```
 
 示例输出：
 
 ```text
-可用视频设备：0, 1, 2
+0x150AF6    梦幻西游 ONLINE - 角色名
+0x106E2     Chrome
 ```
 
-设备编号由 Windows 和 OpenCV 的设备枚举结果决定，在不同电脑上可能不同。OBS Virtual Camera 不一定是设备 `0`，请以实际输出为准。
+窗口句柄在游戏每次重启后可能变化，因此桌面界面会重新枚举，不建议把 HWND 永久写死在配置文件中。
+
+如需调试底层 OpenCV 视频设备，可使用：
+
+```powershell
+uv run python -m hoyo_analyzer list-devices --max-index 10
+```
 
 ### 8.3 使用 CLI 实时分析
 
-如果不需要桌面界面，可以直接执行：
+通过窗口标题关键字启动：
 
 ```powershell
 uv run python -m hoyo_analyzer live `
-  --source obs-virtual-camera `
-  --device 1 `
+  --source windows-graphics-capture `
+  --window-title "梦幻西游" `
   --config configs/default.toml
 ```
 
-可选参数：
-
-```text
---source       obs-virtual-camera、capture-card、camera、screen
---device       OpenCV 视频设备编号，默认 0
---config       TOML 配置文件路径
---max-seconds  运行指定秒数后自动退出，适合调试
---queue-size   覆盖实时队列长度
-```
-
-例如运行 60 秒：
+如果标题关键字匹配到多个窗口，先执行 `list-windows`，然后使用精确 HWND：
 
 ```powershell
 uv run python -m hoyo_analyzer live `
-  --source obs-virtual-camera `
-  --device 1 `
-  --config configs/default.toml `
+  --source windows-graphics-capture `
+  --window-hwnd 0x150AF6 `
   --max-seconds 60
 ```
 
@@ -503,10 +520,11 @@ configs/default.toml
 
 ```toml
 [capture]
-source = "video"
+source = "windows-graphics-capture"
 path = "recordings/demo.mp4"
 device_index = 0
-source_id = "obs"
+source_id = "wgc-window"
+window_title_keyword = "梦幻西游"
 
 [sampling]
 normal_fps = 5.0
@@ -533,6 +551,7 @@ console = true
 | `path` | 视频文件路径 | 离线视频输入使用；实时设备输入时不会使用该路径 |
 | `device_index` | 视频设备编号 | GUI 和 CLI 可单独覆盖 |
 | `source_id` | 输入源标识 | 写入帧的元数据，便于区分来源 |
+| `window_title_keyword` | 允许采集的游戏窗口标题关键字 | GUI只展示包含该文字的窗口，检测到后自动选择并开始采集 |
 
 ### 9.2 `[sampling]`
 
@@ -663,8 +682,8 @@ runtime/evidence/
 | `__main__.py` | 支持 `python -m hoyo_analyzer`，将命令转交给 CLI |
 | `models.py` | 定义核心数据结构：`FramePacket`、`Observation`、`Event`、`RuntimeState` 等 |
 | `config.py` | 定义配置数据类，并从 TOML 文件加载配置 |
-| `capture.py` | 视频输入适配层；负责视频文件、OBS Virtual Camera、普通摄像头和采集卡的 OpenCV 读取 |
-| `obs.py` | Windows OBS 进程状态检测，目前检测 `obs64.exe` 和 `obs.exe` |
+| `capture.py` | 统一视频源工厂；组织视频文件、WGC、摄像头和采集卡输入 |
+| `wgc.py` | Windows窗口枚举、HWND状态检查和Windows Graphics Capture实时帧源 |
 | `sampler.py` | 抽帧策略和 `LatestFrameQueue` 有界最新帧队列 |
 | `realtime.py` | 实时分析主流程；组织采集线程、队列、抽帧、感知、状态机和输出 |
 | `roi.py` | 提供像素 ROI、相对比例 ROI 和安全裁剪函数 |
@@ -673,8 +692,8 @@ runtime/evidence/
 | `event_machine.py` | 时序状态机；对观察信号执行多帧确认、进入/退出事件、去重和冷却控制 |
 | `evidence.py` | 保存事件触发时的证据图像 |
 | `storage.py` | JSONL 事件写入、控制台输出和多个输出通道组合 |
-| `cli.py` | 命令行参数、离线分析、实时分析、设备枚举、抽帧和桌面入口 |
-| `gui.py` | PySide6 桌面 UI、实时视频预览、状态监控、事件表格和后台分析线程 |
+| `cli.py` | 命令行参数、离线/实时分析、窗口/设备枚举、抽帧和桌面入口 |
+| `gui.py` | PySide6 桌面 UI、左上角登录/采集状态、梦幻西游窗口过滤与自动启动、遮挡告警、实时预览、运行状态和后台分析线程 |
 
 ### 11.3 `tests/` 文件
 
@@ -682,7 +701,9 @@ runtime/evidence/
 |---|---|
 | `test_models.py` | 时间戳格式和 `FramePacket` 基础行为 |
 | `test_event_machine.py` | 背包、战斗和地图事件的状态确认与去重 |
-| `test_realtime.py` | 实时分析器、视频源工厂和事件输出 |
+| `test_gui.py` | 梦幻西游窗口过滤、无游戏禁用、自动启动、登录状态、三态采集标签、运行状态布局和 1% 遮挡告警测试 |
+| `test_realtime.py` | 实时分析器、采集线程异常传播和事件输出 |
+| `test_wgc.py` | WGC 视频源工厂、窗口信息、最小化行为和遮挡面积计算测试 |
 | `test_sampler.py` | 抽帧频率和有界队列丢弃旧帧行为 |
 | `test_roi.py` | ROI 越界裁剪和相对比例转换 |
 | `test_storage.py` | JSONL UTF-8 写入和控制台输出 |
@@ -751,13 +772,16 @@ uv run python -m hoyo_analyzer desktop --help
 
 ### 13.5 测试实时链路的建议顺序
 
-1. 先使用 `list-devices` 确认系统能看到视频设备。
-2. 再使用桌面界面的“测试设备”读取一帧。
-3. 确认视频预览能显示画面。
-4. 运行 1～5 分钟，观察采集 FPS、分析 FPS 和丢帧数。
-5. 检查 `runtime/events/events.jsonl` 是否持续写入。
-6. 检查 `runtime/evidence/` 是否产生事件证据图。
-7. 使用一段录制视频进行离线复现，比较实时和离线结果。
+1. 启动桌面程序，确认没有游戏时显示“未检测到梦幻西游窗口，当前不能监控”。
+2. 启动游戏，确认程序在约 3 秒内自动发现窗口并显示“已开始自动采集”。
+3. 确认视频预览能显示游戏画面。
+4. 用其他窗口遮挡游戏至少 1%，确认“窗口被遮挡”状态标签显示遮挡比例；将鼠标移开后确认状态恢复。
+5. 运行 1～5 分钟，观察采集 FPS、分析 FPS 和丢帧数。
+6. 检查 `runtime/events/events.jsonl` 是否持续写入。
+7. 检查 `runtime/evidence/` 是否产生事件证据图。
+8. 使用一段录制视频进行离线复现，比较实时和离线结果。
+
+如果使用采集卡或普通摄像头兼容模式，再通过 `list-devices` 检查 OpenCV 视频设备编号。
 
 ### 13.6 添加新的识别信号
 
@@ -779,44 +803,29 @@ uv run python -m hoyo_analyzer desktop --help
 
 ## 14. 常见问题
 
-### 14.1 OBS 进程显示“未检测到”
+### 14.1 窗口列表中找不到梦幻西游
 
-请确认任务管理器中存在：
-
-```text
-obs64.exe
-```
-
-或：
-
-```text
-obs.exe
-```
-
-如果 OBS 使用了特殊启动方式或进程名不同，需要后续扩展 [`src/hoyo_analyzer/obs.py`](src/hoyo_analyzer/obs.py) 的检测逻辑。
-
-### 14.2 OBS 运行中，但视频采集仍然失败
-
-OBS 进程运行中不代表虚拟摄像机已启动。请依次确认：
-
-1. OBS 预览中有游戏画面。
-2. 已点击“启动虚拟摄像机”。
-3. 已在项目中点击“刷新设备”。
-4. 设备编号填写正确。
-5. 没有其他程序独占该摄像头设备。
-6. OBS 和分析程序的权限级别没有造成设备访问限制。
-
-### 14.3 视频设备编号不确定
-
-执行：
+桌面程序只接受标题包含 `window_title_keyword`（默认“梦幻西游”）的窗口。请确认游戏已经启动、窗口标题包含该关键字且没有处于隐藏状态。程序会每约 3 秒自动检测并更新“当前窗口”文本。如果游戏以管理员权限运行，建议让分析程序使用相同权限级别。还可以执行：
 
 ```powershell
-uv run python -m hoyo_analyzer list-devices --max-index 10
+uv run python -m hoyo_analyzer list-windows
 ```
 
-然后逐个使用桌面界面的“测试设备”。不同电脑的编号可能不同，不能固定假设 OBS Virtual Camera 一定是 `0` 或 `1`。
+如果游戏刚刚重启，原来的 HWND 会失效；程序停止旧采集后会继续自动检测新的游戏窗口。
 
-### 14.4 画面有预览，但没有事件
+### 14.2 窗口采集没有画面
+
+请确认：
+
+1. 先恢复游戏窗口测试一次，确认正常状态下能够收到画面。
+2. “当前窗口”文本显示的是游戏主窗口，而不是启动器或登录器。
+3. Windows 版本支持 Windows Graphics Capture。
+4. 游戏没有使用系统禁止采集的受保护画面。
+5. 查看底部运行动态和界面错误提示，确认具体失败原因。
+
+程序不会再因为最小化主动停止采集会话，但很多游戏会在最小化后暂停渲染。此时没有新的真实画面可供任何窗口采集 API 读取，程序会显示“等待游戏后台画面”，并在窗口恢复、游戏重新渲染后自动继续。项目不会重复旧帧伪装成实时画面。
+
+### 14.3 画面有预览，但没有事件
 
 这是当前版本的预期现象之一。请确认：
 
@@ -828,7 +837,7 @@ uv run python -m hoyo_analyzer list-devices --max-index 10
 
 只接入视频并不会自动获得地图、物品、技能或伤害语义。
 
-### 14.5 丢帧数增加是否一定是错误
+### 14.4 丢帧数增加是否一定是错误
 
 不一定。实时队列的设计是优先处理最新画面。当分析速度低于采集速度时，程序会丢弃旧帧来避免延迟越来越大。
 
@@ -841,12 +850,12 @@ uv run python -m hoyo_analyzer list-devices --max-index 10
 - 减少每帧执行的 OCR 次数。
 - 调整 `queue_size`，但不要无限增大队列。
 
-### 14.6 是否必须保存视频
+### 14.5 是否必须保存视频
 
 不必须。MVP 主链路是实时分析：
 
 ```text
-OBS Virtual Camera → OpenCV → 实时分析
+Windows Graphics Capture → NumPy/OpenCV帧 → 实时分析
 ```
 
 保存视频是可选旁路，主要用于：
@@ -864,7 +873,8 @@ OBS Virtual Camera → OpenCV → 实时分析
 
 目标：不使用 AI 也能稳定获取画面。
 
-- 完成 OBS Virtual Camera 实际连接。
+- 完成 Windows Graphics Capture 指定窗口连接。
+- 保持 Windows Graphics Capture 主链路稳定，并为未来的采集卡双机方案预留接口。
 - 确认分辨率、FPS、色彩格式和延迟。
 - 连续运行 30 分钟观察断流、黑屏和重连。
 - 完善视频设备错误提示和恢复机制。
@@ -1035,4 +1045,4 @@ review_tool
 
 ## 当前项目一句话总结
 
-这是一个以 OBS Virtual Camera 为实时视频入口、以 OpenCV 为采集和图像处理基础、以 YOLO/OCR/模板匹配为可插拔感知手段、以时序状态机为事件确认核心、最终将《梦幻西游》游戏画面转换为可查询结构化数据的工程化 MVP。
+这是一个以 Windows Graphics Capture 指定游戏窗口为唯一桌面实时入口、以 NumPy/OpenCV 为图像处理基础、以 YOLO/OCR/模板匹配为可插拔感知手段、以时序状态机为事件确认核心，最终将《梦幻西游》游戏画面转换为可查询结构化数据的工程化 MVP。

@@ -23,6 +23,7 @@ class TemplateSpec:
     path: str
     threshold: float = 0.82
     roi: PixelROI | RelativeROI | None = None
+    multiscale: bool = False
 
 
 class RuleBasedPerception:
@@ -63,7 +64,13 @@ class RuleBasedPerception:
         for spec in self.templates:
             template = self._loaded_templates.get(spec.path)
             if template is None:
-                template = cv2.imread(str(Path(spec.path)), cv2.IMREAD_GRAYSCALE)
+                # cv2.imread 在 Windows 中文路径下可能返回 None，改用
+                # NumPy 读取后再解码，保证项目目录包含中文用户名时也能加载模板。
+                try:
+                    encoded = np.fromfile(Path(spec.path), dtype=np.uint8)
+                    template = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
+                except (OSError, ValueError):
+                    template = None
                 if template is None:
                     continue
                 self._loaded_templates[spec.path] = template
@@ -71,9 +78,29 @@ class RuleBasedPerception:
             search_gray = self._gray(search)
             if search_gray.shape[0] < template.shape[0] or search_gray.shape[1] < template.shape[1]:
                 continue
-            result = cv2.matchTemplate(search_gray, template, cv2.TM_CCOEFF_NORMED)
-            _, score, _, _ = cv2.minMaxLoc(result)
-            signals[spec.signal] = {"active": bool(score >= spec.threshold), "score": float(score)}
+            scales = (0.60, 0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.40, 1.50) if spec.multiscale else (1.0,)
+            best_score = -1.0
+            best_scale = 1.0
+            for scale in scales:
+                if scale == 1.0:
+                    candidate = template
+                else:
+                    width = max(8, round(template.shape[1] * scale))
+                    height = max(8, round(template.shape[0] * scale))
+                    candidate = cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA)
+                if search_gray.shape[0] < candidate.shape[0] or search_gray.shape[1] < candidate.shape[1]:
+                    continue
+                result = cv2.matchTemplate(search_gray, candidate, cv2.TM_CCOEFF_NORMED)
+                _, score, _, _ = cv2.minMaxLoc(result)
+                if score > best_score:
+                    best_score = float(score)
+                    best_scale = scale
+            if best_score >= 0:
+                signals[spec.signal] = {
+                    "active": bool(best_score >= spec.threshold),
+                    "score": best_score,
+                    "scale": best_scale,
+                }
         return signals
 
     def observe(self, packet: FramePacket) -> Observation:
@@ -86,7 +113,13 @@ class RuleBasedPerception:
             )
             changed = change_score >= self.change_threshold
         self._previous_gray = gray
-        signals: dict[str, Any] = {"frame_changed": changed, "change_score": change_score}
+        # WGC/视频源能够产出有效帧，就说明应用画面已经接入。
+        # 这是 MVP 的“应用已打开”信号；后续可由 YOLO/OCR 进一步确认游戏场景。
+        signals: dict[str, Any] = {
+            "game_visible": bool(packet.image.size > 0),
+            "frame_changed": {"active": changed, "change_score": change_score},
+            "change_score": change_score,
+        }
         signals.update(self._template_signals(packet.image))
         return Observation(
             packet.frame_index, packet.timestamp_ms, signals, min(1.0, 0.5 + change_score), "rules+templates"

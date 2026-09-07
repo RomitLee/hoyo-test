@@ -25,3 +25,8 @@ frames/
 # Local secrets and settings
 .env
 *.local.toml
+
+# Versioned visual templates
+!assets/
+!assets/templates/
+!assets/templates/*.png

@@ -29,3 +29,13 @@ def test_map_change_payload():
     machine = EventMachine()
     events = machine.update(obs(0, map_name="北俱芦洲"))
     assert events[0].type == "map_entered" and events[0].payload["map_name"] == "北俱芦洲"
+
+
+def test_screen_change_event_keeps_change_score():
+    machine = EventMachine()
+    machine.update(obs(0, frame_changed={"active": False, "change_score": 0.0}))
+    machine.update(obs(1, frame_changed={"active": True, "change_score": 0.2}))
+    events = machine.update(obs(2, frame_changed={"active": True, "change_score": 0.35}))
+
+    assert [event.type for event in events] == ["screen_changed"]
+    assert events[0].payload == {"change_score": 0.35}
