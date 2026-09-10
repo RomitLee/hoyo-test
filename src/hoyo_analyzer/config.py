@@ -1,4 +1,4 @@
-"""Dependency-free TOML configuration."""
+"""Configuration models for the realtime analyzer."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ class SamplingConfig:
     battle_fps: float = 10.0
     burst_fps: float = 20.0
     burst_duration_ms: int = 1500
-    # Live analysis keeps only the newest frame; a tiny buffer avoids stale-frame latency.
     queue_size: int = 3
 
 
@@ -40,11 +39,41 @@ class OutputConfig:
 
 
 @dataclass(slots=True)
+class EquipmentConfig:
+    """Equipment tooltip detector settings.
+
+    YOLO is now the production backend. The legacy OpenCV fields remain here so
+    older local TOML files can still be loaded and the rule detector can be used
+    explicitly for debugging.
+    """
+
+    enabled: bool = True
+    backend: str = "yolo"
+    model_path: str = "models/equipment_tooltip/best.pt"
+    confidence: float = 0.65
+    image_size: int = 640
+    device: str = "auto"
+    stable_frames: int = 3
+    output_directory: str = "runtime/equipment/tooltips"
+    # Deprecated OpenCV compatibility settings.
+    min_score: float = 0.88
+    require_title: bool = True
+    min_title_ratio: float = 0.075
+    min_dark_ratio: float = 0.72
+    max_bright_ratio: float = 0.16
+    max_color_ratio: float = 0.25
+    min_border_score: float = 0.75
+    min_text_lines: int = 3
+    allow_generic_fallback: bool = False
+
+
+@dataclass(slots=True)
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    equipment: EquipmentConfig = field(default_factory=EquipmentConfig)
     templates: dict[str, str] = field(default_factory=dict)
 
 
@@ -59,6 +88,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ("sampling", config.sampling),
         ("evidence", config.evidence),
         ("output", config.output),
+        ("equipment", config.equipment),
     ):
         section = data.get(name, {})
         if isinstance(section, dict):

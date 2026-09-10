@@ -1,4 +1,4 @@
-# Hoyo 游戏视频行为分析系统
+# 梦幻西游-希联文超助手
 
 > 面向《梦幻西游》游戏画面的实时视频理解与数据化记录项目。
 >
@@ -7,6 +7,8 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
 [![Qt](https://img.shields.io/badge/PySide6-Qt-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
+
+> README 最近更新：2026-09-10。当前开发重点是“完整游戏截图 → YOLO 定位装备属性浮窗 → OCR 读取属性 → 生成结果卡片”。
 
 ---
 
@@ -20,6 +22,7 @@
 - [6. 环境要求](#6-环境要求)
 - [7. 安装](#7-安装)
 - [8. 使用方式](#8-使用方式)
+  - [8.6 装备图片识别](#86-装备图片识别)
 - [9. 配置文件](#9-配置文件)
 - [10. 输出数据](#10-输出数据)
 - [11. 项目文件说明](#11-项目文件说明)
@@ -56,7 +59,7 @@
   → JSONL/SQLite/报表
 ```
 
-项目名称中的 `hoyo` 目前只是项目目录和历史命名，不代表本项目依赖某个名为 Hoyo 的商业模型或服务。本项目当前围绕《梦幻西游》的游戏视频分析场景设计，但核心代码尽量保持通用，后续可以扩展到其他游戏或桌面应用。
+代码目录、Python 包和 Git 仓库中的 `hoyo` 是早期项目遗留的内部技术名称；软件对外名称已经统一为“梦幻西游-希联文超助手”。它不代表本项目依赖某个名为 Hoyo 的商业模型或服务。本项目当前围绕《梦幻西游》的游戏视频分析场景设计，但核心代码尽量保持通用，后续可以扩展到其他游戏或桌面应用。
 
 ---
 
@@ -109,10 +112,11 @@
 
 ### 2.3 当前 MVP 能输出什么
 
-当前默认识别器还没有接入梦幻西游专用 YOLO、中文 OCR 或训练好的模板图片，因此它**不能仅凭普通帧差分准确判断“北俱芦洲”“背包物品”“横扫千军”或“伤害 12445”**。现在先提供两类可验证的事件：
+当前已经接入 YOLO 感知链路，但仓库不包含训练好的《梦幻西游》权重，也没有默认中文 OCR 和完整游戏词典。因此它仍然**不能仅凭当前模型准确识别“北俱芦洲”“背包物品”“横扫千军”或“伤害 12445”**。当前先提供两类可验证的事件：
 
 - `application_opened`：采集到有效游戏画面并连续确认后产生。
 - `screen_changed`：画面发生明显变化并连续确认后产生，payload 中包含 `change_score`。打开背包、进入战斗等操作通常会触发此事件，但它目前只是“画面变化”，不是语义识别。
+- 手动装备图片识别：上传或粘贴完整游戏截图，使用 YOLO 定位装备浮窗，然后由 RapidOCR 读取名称、等级、类型和属性。该能力需要自行训练并放置 `best.pt`。
 
 事件会同时出现在右侧事件列表、底部运行动态、控制台（开启 `output.console` 时）以及：
 
@@ -120,16 +124,16 @@
 runtime/events/events.jsonl
 ```
 
-要输出 `inventory_opened`、`battle_started`、`map_entered`、`skill_used` 和 `damage_dealt`，下一步需要分别接入模板检测、YOLO 目标检测和 OCR，并把识别结果填入 `Observation`，再由事件状态机确认。
+实时链路要稳定输出 `inventory_opened`、`battle_started`、`map_entered`、`skill_used` 和 `damage_dealt`，仍需继续训练 YOLO、完善各类 ROI/OCR 与模板检测，并把识别结果填入 `Observation`，再由事件状态机确认。
 
-### 2.3 计划识别的游戏行为
+### 2.4 计划识别的游戏行为
 
 | 行为 | 计划使用的技术 | 当前状态 |
 |---|---|---|
 | 游戏已打开 | 有效帧接入 + 场景检测/模板匹配 | MVP 已可输出 `application_opened` |
 | 进入地图 | 地图名称 ROI + OCR + 状态变化 | 待接入中文 OCR |
 | 画面发生明显变化 | 帧差分 + 时序确认 | MVP 已可输出 `screen_changed`，用于验证链路 |
-| 打开背包 | 背包标题栏模板/目标检测 | 已内置背包标题栏模板，可输出 inventory_opened |
+| 打开背包 | YOLO `inventory_panel` + 模板回退 | 已接入双类别 YOLO，训练权重放入 `models/equipment_tooltip/best.pt` 后生效 |
 | 背包物品 | 物品格定位 + OCR/图标分类 | 待开发 |
 | 切入战斗 | 战斗 UI 检测 + 多帧确认 | 已有状态机规则 |
 | 使用技能 | 技能区域变化 + 技能名 OCR/图标分类 | 待开发 |
@@ -296,13 +300,15 @@ EventMachine：完成时间和业务逻辑判断
 - ROI 裁剪和边界保护。
 - 帧变化检测。
 - 可选 OpenCV 模板匹配。
-- 连续多帧确认的事件状态机。
+- YOLO 一次检测 `equipment_tooltip` 和 `inventory_panel` 两个类别；同时使用鼠标坐标，只接受左侧八个装备槽位，忽略右侧道具栏。旧版 OpenCV 规则检测器保留为兼容和调试方案。
+- 检测到稳定浮窗后自动裁剪并保存样本图片，默认输出到 `runtime/equipment/tooltips/`。
+- 连续多帧确认的事件状态机，支持 `equipment_tooltip_opened` / `equipment_tooltip_closed`。
 - JSONL 事件输出和控制台输出。
 - 事件证据帧保存。
-- PySide6 Windows 桌面界面，窗口标题为“梦幻子霖AI分析工具”。
+- PySide6 Windows 桌面界面，窗口标题为“梦幻西游-希联文超助手”。
 - 面向边玩游戏边查看结果的场景，桌面窗口固定为 `880×600`，不可拖拽改变大小或宽高比例。
 - 顶部登录状态是公共区域：未登录时显示“未登录”和紧凑的登录按钮；登录后可显示头像、昵称和登录提示，不随页面切换消失。
-- 左侧增加社交化导航栏，包含“AI分析、聊天室、装备鉴赏、子霖商行、个人中心”五个入口。
+- 左侧增加社交化导航栏，包含“AI分析、聊天室、装备鉴赏、希联商行、个人中心”五个入口。
 - 当前采集与事件识别内容属于“AI分析”页面；其他四个入口暂时显示功能占位提示，为后续社交功能保留扩展位置。
 - AI分析页面左侧使用 `300×300` 的 1:1 正方形预览幕布，下面是“运行状态”；右侧依次展示“当前窗口 + 开始/暂停”、“采集状态”、游戏连接提示、遮挡提示和事件采集结果。
 - “采集状态”固定放在“当前窗口 + 开始/暂停”控制栏下方，包含“采集中、窗口被遮挡、未采集”三种状态；发生遮挡时会在“窗口被遮挡”后直接显示遮挡百分比。
@@ -321,7 +327,7 @@ EventMachine：完成时间和业务逻辑判断
 → 证据能否保存
 ```
 
-当前的 `RuleBasedPerception` 可以处理帧变化和配置的模板匹配，但不会凭空识别出“北俱芦洲”“导标旗”或“横扫千军”。
+当前的 `RuleBasedPerception` 可以处理帧变化、配置的模板匹配，以及 YOLO 装备属性浮窗检测。桌面端的“装备识别”入口支持直接上传/粘贴游戏完整截图：先由 YOLO 定位 `equipment_tooltip`，再把检测框裁剪给本地 RapidOCR 读取文字，最后解析为名称、类型、等级和属性并生成结果卡片。也就是说，完整截图识别不再把 OCR 当作全屏搜索器。
 
 ---
 
@@ -344,12 +350,18 @@ EventMachine：完成时间和业务逻辑判断
 - `PySide6`：Windows 桌面界面。
 - `windows-capture`：通过 Windows Graphics Capture 按窗口句柄采集画面。
 
+装备图片识别的可选依赖：
+
+- `ultralytics`：运行 YOLO 模型，定位完整截图中的装备属性浮窗。
+- `rapidocr`：本地中文 OCR，读取 YOLO 裁剪后的浮窗文字。
+- `onnxruntime`：RapidOCR 的 CPU 推理运行时。
+
 开发依赖：
 
 - `pytest`：自动化测试。
 - `ruff`：代码检查和格式化。
 
-YOLO、OCR、SQLite 等后续能力暂未作为当前版本的强制依赖，以避免在 MVP 阶段过早引入大量复杂组件。
+YOLO 训练权重不随仓库提交；手动“装备识别”功能需要安装 `equipment` extra，并将训练好的 `best.pt` 放到 `models/equipment_tooltip/best.pt`。
 
 ---
 
@@ -362,9 +374,11 @@ YOLO、OCR、SQLite 等后续能力暂未作为当前版本的强制依赖，以
 ```powershell
 cd C:\Users\李锐\Documents\hoyo-test
 uv sync --dev
+# 装备完整截图识别：YOLO + RapidOCR
+uv sync --dev --extra equipment
 ```
 
-该命令会根据 `pyproject.toml` 和 `uv.lock` 创建或更新虚拟环境，并安装运行及开发依赖。
+该命令会根据 `pyproject.toml` 和 `uv.lock` 创建或更新虚拟环境，并安装运行及开发依赖。装备识别额外安装 `ultralytics`、`rapidocr` 和 `onnxruntime`。
 
 ### 7.2 使用传统 venv
 
@@ -375,6 +389,8 @@ cd C:\Users\李锐\Documents\hoyo-test
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
+# 需要装备完整截图识别时安装 YOLO + 本地 OCR
+python -m pip install -e ".[equipment]"
 python -m pip install pytest ruff
 ```
 
@@ -505,6 +521,43 @@ uv run python -m hoyo_analyzer extract-frames `
 - 选取模板匹配素材。
 - 制作 YOLO/OCR 标注数据。
 - 分析误检和漏检。
+
+### 8.6 装备图片识别
+
+在“AI分析”页面点击“装备识别”，可以直接上传/粘贴游戏完整截图：
+
+1. 点击“选择图片”，选择 PNG、JPG、JPEG、BMP 或 WEBP 图片；
+2. 或者先复制图片，再点击“粘贴图片”，也可以在对话框中按 `Ctrl+V`；
+3. 点击“开始AI识别”；
+4. YOLO 先在完整截图中定位 `equipment_tooltip` 装备属性浮窗；
+5. 程序按检测框裁剪浮窗，再用 RapidOCR 读取名称、类型、等级和属性；
+6. 程序自动生成识别结果图片，并放入 `runtime/equipment/recognition_cards/`；
+7. 点击“保存识别图片”可以将结果卡片复制到任意位置。
+
+当前这条链路需要 YOLO 训练权重和本地中文 OCR。不要只把装备图标或背包主界面当作属性输入；完整截图是支持的，但必须保证属性浮窗在截图中清晰可见。模型尚未训练或未放置时，程序会明确提示，不会把全屏文字误当作装备属性。
+
+安装 YOLO + 本地中文 OCR（首次安装可能联网下载 Python 包和 OCR 模型）：
+
+```powershell
+cd C:\Users\李锐\Documents\hoyo-test
+.\.venv\Scripts\python.exe -m pip install -e ".[equipment]"
+```
+
+该 extra 包含 `ultralytics`、`rapidocr` 和 `onnxruntime`，适配当前项目的 Python 3.11+ 环境。训练完成后，将最佳权重复制到：
+
+```text
+models/equipment_tooltip/best.pt
+```
+
+输入图片、YOLO裁剪区域和自动生成的卡片分别保存到：
+
+```text
+runtime/equipment/recognition_inputs/   # 剪贴板图片副本
+runtime/equipment/detected_regions/     # YOLO定位后裁剪的属性浮窗，便于核对
+runtime/equipment/recognition_cards/    # 识别结果图片
+```
+
+识别链路为：`完整游戏截图 → YOLO定位 → ROI裁剪 → OCR → 装备属性解析 → 结果卡片`。后续可增加装备名称白名单、OCR纠错、手动校正和实时分析自动触发。
 
 ---
 
@@ -669,7 +722,10 @@ runtime/evidence/
 | `uv.lock` | uv 锁定的依赖版本，保证不同环境尽量使用一致的依赖 |
 | `.gitignore` | 忽略虚拟环境、缓存、运行时日志、录制视频和图片等本地文件 |
 | `configs/` | TOML 配置文件目录 |
+| `datasets/mhxy_ui_detection/` | 梦幻西游界面双类别 YOLO 数据集，包含 `equipment_tooltip` 和 `inventory_panel` |
 | `docs/` | 项目定义、技术架构、数据方案和路线图文档 |
+| `models/equipment_tooltip/` | 训练完成后的 YOLO 推理权重目录，正式权重文件名为 `best.pt` |
+| `scripts/` | YOLO 数据集划分和训练脚本 |
 | `src/` | Python 源代码目录 |
 | `tests/` | 自动化测试目录 |
 | `runtime/` | 程序运行时生成的日志、证据帧和调试帧，不纳入 Git |
@@ -687,10 +743,16 @@ runtime/evidence/
 | `sampler.py` | 抽帧策略和 `LatestFrameQueue` 有界最新帧队列 |
 | `realtime.py` | 实时分析主流程；组织采集线程、队列、抽帧、感知、状态机和输出 |
 | `roi.py` | 提供像素 ROI、相对比例 ROI 和安全裁剪函数 |
-| `perception.py` | 当前基础感知实现；包含帧变化检测和可选 OpenCV 模板匹配 |
+| `perception.py` | 当前基础感知实现；包含帧变化检测、可选 OpenCV 模板匹配和装备浮窗信号输出 |
+| `yolo_detector.py` | YOLO 一次推理检测背包面板和装备属性浮窗；分别输出候选框、置信度和稳定帧数 |
+| `equipment_detector.py` | 旧版 OpenCV 规则检测器，仅用于兼容和调试 |
+| `equipment_slots.py` | 根据背包标题模板和鼠标坐标定位左侧八个装备槽位；右侧道具栏不会通过门控 |
+| `equipment_region.py` | 使用 Ultralytics YOLO 在完整游戏截图中定位 `equipment_tooltip` 浮窗并返回检测框 |
+| `equipment_recognition.py` | 按 YOLO 检测框裁剪浮窗，调用本地 RapidOCR/Tesseract，并将文本解析为装备名称、类型、等级和属性 |
+| `equipment_dialog.py` | “装备识别”桌面弹窗；支持选图、剪贴板粘贴、后台识别、结果卡片生成和另存 |
 | `ocr.py` | OCR 接口协议、OCR 结果结构和当前的空 OCR 实现 `NullOcrEngine` |
 | `event_machine.py` | 时序状态机；对观察信号执行多帧确认、进入/退出事件、去重和冷却控制 |
-| `evidence.py` | 保存事件触发时的证据图像 |
+| `evidence.py` | 保存事件触发时的证据图像，以及装备属性浮窗裁剪图 |
 | `storage.py` | JSONL 事件写入、控制台输出和多个输出通道组合 |
 | `cli.py` | 命令行参数、离线/实时分析、窗口/设备枚举、抽帧和桌面入口 |
 | `gui.py` | PySide6 桌面 UI、左上角登录/采集状态、梦幻西游窗口过滤与自动启动、遮挡告警、实时预览、运行状态和后台分析线程 |
@@ -707,6 +769,11 @@ runtime/evidence/
 | `test_sampler.py` | 抽帧频率和有界队列丢弃旧帧行为 |
 | `test_roi.py` | ROI 越界裁剪和相对比例转换 |
 | `test_storage.py` | JSONL UTF-8 写入和控制台输出 |
+| `test_equipment_detector.py` | OpenCV 浮窗候选检测、连续帧稳定、消失重置和裁剪图保存 |
+| `test_equipment_slots.py` | 左侧装备槽位坐标缩放、鼠标悬停命中和右侧道具栏排除测试 |
+| `test_equipment_recognition.py` | OCR 文本解析、中文路径图片读取、无效图片和空结果测试 |
+| `test_equipment_yolo_recognition.py` | 验证完整截图先经过YOLO裁剪、YOLO漏检时不调用全图OCR |
+| `test_equipment_recognition_gui.py` | 装备识别入口按钮和选图/粘贴/识别对话框控件测试 |
 
 ### 11.4 `docs/` 文件
 
@@ -725,6 +792,7 @@ runtime/evidence/
 | [`docs/05-model-selection.md`](docs/05-model-selection.md) | 规则、模板、OCR、YOLO 和视觉大模型的选型建议 |
 | [`docs/06-data-schema.md`](docs/06-data-schema.md) | Observation、Event、JSONL、SQLite 和后续数据模型设计 |
 | [`docs/07-roadmap-and-mvp.md`](docs/07-roadmap-and-mvp.md) | MVP 路线图、阶段目标、验收标准和不建议过早做的事情 |
+| [`docs/08-equipment-tooltip-detection.md`](docs/08-equipment-tooltip-detection.md) | 装备属性浮窗的 YOLO 检测、手动 OCR 识别、数据集目录、标注和推理接入 |
 
 建议阅读顺序：
 
@@ -734,6 +802,7 @@ README.md
   → 02-architecture.md
   → 03-video-ingest-and-frame-extraction.md
   → 04-event-recognition.md
+  → 08-equipment-tooltip-detection.md
   → 05-model-selection.md
   → 06-data-schema.md
   → 07-roadmap-and-mvp.md
@@ -890,9 +959,9 @@ Windows Graphics Capture → NumPy/OpenCV帧 → 实时分析
 
 验收标准：同一段视频能够复现稳定的帧号、时间戳和证据图片。
 
-### 阶段 2：先做规则、模板和 OCR（3～7 天）
+### 阶段 2：模板、OCR 与 YOLO 感知（3～7 天）
 
-第一版不急于训练 YOLO，先使用稳定、可解释的方法：
+装备属性浮窗已经切换为 YOLO；OpenCV 规则检测器仅作为兼容和调试方案保留：
 
 - 游戏主界面模板。
 - 背包面板模板。
@@ -904,9 +973,9 @@ Windows Graphics Capture → NumPy/OpenCV帧 → 实时分析
 
 验收标准：能够在短视频上输出游戏打开、地图变化、背包打开和战斗开始等候选事件。
 
-### 阶段 3：收集数据并训练轻量 YOLO（1～2 周）
+### 阶段 3：收集数据并训练轻量 YOLO（当前进行中，约 1～2 周）
 
-建议优先标注区域和目标，而不是把所有文字和物品名称都做成 YOLO 类别：
+当前数据集已首先标注两个类别；不要把每个装备名称做成 YOLO 类别：
 
 ```text
 inventory_panel

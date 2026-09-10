@@ -35,3 +35,55 @@ def test_multiscale_template_signal_detects_scaled_template(tmp_path):
 
     assert result.get("inventory_open")["active"] is True
     assert result.get("inventory_open")["score"] >= 0.9
+    bbox = result.get("inventory_open")["bbox"]
+    assert bbox[2] - bbox[0] == 36
+    assert bbox[3] - bbox[1] == 18
+    assert abs(bbox[0] - 40) <= 1
+    assert abs(bbox[1] - 25) <= 1
+
+
+class AlwaysActiveTooltipDetector:
+    def update(self, _image):
+        return {"active": True, "candidate": True, "score": 0.95, "bbox": [10, 10, 50, 60]}
+
+
+def test_tooltip_event_signal_requires_cursor_over_equipment_slot(monkeypatch):
+    perception = RuleBasedPerception(equipment_detector=AlwaysActiveTooltipDetector())
+    monkeypatch.setattr(
+        perception,
+        "_template_signals",
+        lambda _image: {"inventory_open": {"active": True, "bbox": [100, 50, 770, 77]}},
+    )
+    image = np.zeros((600, 800, 3), dtype=np.uint8)
+
+    left_slot = perception.observe(FramePacket(0, 0, image, metadata={"cursor_frame_position": (130, 140)}))
+    right_items = perception.observe(FramePacket(1, 200, image, metadata={"cursor_frame_position": (520, 140)}))
+
+    assert left_slot.get("equipment_slot_hover")["active"] is True
+    assert left_slot.get("equipment_tooltip")["active"] is True
+    assert left_slot.get("equipment_tooltip")["equipment_slot"] == "左上"
+    assert right_items.get("equipment_slot_hover")["active"] is False
+    assert right_items.get("equipment_tooltip")["raw_active"] is True
+    assert right_items.get("equipment_tooltip")["active"] is False
+
+
+class MultiClassTooltipDetector:
+    def update(self, _image):
+        return {
+            "active": False,
+            "candidate": False,
+            "detections": {
+                "equipment_tooltip": {"active": False, "candidate": False},
+                "inventory_panel": {"active": True, "candidate": True, "bbox": [100, 50, 770, 570]},
+            },
+        }
+
+
+def test_yolo_inventory_panel_signal_is_used_for_slot_gate():
+    perception = RuleBasedPerception(equipment_detector=MultiClassTooltipDetector())
+    image = np.zeros((600, 800, 3), dtype=np.uint8)
+
+    observation = perception.observe(FramePacket(0, 0, image, metadata={"cursor_frame_position": (130, 140)}))
+
+    assert observation.get("inventory_open")["active"] is True
+    assert observation.get("equipment_slot_hover")["active"] is True

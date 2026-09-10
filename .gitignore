@@ -13,6 +13,7 @@ runtime/
 output/
 recordings/
 frames/
+runs/
 *.mp4
 *.mkv
 *.avi
@@ -21,6 +22,21 @@ frames/
 *.jpeg
 *.png
 *.webp
+
+# YOLO dataset images and trained weights can be large/private.
+datasets/**/inbox/*
+!datasets/**/inbox/.gitkeep
+datasets/**/images/*
+!datasets/**/images/train/
+datasets/**/images/train/*
+!datasets/**/images/train/.gitkeep
+!datasets/**/images/val/
+datasets/**/images/val/*
+!datasets/**/images/val/.gitkeep
+!datasets/**/images/test/
+datasets/**/images/test/*
+!datasets/**/images/test/.gitkeep
+models/**/*.pt
 
 # Local secrets and settings
 .env

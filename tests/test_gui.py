@@ -164,7 +164,7 @@ def test_fixed_product_layout_and_square_preview(monkeypatch):
     window.show()
     app.processEvents()
     try:
-        assert window.windowTitle() == "梦幻子霖AI分析工具"
+        assert window.windowTitle() == "梦幻西游-希联文超助手"
         assert (window.width(), window.height()) == (WINDOW_WIDTH, WINDOW_HEIGHT)
         assert (window.minimumWidth(), window.minimumHeight()) == (WINDOW_WIDTH, WINDOW_HEIGHT)
         assert (window.maximumWidth(), window.maximumHeight()) == (WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -221,7 +221,7 @@ def test_social_navigation_and_ai_analysis_default_page(monkeypatch):
     window.show()
     app.processEvents()
     try:
-        assert list(window.nav_buttons) == ["AI分析", "聊天室", "装备鉴赏", "子霖商行", "个人中心"]
+        assert list(window.nav_buttons) == ["AI分析", "聊天室", "装备鉴赏", "希联商行", "个人中心"]
         assert window.nav_buttons["AI分析"].isChecked()
         assert window.ai_content.isVisibleTo(window)
 

@@ -18,6 +18,8 @@ import cv2
 from .capture import make_source
 from .cli import _make_perception, _make_sink
 from .config import AppConfig, load_config
+from .equipment_dialog import EquipmentRecognitionDialog
+from .equipment_recognition import EquipmentRecognitionResult
 from .event_machine import EventMachine
 from .evidence import EvidenceWriter
 from .models import Event
@@ -61,6 +63,7 @@ WGC_SOURCE = "windows-graphics-capture"
 OCCLUSION_WARNING_RATIO = 0.01
 WINDOW_WIDTH = 880
 WINDOW_HEIGHT = 600
+APP_DISPLAY_NAME = "梦幻西游-希联文超助手"
 
 
 class RealtimeWorker(QObject):
@@ -222,7 +225,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, config_path: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("梦幻子霖AI分析工具")
+        self.setWindowTitle(APP_DISPLAY_NAME)
         # 面向边玩游戏边查看结果的固定桌面布局，避免用户误拖拽导致比例变化。
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
 
@@ -305,7 +308,7 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 font-weight: 700;
             }
-            QWidget#captureStatusCard, QWidget#connectionCard {
+            QWidget#captureStatusCard, QWidget#connectionCard, QWidget#equipmentRecognitionBar {
                 background: #ffffff;
                 border: 1px solid #e4eaf3;
                 border-radius: 12px;
@@ -323,6 +326,8 @@ class MainWindow(QMainWindow):
             QPushButton#pauseButton { background: #ffd166; color: #6b4e00; }
             QPushButton#pauseButton:hover { background: #f4bd3e; }
             QPushButton#pauseButton:disabled { background: #e7eaf0; color: #9aa5b8; }
+            QPushButton#equipmentRecognitionButton { background: #ff8fab; color: #ffffff; min-height: 30px; }
+            QPushButton#equipmentRecognitionButton:hover { background: #f06f95; }
             QPushButton#loginButton {
                 min-height: 24px; max-height: 24px; min-width: 0px; max-width: 44px;
                 padding: 0px 2px; border-radius: 8px;
@@ -398,7 +403,7 @@ class MainWindow(QMainWindow):
         brand = QVBoxLayout()
         brand.setContentsMargins(0, 0, 0, 0)
         brand.setSpacing(0)
-        brand_title = QLabel("梦幻子霖AI分析工具")
+        brand_title = QLabel(APP_DISPLAY_NAME)
         brand_title.setObjectName("brandTitle")
         brand_subtitle = QLabel("边玩边记录 · 和好友一起分享每个精彩瞬间 ✨")
         brand_subtitle.setObjectName("brandSubtitle")
@@ -422,7 +427,7 @@ class MainWindow(QMainWindow):
         nav_title.setObjectName("navTitle")
         nav_layout.addWidget(nav_title)
         self.nav_buttons: dict[str, QPushButton] = {}
-        for page_name in ("AI分析", "聊天室", "装备鉴赏", "子霖商行", "个人中心"):
+        for page_name in ("AI分析", "聊天室", "装备鉴赏", "希联商行", "个人中心"):
             button = QPushButton(page_name)
             button.setObjectName("navButton")
             button.setCheckable(True)
@@ -558,6 +563,21 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.controls)
         right_layout.addWidget(self.capture_status_card)
         right_layout.addWidget(self.game_status_banner)
+
+        self.equipment_recognition_bar = QWidget()
+        self.equipment_recognition_bar.setObjectName("equipmentRecognitionBar")
+        recognition_layout = QHBoxLayout(self.equipment_recognition_bar)
+        recognition_layout.setContentsMargins(8, 4, 8, 4)
+        recognition_layout.setSpacing(8)
+        recognition_hint = QLabel("上传或粘贴装备属性图，识别后生成分享图片")
+        recognition_hint.setStyleSheet("color:#7c8aa5;font-size:11px;")
+        recognition_layout.addWidget(recognition_hint, 1)
+        self.equipment_recognition_button = QPushButton("装备识别")
+        self.equipment_recognition_button.setObjectName("equipmentRecognitionButton")
+        self.equipment_recognition_button.setToolTip("上传或粘贴装备图片，识别名称、等级和属性")
+        self.equipment_recognition_button.clicked.connect(self._open_equipment_recognition)
+        recognition_layout.addWidget(self.equipment_recognition_button)
+        right_layout.addWidget(self.equipment_recognition_bar)
         right_layout.addWidget(self.events, 1)
 
         content_grid.addWidget(left_panel, 0, 0)
@@ -620,11 +640,25 @@ class MainWindow(QMainWindow):
         self.page_status_label.show()
 
     @Slot()
+    def _open_equipment_recognition(self) -> None:
+        """Open the manual equipment-image recognition workflow."""
+        dialog = EquipmentRecognitionDialog(PROJECT_ROOT, self)
+        dialog.recognition_finished.connect(self._on_equipment_recognition_finished)
+        dialog.exec()
+
+    @Slot(object)
+    def _on_equipment_recognition_finished(self, result: EquipmentRecognitionResult) -> None:
+        status = result.message
+        if result.card_path:
+            status = f"{status} 已生成识别图片：{result.card_path}"
+        self.log.appendPlainText(f"装备识别：{status}")
+
+    @Slot()
     def _on_login_clicked(self) -> None:
         """Keep the account entry point visible until the account service is connected."""
         QMessageBox.information(
             self,
-            "登录梦幻子霖",
+            f"登录{APP_DISPLAY_NAME}",
             "登录功能即将上线。登录后可保存个人记录，并与好友分享游戏事件。",
         )
 
@@ -964,11 +998,11 @@ class MainWindow(QMainWindow):
     def _on_event(self, event: Event) -> None:
         row = self.events.rowCount()
         self.events.insertRow(row)
-        values = [event.timestamp, event.type, f"{event.confidence:.2f}", str(event.payload)]
+        values = [event.display_time, event.display_name, f"{event.confidence:.2f}", str(event.payload)]
         for column, value in enumerate(values):
             self.events.setItem(row, column, QTableWidgetItem(value))
         self.events.scrollToBottom()
-        self.log.appendPlainText(f"{event.timestamp} {event.type} {event.payload}")
+        self.log.appendPlainText(f"{event.display_time} {event.display_name} {event.payload}")
         self.output_label.setText("正在输出事件")
 
     def _refresh_status(self) -> None:

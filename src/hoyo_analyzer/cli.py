@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .capture import list_video_devices, make_source
 from .config import AppConfig, load_config
+from .equipment_detector import OpenCVTooltipDetector, TooltipDetectorConfig
 from .event_machine import EventMachine
 from .evidence import EvidenceWriter
 from .models import FramePacket
@@ -16,10 +17,13 @@ from .realtime import RealtimeAnalyzer
 from .sampler import AdaptiveSampler, SamplingProfile
 from .storage import CompositeEventSink, ConsoleEventSink, JsonlEventSink
 from .wgc import list_capturable_windows
+from .yolo_detector import YOLOTooltipDetector
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hoyo-analyzer", description="Windows 游戏窗口实时视频行为分析 MVP")
+    parser = argparse.ArgumentParser(
+        prog="hoyo-analyzer", description="梦幻西游-希联文超助手：Windows 游戏窗口实时视频行为分析 MVP"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("analyze-video", help="离线回放分析已录制的视频")
     p.add_argument("input", type=Path)
@@ -61,12 +65,47 @@ def _make_sampler(config: AppConfig, fps: float | None = None) -> AdaptiveSample
     return AdaptiveSampler(profile)
 
 
+def _resolve_project_path(value: str) -> Path:
+    """Resolve project-relative model/template paths without changing old configs."""
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    project_candidate = Path(__file__).resolve().parents[2] / candidate
+    return project_candidate if project_candidate.exists() else candidate
+
+
 def _make_perception(config: AppConfig) -> RuleBasedPerception:
     templates = [
-        TemplateSpec(signal, path, threshold=0.78, multiscale=signal == "inventory_open")
+        TemplateSpec(signal, str(_resolve_project_path(path)), threshold=0.78, multiscale=signal == "inventory_open")
         for signal, path in config.templates.items()
     ]
-    return RuleBasedPerception(templates)
+    equipment_detector = None
+    if config.equipment.enabled:
+        backend = config.equipment.backend.casefold().strip()
+        if backend == "opencv":
+            equipment_detector = OpenCVTooltipDetector(
+                TooltipDetectorConfig(
+                    min_score=config.equipment.min_score,
+                    stable_frames=config.equipment.stable_frames,
+                    require_title=config.equipment.require_title,
+                    min_title_ratio=config.equipment.min_title_ratio,
+                    min_dark_ratio=config.equipment.min_dark_ratio,
+                    max_bright_ratio=config.equipment.max_bright_ratio,
+                    max_color_ratio=config.equipment.max_color_ratio,
+                    min_border_score=config.equipment.min_border_score,
+                    min_text_lines=config.equipment.min_text_lines,
+                    allow_generic_fallback=config.equipment.allow_generic_fallback,
+                )
+            )
+        else:
+            equipment_detector = YOLOTooltipDetector(
+                model_path=_resolve_project_path(config.equipment.model_path),
+                confidence=config.equipment.confidence,
+                image_size=config.equipment.image_size,
+                device=config.equipment.device,
+                stable_frames=config.equipment.stable_frames,
+            )
+    return RuleBasedPerception(templates, equipment_detector=equipment_detector)
 
 
 def _make_sink(config: AppConfig) -> CompositeEventSink:
@@ -90,6 +129,7 @@ def analyze_packets(packets: Iterable[FramePacket], config: AppConfig, fps: floa
             last = observation
             for event in machine.update(observation):
                 evidence.save(event, packet)
+                evidence.save_equipment_tooltip(event, packet, config.equipment.output_directory)
                 sink.write(event)
         if last is not None:
             for event in machine.close(last):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -13,6 +13,40 @@ import numpy as np
 class EventStatus(StrEnum):
     CONFIRMED = "confirmed"
     UPDATED = "updated"
+
+
+# A fixed UTC+08:00 timezone is sufficient for Beijing time and avoids making
+# the desktop app depend on the optional system ``tzdata`` package. Mainland
+# China does not observe daylight-saving time.
+BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+EVENT_NAMES_ZH: dict[str, str] = {
+    "application_opened": "游戏画面已接入",
+    "screen_changed": "画面发生变化",
+    "inventory_opened": "打开背包",
+    "inventory_closed": "关闭背包",
+    "equipment_tooltip_opened": "显示装备属性",
+    "equipment_tooltip_closed": "装备属性消失",
+    "battle_started": "进入战斗",
+    "battle_ended": "战斗结束",
+    "map_entered": "进入地图",
+    "inventory_items_read": "读取背包物品",
+    "skill_used": "使用技能",
+    "damage_dealt": "造成伤害",
+}
+
+
+def event_name_zh(event_type: str) -> str:
+    """Return a player-facing Chinese label while keeping the stable code."""
+    return EVENT_NAMES_ZH.get(event_type, event_type)
+
+
+def format_beijing_time(value: datetime | None = None) -> str:
+    """Format the current/received time as Beijing local time in 24-hour form."""
+    current = value or datetime.now(BEIJING_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=BEIJING_TZ)
+    return current.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @dataclass(slots=True)
@@ -59,10 +93,21 @@ class Event:
     evidence_path: str | None = None
     source: str = "state-machine"
     pipeline_version: str = "0.1.0"
+    beijing_time: str = ""
 
     @property
     def timestamp(self) -> str:
+        """Elapsed source time, retained for replay/cooldown calculations."""
         return format_timestamp(self.timestamp_ms)
+
+    @property
+    def display_time(self) -> str:
+        """Player-facing Beijing time in 24-hour format."""
+        return self.beijing_time or format_beijing_time()
+
+    @property
+    def display_name(self) -> str:
+        return event_name_zh(self.type)
 
 
 @dataclass(slots=True)

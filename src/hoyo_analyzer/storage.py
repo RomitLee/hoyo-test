@@ -26,8 +26,10 @@ def event_to_dict(event: Event) -> dict[str, Any]:
     return {
         "event_id": event.event_id,
         "timestamp_ms": event.timestamp_ms,
-        "timestamp": event.timestamp,
-        "type": event.type,
+        "timestamp": event.display_time,
+        "elapsed_timestamp": event.timestamp,
+        "type": event.display_name,
+        "event_type": event.type,
         "status": event.status.value,
         "confidence": round(float(event.confidence), 4),
         "payload": event.payload,
@@ -59,7 +61,7 @@ class ConsoleEventSink:
     def write(self, event: Event) -> None:
         payload = ", ".join(f"{k}={v}" for k, v in event.payload.items())
         suffix = f" ({payload})" if payload else ""
-        print(f"{event.timestamp} {event.type}{suffix}", file=self.stream)
+        print(f"{event.display_time} {event.display_name}{suffix}", file=self.stream)
 
     def close(self) -> None:
         pass

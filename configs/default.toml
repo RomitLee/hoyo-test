@@ -17,6 +17,17 @@ pre_buffer_ms = 2000
 post_buffer_ms = 3000
 directory = "runtime/evidence"
 
+[equipment]
+# 正式界面检测使用双类别 YOLO：equipment_tooltip + inventory_panel。OpenCV 规则检测器仅保留为兼容/调试后端。
+enabled = true
+backend = "yolo"
+model_path = "models/equipment_tooltip/best.pt"
+confidence = 0.65
+image_size = 640
+device = "auto"
+stable_frames = 3
+output_directory = "runtime/equipment/tooltips"
+
 [output]
 event_log = "runtime/events/events.jsonl"
 console = true

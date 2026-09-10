@@ -113,6 +113,7 @@ class RealtimeAnalyzer:
             self.on_observation(observation)
         for event in self.machine.update(observation):
             self.evidence.save(event, packet)
+            self.evidence.save_equipment_tooltip(event, packet, self.config.equipment.output_directory)
             self.sink.write(event)
             if self.on_event is not None:
                 self.on_event(event)

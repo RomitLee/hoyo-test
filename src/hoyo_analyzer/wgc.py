@@ -99,6 +99,31 @@ def get_window_title(hwnd: int) -> str:
     return buffer.value.strip()
 
 
+def get_cursor_position_in_frame(hwnd: int, frame_width: int, frame_height: int) -> tuple[int, int] | None:
+    """Map the system cursor to the captured client-frame coordinate system."""
+    if not is_window_available(hwnd) or frame_width <= 0 or frame_height <= 0:
+        return None
+    user32 = ctypes.windll.user32
+    point = wintypes.POINT()
+    client_rect = wintypes.RECT()
+    if not user32.GetCursorPos(byref(point)):
+        return None
+    if not user32.ScreenToClient(wintypes.HWND(hwnd), byref(point)):
+        return None
+    if not user32.GetClientRect(wintypes.HWND(hwnd), byref(client_rect)):
+        return None
+    client_width = int(client_rect.right - client_rect.left)
+    client_height = int(client_rect.bottom - client_rect.top)
+    if client_width <= 0 or client_height <= 0:
+        return None
+    if point.x < 0 or point.y < 0 or point.x >= client_width or point.y >= client_height:
+        return None
+    return (
+        min(frame_width - 1, max(0, round(point.x * frame_width / client_width))),
+        min(frame_height - 1, max(0, round(point.y * frame_height / client_height))),
+    )
+
+
 def _window_bounds(hwnd: int) -> tuple[int, int, int, int] | None:
     """Return visible frame bounds, excluding the invisible DWM resize border."""
     if not is_window_available(hwnd):
@@ -314,14 +339,14 @@ class WindowsGraphicsCaptureSource:
             max(1, int(minimum_update_interval_ms)) if minimum_update_interval_ms is not None else None
         )
         self.first_frame_timeout_seconds = max(1.0, float(first_frame_timeout_seconds))
-        self._frames: Queue[tuple[np.ndarray, int] | object] = Queue(maxsize=max(1, queue_size))
+        self._frames: Queue[tuple[np.ndarray, int, tuple[int, int] | None] | object] = Queue(maxsize=max(1, queue_size))
         self._stop_requested = Event()
         self._capture_closed = Event()
         self._capture: Any = None
         self._control: Any = None
         self._started = False
 
-    def _offer_latest(self, item: tuple[np.ndarray, int] | object) -> None:
+    def _offer_latest(self, item: tuple[np.ndarray, int, tuple[int, int] | None] | object) -> None:
         try:
             self._frames.put_nowait(item)
             return
@@ -343,7 +368,9 @@ class WindowsGraphicsCaptureSource:
         # windows-capture exposes a zero-copy BGRA view whose native owner is only
         # guaranteed during the callback, so copy before crossing thread boundaries.
         image = frame.frame_buffer[:, :, :3].copy()
-        self._offer_latest((image, int(monotonic() * 1000)))
+        height, width = image.shape[:2]
+        cursor_position = get_cursor_position_in_frame(self.window_hwnd, width, height)
+        self._offer_latest((image, int(monotonic() * 1000), cursor_position))
 
     def _on_closed(self) -> None:
         self._capture_closed.set()
@@ -406,7 +433,7 @@ class WindowsGraphicsCaptureSource:
                         raise RuntimeError("目标游戏窗口或 Windows Graphics Capture 会话已经关闭")
                     break
 
-                image, captured_at_ms = item
+                image, captured_at_ms, cursor_position = item
                 timestamp_ms = max(0, captured_at_ms - int(started_at * 1000))
                 yield FramePacket(
                     frame_index,
@@ -417,6 +444,7 @@ class WindowsGraphicsCaptureSource:
                         "capture": "windows-graphics-capture",
                         "window_hwnd": self.window_hwnd,
                         "window_title": title,
+                        "cursor_frame_position": cursor_position,
                     },
                 )
                 frame_index += 1

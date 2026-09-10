@@ -72,6 +72,7 @@ def test_wgc_allows_minimized_window_and_consumes_background_frame(monkeypatch):
     monkeypatch.setattr("hoyo_analyzer.wgc.is_window_available", lambda _hwnd: True)
     monkeypatch.setattr("hoyo_analyzer.wgc.is_window_minimized", lambda _hwnd: True)
     monkeypatch.setattr("hoyo_analyzer.wgc.get_window_title", lambda _hwnd: "梦幻西游")
+    monkeypatch.setattr("hoyo_analyzer.wgc.get_cursor_position_in_frame", lambda _hwnd, _width, _height: (4, 5))
 
     source = WindowsGraphicsCaptureSource(0x1234)
     iterator = iter(source)
@@ -79,5 +80,6 @@ def test_wgc_allows_minimized_window_and_consumes_background_frame(monkeypatch):
         packet = next(iterator)
         assert packet.image.shape == (12, 16, 3)
         assert packet.metadata["window_title"] == "梦幻西游"
+        assert packet.metadata["cursor_frame_position"] == (4, 5)
     finally:
         iterator.close()
