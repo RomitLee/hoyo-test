@@ -1,1117 +1,214 @@
-# 梦幻西游-希联文超助手
+# 梦幻西游背包监控
 
-> 面向《梦幻西游》游戏画面的实时视频理解与数据化记录项目。
->
-> 当前版本是一个**只读、实时分析 MVP**：默认通过 Windows Graphics Capture 直接采集指定游戏窗口，无需额外视频采集软件；随后将窗口画面转换为 NumPy/OpenCV 帧，执行抽帧与基础视觉分析，并把“打开背包、进入战斗”等候选行为转换成带时间戳的结构化事件日志。
+这是一个面向 Windows 的《梦幻西游》多窗口背包监控系统。每台从机最多监控 8 个游戏窗口，本地判断背包是否打开、是否已满，并可通过 HTTPS 云端中转把状态和告警发送到主机。
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
-[![Qt](https://img.shields.io/badge/PySide6-Qt-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
+当前桌面产品入口只保留背包监控，不展示装备识别、OCR、YOLO、聊天室、商行或个人中心等历史实验功能。核心检测使用 OpenCV，在本机完成，不上传游戏截图。
 
-> README 最近更新：2026-09-10。当前开发重点是“完整游戏截图 → YOLO 定位装备属性浮窗 → OCR 读取属性 → 生成结果卡片”。
-
----
-
-## 目录
-
-- [1. 项目背景](#1-项目背景)
-- [2. 要做的事情](#2-要做的事情)
-- [3. 当前范围与非目标](#3-当前范围与非目标)
-- [4. 总体技术方案](#4-总体技术方案)
-- [5. 当前实现状态](#5-当前实现状态)
-- [6. 环境要求](#6-环境要求)
-- [7. 安装](#7-安装)
-- [8. 使用方式](#8-使用方式)
-  - [8.6 装备图片识别](#86-装备图片识别)
-- [9. 配置文件](#9-配置文件)
-- [10. 输出数据](#10-输出数据)
-- [11. 项目文件说明](#11-项目文件说明)
-- [12. 文档目录说明](#12-文档目录说明)
-- [13. 开发与测试](#13-开发与测试)
-- [14. 常见问题](#14-常见问题)
-- [15. 后续规划](#15-后续规划)
-- [16. 贡献与开发原则](#16-贡献与开发原则)
-
----
-
-## 1. 项目背景
-
-在游戏研究、直播复盘、操作统计、训练数据制作和自动化分析场景中，仅仅保存游戏视频并不方便查询。例如，用户可能希望知道：
-
-- 什么时候启动了游戏？
-- 什么时候进入了某个地图？
-- 什么时候打开了背包？
-- 背包里有哪些物品？
-- 什么时候进入战斗？
-- 使用了什么技能？
-- 造成了多少伤害？
-
-传统做法是人工观看录像并记录，成本高、效率低，也难以形成可检索的数据。本项目希望建立一条从**游戏画面到结构化事件数据**的通用技术链路：
-
-```text
-游戏画面
-  → 视频采集
-  → 实时抽帧
-  → ROI/模板/检测/OCR
-  → 观察结果
-  → 时序状态机
-  → 结构化事件
-  → JSONL/SQLite/报表
-```
-
-代码目录、Python 包和 Git 仓库中的 `hoyo` 是早期项目遗留的内部技术名称；软件对外名称已经统一为“梦幻西游-希联文超助手”。它不代表本项目依赖某个名为 Hoyo 的商业模型或服务。本项目当前围绕《梦幻西游》的游戏视频分析场景设计，但核心代码尽量保持通用，后续可以扩展到其他游戏或桌面应用。
-
----
-
-## 2. 要做的事情
-
-### 2.1 目标输入
-
-项目可以接收以下输入：
-
-1. **Windows Graphics Capture 游戏窗口**：当前唯一的桌面实时采集方案，直接按窗口句柄读取梦幻西游画面。
-2. **普通摄像头或 HDMI 采集卡设备**：保留为底层 CLI/未来双机方案的兼容输入，不属于当前桌面 MVP 主链路。
-3. **已经录制的视频文件**：用于离线回放、调试和制作训练数据。
-
-典型的单机 MVP 链路如下：
-
-```text
-梦幻西游窗口（HWND）
-  → Windows Graphics Capture
-  → BGRA GPU采集帧
-  → BGR NumPy数组
-  → FramePacket
-  → 有界最新帧队列
-  → 自适应抽帧
-  → 感知模块
-  → 事件状态机
-  → 实时界面、控制台和 JSONL
-```
-
-### 2.2 目标输出
-
-输出不是“每一帧一条描述”，而是经过确认、去重和状态转换后的事件。例如：
-
-```json
-{
-  "event_id": "evt_000001",
-  "timestamp_ms": 192000,
-  "timestamp": "00:03:12.000",
-  "type": "map_entered",
-  "status": "confirmed",
-  "confidence": 0.96,
-  "payload": {
-    "map_name": "北俱芦洲"
-  },
-  "evidence_frame_index": 5760,
-  "evidence_path": "runtime/evidence/000000192000_evt_000001_map_entered.jpg",
-  "source": "state-machine",
-  "pipeline_version": "0.1.0"
-}
-```
-
-### 2.3 当前 MVP 能输出什么
-
-当前已经接入 YOLO 感知链路，但仓库不包含训练好的《梦幻西游》权重，也没有默认中文 OCR 和完整游戏词典。因此它仍然**不能仅凭当前模型准确识别“北俱芦洲”“背包物品”“横扫千军”或“伤害 12445”**。当前先提供两类可验证的事件：
-
-- `application_opened`：采集到有效游戏画面并连续确认后产生。
-- `screen_changed`：画面发生明显变化并连续确认后产生，payload 中包含 `change_score`。打开背包、进入战斗等操作通常会触发此事件，但它目前只是“画面变化”，不是语义识别。
-- 手动装备图片识别：上传或粘贴完整游戏截图，使用 YOLO 定位装备浮窗，然后由 RapidOCR 读取名称、等级、类型和属性。该能力需要自行训练并放置 `best.pt`。
-
-事件会同时出现在右侧事件列表、底部运行动态、控制台（开启 `output.console` 时）以及：
-
-```text
-runtime/events/events.jsonl
-```
-
-实时链路要稳定输出 `inventory_opened`、`battle_started`、`map_entered`、`skill_used` 和 `damage_dealt`，仍需继续训练 YOLO、完善各类 ROI/OCR 与模板检测，并把识别结果填入 `Observation`，再由事件状态机确认。
-
-### 2.4 计划识别的游戏行为
-
-| 行为 | 计划使用的技术 | 当前状态 |
-|---|---|---|
-| 游戏已打开 | 有效帧接入 + 场景检测/模板匹配 | MVP 已可输出 `application_opened` |
-| 进入地图 | 地图名称 ROI + OCR + 状态变化 | 待接入中文 OCR |
-| 画面发生明显变化 | 帧差分 + 时序确认 | MVP 已可输出 `screen_changed`，用于验证链路 |
-| 打开背包 | YOLO `inventory_panel` + 模板回退 | 已接入双类别 YOLO，训练权重放入 `models/equipment_tooltip/best.pt` 后生效 |
-| 背包物品 | 物品格定位 + OCR/图标分类 | 待开发 |
-| 切入战斗 | 战斗 UI 检测 + 多帧确认 | 已有状态机规则 |
-| 使用技能 | 技能区域变化 + 技能名 OCR/图标分类 | 待开发 |
-| 伤害数字 | 伤害数字 ROI + OCR + 时间关联 | 待开发 |
-| 任务流程 | 多个事件组合成任务状态机 | 后续阶段开发 |
-
----
-
-## 3. 当前范围与非目标
-
-### 3.1 当前范围
-
-当前项目优先解决以下问题：
-
-- 在 Windows 上稳定接收实时视频。
-- 将视频帧转换为统一的 `FramePacket`。
-- 通过时间戳进行抽帧，避免每一帧都执行高成本识别。
-- 在采集速度和分析速度不一致时控制队列长度，避免延迟无限累积。
-- 将模板匹配、帧变化和未来的 YOLO/OCR 结果统一为 `Observation`。
-- 通过连续帧确认、冷却时间和状态转换生成事件。
-- 将事件实时输出到桌面 UI、控制台和 JSONL 文件。
-- 保存事件对应的证据帧，便于回放和纠错。
-
-### 3.2 当前非目标
-
-当前版本明确不做以下事情：
-
-- 不读取游戏进程内存。
-- 不向游戏进程注入 DLL 或修改游戏数据。
-- 不模拟键盘、鼠标或游戏内操作。
-- 不自动领取任务、移动角色、战斗或执行交易。
-- 不承诺当前版本能够准确识别所有地图、物品、技能和伤害数字。
-- 不在每一帧调用视觉大模型 API。
-- 不把整个游戏视频直接交给大模型，让大模型自行完成所有识别。
-
-后续如需研究自动操作，应仅在自建模拟界面、测试环境或明确授权的场景中进行，并单独设计动作白名单、暂停机制、回滚和安全边界。
-
----
-
-## 4. 总体技术方案
-
-### 4.1 模块化数据流
+## 系统组成
 
 ```mermaid
 flowchart LR
-    A[游戏窗口 HWND] --> B[Windows Graphics Capture]
-    A --> C[Windows Graphics Capture/采集卡/视频文件输入]
-    B --> D[BGR NumPy Frame]
-    C --> D
-    D --> E[FramePacket]
-    E --> F[LatestFrameQueue]
-    F --> G[AdaptiveSampler]
-    G --> H[ROI 与图像预处理]
-    H --> I[模板匹配/帧变化]
-    H --> J[YOLO 目标定位]
-    H --> K[OCR 文字识别]
-    I --> L[Observation 融合]
-    J --> L
-    K --> L
-    L --> M[EventMachine]
-    M --> N[Event]
-    N --> O[JSONL/控制台]
-    N --> P[证据帧]
-    N --> Q[桌面 UI]
+    S[从机程序<br/>窗口捕获与背包检测] -->|HTTPS 心跳、状态、告警| R[云端中转服务<br/>FastAPI + SQLite + Caddy]
+    M[主机程序<br/>从机状态与告警记录] -->|HTTPS 查询、确认| R
 ```
 
-### 4.2 观察、状态和事件三层模型
+- **从机程序**：运行在游戏电脑上，负责最多 8 个窗口的捕获、检测和本地告警；断网时仍可独立工作。
+- **云端中转服务**：保存设备心跳、最新窗口状态和告警记录，不保存游戏截图。
+- **主机程序**：展示所有从机窗口的最新状态，接收告警并标记为已处理。
 
-项目不应该把“某一帧看到了一个文字”直接当作业务事件，而是分为三层：
+## 当前能力
 
-#### Observation：单帧观察结果
+- 手动添加 0～8 个标题包含“梦幻西游 ONLINE”的窗口，拦截其他程序窗口。
+- 从窗口标题解析二级区名、角色名和角色 ID。
+- 检测背包未打开、未满、接近满、已满和被游戏界面遮挡。
+- 检测 Windows 窗口最小化及遮挡比例。
+- 所有异常连续保持约 5 秒后才告警，减少游戏临时提示造成的误报。
+- 支持暂停/恢复监控、后台监控以及右下角持久告警弹窗。
+- 支持仅弹窗或弹窗并循环播放声音，用户确认后才停止。
+- 从机每 5 秒上报状态；主机保留未处理和已处理告警记录。
 
-由视觉算法直接产生，例如：
+## 程序会判断什么
 
-```python
-{
-    "battle_active": True,
-    "map_name": "北俱芦洲",
-    "damage_amount": 12445,
-}
-```
+- `背包未打开`：画面中没有检测到完整背包，提醒员工打开背包。
+- `背包未满`：背包中仍有空格。
+- `背包接近满`：只剩很少的空格。
+- `背包容量`：默认在 20 个格子全部占用时警告，也可以设置为剩余 1～20 格时提前警告。
+- `背包被遮挡，无法检测`：背包打开但被聊天、属性或其他界面遮挡，提醒员工处理。
+- `检测已暂停`：游戏窗口被最小化；恢复窗口后自动继续，最小化期间不会沿用旧画面更新背包结论。
+- `窗口遮挡`：每 2 秒根据 Windows 窗口层级和重叠面积计算一次，在对应的窗口输出中显示遮挡百分比和最小化状态，不展示遮挡来源。
 
-#### State：经过时序确认的当前状态
+主界面固定为 800×600，减少对游戏窗口的遮挡。程序每 3 秒重新扫描一次窗口，最多同时监控 8 个游戏窗口。程序启动时保持 0 个监控窗口，必须点击顶部的“增加窗口”按钮，手动选择包含正确账号信息的游戏窗口。界面不再设置重复的“已捕获窗口”区域；每套窗口输出直接显示二级区名、角色名称、移除按钮、实时画面、背包状态、空格数、已拥有数、置信度、遮挡百分比和最小化状态。输出采用 4 列 × 2 行紧凑布局，8 个窗口可以同时显示且无需滚动。
 
-例如：
+“增加窗口”的候选列表只接受标题中包含“梦幻西游 ONLINE”（允许中间有空格）的窗口，非游戏窗口不会出现。窗口输出会从游戏窗口标题中读取账号信息。例如：
+
+- `江苏1区[秦淮风光]`：显示二级区名“秦淮风光”。
+- `清风知夏[54588235]`：显示角色名“清风知夏”，并保留角色 ID `54588235`。
+
+## 从机、云端与主机通信
+
+本程序定位为“从机”，无需互联网或主机即可独立完成窗口捕获和背包检测。点击顶部“设置”打开单独的从机设置窗口：
+
+- `游戏窗口最小化`：不警告、当前程序警告或主机警告。
+- `窗口遮挡`：阈值范围 1%～100%，默认 100%；达到阈值时可以不警告、当前程序警告或主机警告。
+- `背包容量`：默认值 0，表示背包已满时警告；设置为 3 表示剩余 3 格或更少时警告。
+- `背包未打开`：可以单独设置为不警告或由当前程序警告。
+- `背包被遮挡`：可以单独设置为不警告或由当前程序警告。
+- `当前程序警告`：可以选择仅弹窗，或弹窗并循环播放提示音。仓库默认使用程序生成的原创短提示音；如需自定义，可在本地放置 `assets/sounds/inventory_alert.wav`，打包时会自动带入。自定义音频和原始 FLAC 已加入 `.gitignore`，不会上传到公开仓库。告警窗口固定显示在桌面右下角，不会自动消失；用户点击“确认并停止声音”或关闭窗口后声音才会停止。程序只保留一个告警弹窗，新告警会覆盖旧告警内容。
+- `云端连接`：填写 `https://服务器公网 IP`、从机设备编号和该设备的独立密钥。主界面显示“云端：已连接/未连接”，也可以点击“连接”立即测试。
+
+设置保存在 `runtime/slave_settings.json`。选择“主机警告”的异常连续确认 5 秒后，会由从机通过 HTTPS 直接提交到云端中转服务。从机无论是否触发告警，都会每 5 秒上传当前全部监控窗口的状态快照；移除窗口后，云端对应行也会随快照移除。所有连接都由电脑主动向云端发起，家庭和公司路由器不需要开放端口。从机始终保留离线独立运行能力。
+
+主机默认每 5 秒刷新两个独立板块：
+
+- **从机状态**：从机编号、窗口/角色、当前状态、空格、置信度、遮挡百分比、最小化、最后更新、在线状态。每个游戏窗口一行，没有添加游戏窗口的从机也会占一行。90 秒没有上报显示离线；最小化或暂停时不把旧的空格数、置信度当成当前检测结果。
+- **告警记录**：编号、从机、区服/角色、告警、发生时间、未处理/已处理、确认操作。确认后记录保留，只隐藏按钮；重启主机后仍可读取云端历史，已处理记录不会再次播放告警。云端既有保留策略为已处理记录 30 天，未处理记录不自动清理。
+
+状态同步要求同时升级服务端、从机和主机；旧从机只有心跳和告警，不会上传窗口状态。不同电脑必须使用不同的从机编号及对应密钥，不能全部复制为 `slave-01`，否则会覆盖同一个设备的状态。
+
+全部窗口添加完成后，可以点击“后台监控”将本程序最小化，避免遮挡游戏窗口。主界面最小化后所有游戏窗口仍会继续检测，背包异常弹窗也会正常显示；点击 Windows 任务栏中的程序图标即可恢复主界面。
+
+需要手动整理背包时，可以点击顶部“暂停监控”。暂停后所有游戏窗口停止背包分析和告警，当前告警弹窗及音乐也会关闭；操作完成后点击“开始监控”恢复。恢复时会清空暂停前尚未完成的连续命中计时，异常必须重新连续保持 5 秒才会告警。
+
+## Windows EXE
+
+### 直接使用
+
+打包后的目录是：
 
 ```text
-current_scene = world_map
-map_name = 北俱芦洲
-inventory_open = True
-battle_active = False
+dist/梦幻西游背包监控/
+├─ 梦幻西游背包监控.exe
+├─ _internal/
+├─ assets/
+├─ configs/
+└─ 启动说明.txt
 ```
 
-#### Event：状态发生变化后的业务事件
+同一次构建还会生成 `dist/梦幻西游告警主机/梦幻西游告警主机.exe`。主机程序负责显示从机状态、持续提醒和确认从机告警，不执行游戏画面检测。
 
-例如：
+请整体复制这个目录，不要只复制 EXE。双击 `梦幻西游背包监控.exe` 即可运行。
 
-```text
-map_entered
-inventory_opened
-inventory_closed
-battle_started
-battle_ended
-skill_used
-damage_dealt
-```
-
-这样可以过滤单帧误检、OCR 短暂错误和 UI 闪烁。
-
-### 4.3 为什么使用抽帧和有界队列
-
-游戏画面可能是 30 或 60 FPS，但第一版不需要对每一帧都进行完整识别：
-
-- 普通场景：默认约 5 FPS。
-- 战斗场景：可提高到约 10 FPS。
-- 短时间高频变化：可提高到约 20 FPS。
-- 实时队列有最大长度，分析速度跟不上时丢弃旧帧，优先处理最新画面。
-
-这样做的主要目标是**控制实时延迟**，而不是让所有原始帧都进入推理队列。
-
-### 4.4 YOLO、OCR 和视觉大模型的分工
-
-后续完整识别链路建议如下：
-
-```text
-YOLO：定位区域和目标
-  → 例如背包面板、物品格、技能区域、伤害数字区域
-
-OCR：读取文字
-  → 例如地图名称、物品名称、技能名称、伤害数值
-
-模板/规则：确认稳定 UI 状态
-  → 例如游戏是否打开、背包是否打开、是否进入战斗
-
-EventMachine：完成时间和业务逻辑判断
-  → 例如连续两帧确认后才输出 inventory_opened
-```
-
-视觉大模型不是第一版必需组件。它更适合用于：
-
-- 离线分析复杂截图。
-- 辅助生成标注建议。
-- 处理规则难以覆盖的特殊 UI。
-- 对低置信度事件生成解释。
-
-不建议在实时主链路中对每一帧调用远程视觉大模型，否则会带来延迟、费用、网络依赖和结果不稳定等问题。
-
----
-
-## 5. 当前实现状态
-
-当前版本已经完成以下基础能力：
-
-- Windows Graphics Capture 按 HWND 直接采集指定游戏窗口。
-- 桌面程序只展示标题包含“梦幻西游”的窗口，其他应用窗口不会成为采集目标。
-- 启动时自动检测梦幻西游窗口；检测到后自动选择并开始实时采集。
-- 未检测到游戏时禁止开始监控，并每约 3 秒自动重新检测。
-- 实时计算游戏窗口遮挡比例，遮挡达到 1% 时直接在“窗口被遮挡”状态标签后显示百分比，并将主要遮挡来源放入悬浮提示。
-- 普通摄像头和采集卡继续作为 CLI/底层代码的兼容输入；桌面主链路不依赖外部采集软件。
-- 视频文件离线读取。
-- 采集线程与分析线程分离。
-- 有界最新帧队列。
-- 基于时间戳的自适应抽帧器。
-- ROI 裁剪和边界保护。
-- 帧变化检测。
-- 可选 OpenCV 模板匹配。
-- YOLO 一次检测 `equipment_tooltip` 和 `inventory_panel` 两个类别；同时使用鼠标坐标，只接受左侧八个装备槽位，忽略右侧道具栏。旧版 OpenCV 规则检测器保留为兼容和调试方案。
-- 检测到稳定浮窗后自动裁剪并保存样本图片，默认输出到 `runtime/equipment/tooltips/`。
-- 连续多帧确认的事件状态机，支持 `equipment_tooltip_opened` / `equipment_tooltip_closed`。
-- JSONL 事件输出和控制台输出。
-- 事件证据帧保存。
-- PySide6 Windows 桌面界面，窗口标题为“梦幻西游-希联文超助手”。
-- 面向边玩游戏边查看结果的场景，桌面窗口固定为 `880×600`，不可拖拽改变大小或宽高比例。
-- 顶部登录状态是公共区域：未登录时显示“未登录”和紧凑的登录按钮；登录后可显示头像、昵称和登录提示，不随页面切换消失。
-- 左侧增加社交化导航栏，包含“AI分析、聊天室、装备鉴赏、希联商行、个人中心”五个入口。
-- 当前采集与事件识别内容属于“AI分析”页面；其他四个入口暂时显示功能占位提示，为后续社交功能保留扩展位置。
-- AI分析页面左侧使用 `300×300` 的 1:1 正方形预览幕布，下面是“运行状态”；右侧依次展示“当前窗口 + 开始/暂停”、“采集状态”、游戏连接提示、遮挡提示和事件采集结果。
-- “采集状态”固定放在“当前窗口 + 开始/暂停”控制栏下方，包含“采集中、窗口被遮挡、未采集”三种状态；发生遮挡时会在“窗口被遮挡”后直接显示遮挡百分比。
-- 梦幻西游 4:3 画面（640×480、800×600、1024×768、1280×960）在预览幕布中保持原比例缩放，不拉伸、不裁剪。
-- 采集帧数、分析帧数、丢帧数和分析 FPS 展示。
-
-### 当前识别能力边界
-
-当前仓库没有内置训练好的《梦幻西游》YOLO 权重，也没有默认中文 OCR 引擎和完整游戏词典。因此，当前版本的重点是验证工程链路：
-
-```text
-视频能否接入
-→ 是否能够实时抽帧
-→ 识别结果能否进入状态机
-→ 事件能否实时输出
-→ 证据能否保存
-```
-
-当前的 `RuleBasedPerception` 可以处理帧变化、配置的模板匹配，以及 YOLO 装备属性浮窗检测。桌面端的“装备识别”入口支持直接上传/粘贴游戏完整截图：先由 YOLO 定位 `equipment_tooltip`，再把检测框裁剪给本地 RapidOCR 读取文字，最后解析为名称、类型、等级和属性并生成结果卡片。也就是说，完整截图识别不再把 OCR 当作全屏搜索器。
-
----
-
-## 6. 环境要求
-
-### 必需环境
-
-- Windows 10/11，推荐使用 Windows 11。
-- Python 3.11 或更高版本。
-- [uv](https://docs.astral.sh/uv/)：用于创建环境、安装依赖和运行项目。
-- Windows Graphics Capture：Windows 10/11 系统内置，不需要单独安装。
-- 采集卡或摄像头：仅当主动选择对应采集方式时需要。
-
-### Python 依赖
-
-项目运行依赖：
-
-- `numpy`：数组和基础数值处理。
-- `opencv-python`：视频读取、图像处理、模板匹配和图片保存。
-- `PySide6`：Windows 桌面界面。
-- `windows-capture`：通过 Windows Graphics Capture 按窗口句柄采集画面。
-
-装备图片识别的可选依赖：
-
-- `ultralytics`：运行 YOLO 模型，定位完整截图中的装备属性浮窗。
-- `rapidocr`：本地中文 OCR，读取 YOLO 裁剪后的浮窗文字。
-- `onnxruntime`：RapidOCR 的 CPU 推理运行时。
-
-开发依赖：
-
-- `pytest`：自动化测试。
-- `ruff`：代码检查和格式化。
-
-YOLO 训练权重不随仓库提交；手动“装备识别”功能需要安装 `equipment` extra，并将训练好的 `best.pt` 放到 `models/equipment_tooltip/best.pt`。
-
----
-
-## 7. 安装
-
-### 7.1 使用 uv 安装（推荐）
-
-在 PowerShell 中执行：
+重新打包：
 
 ```powershell
-cd C:\Users\李锐\Documents\hoyo-test
-uv sync --dev
-# 装备完整截图识别：YOLO + RapidOCR
-uv sync --dev --extra equipment
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 ```
 
-该命令会根据 `pyproject.toml` 和 `uv.lock` 创建或更新虚拟环境，并安装运行及开发依赖。装备识别额外安装 `ultralytics`、`rapidocr` 和 `onnxruntime`。
-
-### 7.2 使用传统 venv
-
-如果不使用 uv，可以执行：
+跳过依赖安装、直接重新构建：
 
 ```powershell
-cd C:\Users\李锐\Documents\hoyo-test
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -SkipInstall
+```
+
+如果旧程序正在运行，可以输出到另一个目录，避免文件被占用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -SkipInstall -OutputDirectory dist/status-update
+```
+
+打包自检会验证从机的 Qt、OpenCV、Windows Graphics Capture，以及主机的 Qt、音频和 TLS。也可以手动运行：
+
+```powershell
+& "dist/梦幻西游背包监控/梦幻西游背包监控.exe" --package-self-test
+Get-Content "dist/梦幻西游背包监控/runtime/package-self-test.json"
+```
+
+## 本地开发
+
+要求 Windows 10/11、Python 3.11 或更新版本。
+
+```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-# 需要装备完整截图识别时安装 YOLO + 本地 OCR
-python -m pip install -e ".[equipment]"
-python -m pip install pytest ruff
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m hoyo_analyzer.inventory_app
 ```
 
-### 7.3 检查安装是否成功
+运行测试：
 
 ```powershell
-uv run python -c "import cv2, numpy; print('OpenCV and NumPy ok')"
-uv run python -c "import PySide6, windows_capture; print('PySide6 and WGC ok')"
-uv run python -m hoyo_analyzer --help
+.venv\Scripts\python.exe -m pytest
 ```
 
----
-
-## 8. 使用方式
-
-### 8.1 启动桌面界面
-
-推荐直接使用 Windows 窗口采集，无需打开或安装额外采集软件：
+服务端测试需要在 `server` 目录执行：
 
 ```powershell
-cd C:\Users\李锐\Documents\hoyo-test
-uv run python -m hoyo_analyzer desktop
+Set-Location server
+..\.venv\Scripts\python.exe -m pytest -q
 ```
 
-使用步骤：
+## 云端部署
 
-1. 启动桌面程序；程序会立即在后台检测标题包含“梦幻西游”的窗口。
-2. 如果已经打开《梦幻西游》，程序会自动选择一个非最小化的游戏窗口并自动开始实时采集。
-3. 如果没有检测到游戏，界面显示黄色提示“当前不能监控”，“开始”按钮保持禁用。
-4. 此时再启动《梦幻西游》即可；程序每约 3 秒自动重新检测，发现游戏后自动开始采集，不需要用户选择或刷新。
-5. 自动启动成功后，界面在右侧事件列表上方显示绿色提示“已开始自动采集”，较长提示不会挤占状态字段。
-6. 左上角显示登录状态：未登录时提供“登录”按钮；真实账号服务接入前，该按钮仅显示功能预告。登录后这里会显示头像、昵称和分享状态。
-7. 登录信息下方显示三个采集状态：`已采集`、`窗口被遮挡`、`未采集`，当前状态会以彩色标签高亮。
-8. 游戏窗口被其他窗口遮挡达到 1% 时，“窗口被遮挡”状态标签直接显示遮挡比例；将鼠标悬停在标签上可以查看主要遮挡来源。
-9. 游戏窗口可以移动或调整大小，因为采集绑定的是 HWND，而不是固定屏幕坐标。
-10. 如需暂时停止本次监控，可以点击“暂停”；手动暂停后不会立刻自动重启。
+服务端要求 Ubuntu 24.04、Docker 和可访问的公网 IP。复制示例配置并生成至少 32 字符的随机主机密钥和每台从机的独立密钥：
 
-界面包含以下区域：
-
-| 区域 | 作用 |
-|---|---|
-| 登录状态 | 位于界面左上角；未登录时显示登录入口，登录后显示头像、昵称和可分享状态 |
-| 采集状态 | 位于登录信息下方，以 `已采集`、`窗口被遮挡`、`未采集` 三个状态标签反馈当前采集情况 |
-| 游戏连接 | 以紧凑文本形式显示程序自动检测到的梦幻西游窗口，无采集方式或窗口下拉框 |
-| 开始/暂停 | 控制采集线程、分析线程和事件输出；无需手动测试或刷新采集源 |
-| 视频预览 | 左侧使用 `300×300` 的 1:1 预览幕布显示最近画面；游戏的 800×600、640×480、1024×768、1280×960 等 4:3 分辨率会自动等比例缩放并留黑边 |
-| 运行状态 | 位于视频预览下方，显示目标窗口、窗口遮挡、视频采集、事件输出和 FPS |
-| 事件列表 | 右侧占据主要空间；“当前窗口”控制栏和游戏连接状态提示位于事件列表上方，并与事件列表保持相同宽度 |
-
-如果游戏窗口最小化，程序会保持 WGC 会话：游戏仍在后台渲染时继续采集；游戏暂停渲染时等待新画面，并在窗口恢复后自动续采。只有窗口被关闭或 WGC 会话异常结束时才停止并提示错误。
-
-### 8.2 枚举可采集窗口
-
-```powershell
-uv run python -m hoyo_analyzer list-windows
+```bash
+cd server
+cp .env.example .env
+docker compose up -d --build
 ```
 
-示例输出：
+也可以在全新的 Ubuntu 24.04 服务器上执行：
+
+```bash
+cd server
+chmod 700 deploy.sh
+./deploy.sh <服务器公网 IP>
+```
+
+脚本会生成 1 个主机密钥和 10 个从机密钥，并配置 Docker、Caddy 及无域名 IP HTTPS。部署细节见 [`server/README.md`](server/README.md)。
+
+## 配置主机和从机
+
+1. 在服务器的 `deployment-credentials.json` 中取得云端地址、主机密钥和各从机密钥；不要把该文件复制进仓库。
+2. 每台游戏电脑打开从机“设置”，填写云端地址、独立的设备编号和对应设备密钥。
+3. 不同电脑不得共用设备编号，否则最新窗口状态会相互覆盖。
+4. 公司电脑运行主机程序，在“设置”中填写相同云端地址和主机密钥。
+5. 看到“云端：已连接”后，从机状态通常会在下一个 5 秒刷新周期出现。
+
+## 配置和运行数据
+
+主要配置在 `configs/default.toml`：
+
+- 游戏窗口必须在标题中包含“梦幻西游 ONLINE”；程序会自动兼容其中的空格。
+- `sampling.normal_fps`：每秒分析次数，默认 5 次。
+- `inventory_monitor.confirm_frames`：连续多少帧一致后确认状态。
+- `inventory_monitor.alert_confirm_seconds`：任一告警状态连续保持多少秒才告警，默认 5 秒；中途恢复就重新计时。
+- `inventory_monitor.full_cooldown_seconds`：背包已满提醒的最短间隔。
+- `inventory_monitor.closed_grace_seconds`：启动后等待员工打开背包的时间。
+- `inventory_monitor.closed_reminder_seconds`：背包未打开时的重复提醒间隔。
+- `inventory_monitor.invalid_reminder_seconds`：背包被遮挡时的重复提醒间隔。
+
+事件记录保存在 `runtime/events/inventory_events.jsonl`。启动异常保存在 `runtime/startup-error.log`。
+
+## 识别方式
+
+检测器使用 OpenCV 和背包标题模板定位背包，再分析右侧 5×4 共 20 个物品格。该流程完全在本机运行，不上传游戏截图，也不需要模型权重。
+
+为了保证准确率，请不要最小化游戏窗口，让背包完整显示，避免聊天框、角色属性或其他游戏内界面遮挡背包，并尽量保持游戏界面缩放比例稳定。
+
+## 仓库结构
 
 ```text
-0x150AF6    梦幻西游 ONLINE - 角色名
-0x106E2     Chrome
+assets/templates/        背包定位模板
+configs/                 默认检测参数
+packaging/               Windows 打包运行钩子和使用说明
+scripts/                 桌面入口、评估及打包脚本
+server/                  FastAPI 中转服务、Docker 与 Caddy 配置
+src/hoyo_analyzer/       从机、主机、捕获、检测和通信代码
+tests/                   桌面程序单元测试
+hoyo_analyzer.spec       从机 PyInstaller 配置
+hoyo_master.spec         主机 PyInstaller 配置
 ```
 
-窗口句柄在游戏每次重启后可能变化，因此桌面界面会重新枚举，不建议把 HWND 永久写死在配置文件中。
-
-如需调试底层 OpenCV 视频设备，可使用：
-
-```powershell
-uv run python -m hoyo_analyzer list-devices --max-index 10
-```
-
-### 8.3 使用 CLI 实时分析
-
-通过窗口标题关键字启动：
-
-```powershell
-uv run python -m hoyo_analyzer live `
-  --source windows-graphics-capture `
-  --window-title "梦幻西游" `
-  --config configs/default.toml
-```
-
-如果标题关键字匹配到多个窗口，先执行 `list-windows`，然后使用精确 HWND：
-
-```powershell
-uv run python -m hoyo_analyzer live `
-  --source windows-graphics-capture `
-  --window-hwnd 0x150AF6 `
-  --max-seconds 60
-```
-
-### 8.4 离线分析视频
-
-实时分析不是必须保存视频，但在开发阶段建议保留少量测试视频，用于复现问题、制作证据和训练数据。
-
-```powershell
-uv run python -m hoyo_analyzer analyze-video `
-  recordings/demo.mp4 `
-  --config configs/default.toml
-```
-
-离线分析会读取视频、根据抽帧配置执行感知和事件分析，并将事件写入 JSONL。
-
-### 8.5 从视频抽取图片
-
-```powershell
-uv run python -m hoyo_analyzer extract-frames `
-  recordings/demo.mp4 `
-  --fps 5 `
-  --output-dir runtime/frames
-```
-
-抽出的图片名称包含帧号和时间戳，例如：
-
-```text
-00000120_000000004000.jpg
-```
-
-其中：
-
-- `00000120`：视频帧编号。
-- `000000004000`：相对视频起点的毫秒时间戳。
-
-抽帧图片适合用于：
-
-- 检查画面是否正确。
-- 选取模板匹配素材。
-- 制作 YOLO/OCR 标注数据。
-- 分析误检和漏检。
-
-### 8.6 装备图片识别
-
-在“AI分析”页面点击“装备识别”，可以直接上传/粘贴游戏完整截图：
-
-1. 点击“选择图片”，选择 PNG、JPG、JPEG、BMP 或 WEBP 图片；
-2. 或者先复制图片，再点击“粘贴图片”，也可以在对话框中按 `Ctrl+V`；
-3. 点击“开始AI识别”；
-4. YOLO 先在完整截图中定位 `equipment_tooltip` 装备属性浮窗；
-5. 程序按检测框裁剪浮窗，再用 RapidOCR 读取名称、类型、等级和属性；
-6. 程序自动生成识别结果图片，并放入 `runtime/equipment/recognition_cards/`；
-7. 点击“保存识别图片”可以将结果卡片复制到任意位置。
-
-当前这条链路需要 YOLO 训练权重和本地中文 OCR。不要只把装备图标或背包主界面当作属性输入；完整截图是支持的，但必须保证属性浮窗在截图中清晰可见。模型尚未训练或未放置时，程序会明确提示，不会把全屏文字误当作装备属性。
-
-安装 YOLO + 本地中文 OCR（首次安装可能联网下载 Python 包和 OCR 模型）：
-
-```powershell
-cd C:\Users\李锐\Documents\hoyo-test
-.\.venv\Scripts\python.exe -m pip install -e ".[equipment]"
-```
-
-该 extra 包含 `ultralytics`、`rapidocr` 和 `onnxruntime`，适配当前项目的 Python 3.11+ 环境。训练完成后，将最佳权重复制到：
-
-```text
-models/equipment_tooltip/best.pt
-```
-
-输入图片、YOLO裁剪区域和自动生成的卡片分别保存到：
-
-```text
-runtime/equipment/recognition_inputs/   # 剪贴板图片副本
-runtime/equipment/detected_regions/     # YOLO定位后裁剪的属性浮窗，便于核对
-runtime/equipment/recognition_cards/    # 识别结果图片
-```
-
-识别链路为：`完整游戏截图 → YOLO定位 → ROI裁剪 → OCR → 装备属性解析 → 结果卡片`。后续可增加装备名称白名单、OCR纠错、手动校正和实时分析自动触发。
-
----
-
-## 9. 配置文件
-
-默认配置文件：
-
-```text
-configs/default.toml
-```
-
-当前内容：
-
-```toml
-[capture]
-source = "windows-graphics-capture"
-path = "recordings/demo.mp4"
-device_index = 0
-source_id = "wgc-window"
-window_title_keyword = "梦幻西游"
-
-[sampling]
-normal_fps = 5.0
-battle_fps = 10.0
-burst_fps = 20.0
-burst_duration_ms = 1500
-queue_size = 120
-
-[evidence]
-pre_buffer_ms = 2000
-post_buffer_ms = 3000
-directory = "runtime/evidence"
-
-[output]
-event_log = "runtime/events/events.jsonl"
-console = true
-```
-
-### 9.1 `[capture]`
-
-| 配置项 | 含义 | 当前说明 |
-|---|---|---|
-| `source` | 默认输入类型 | 当前 CLI 会根据命令和参数选择输入 |
-| `path` | 视频文件路径 | 离线视频输入使用；实时设备输入时不会使用该路径 |
-| `device_index` | 视频设备编号 | GUI 和 CLI 可单独覆盖 |
-| `source_id` | 输入源标识 | 写入帧的元数据，便于区分来源 |
-| `window_title_keyword` | 允许采集的游戏窗口标题关键字 | GUI只展示包含该文字的窗口，检测到后自动选择并开始采集 |
-
-### 9.2 `[sampling]`
-
-| 配置项 | 含义 | 默认值 |
-|---|---|---:|
-| `normal_fps` | 普通场景分析频率 | 5 |
-| `battle_fps` | 战斗场景分析频率 | 10 |
-| `burst_fps` | 短时间突发分析频率 | 20 |
-| `burst_duration_ms` | 突发模式持续时间 | 1500 |
-| `queue_size` | 实时最新帧队列最大长度 | 120 |
-
-### 9.3 `[evidence]`
-
-| 配置项 | 含义 |
-|---|---|
-| `pre_buffer_ms` | 事件发生前保留的时间范围，目前用于维护证据缓冲 |
-| `post_buffer_ms` | 事件发生后保留的时间范围，后续片段保存功能使用 |
-| `directory` | 证据图片输出目录 |
-
-### 9.4 `[output]`
-
-| 配置项 | 含义 |
-|---|---|
-| `event_log` | JSONL 事件日志路径 |
-| `console` | 是否同时输出可读的控制台日志 |
-
-### 9.5 模板匹配配置
-
-可以在配置文件末尾加入：
-
-```toml
-[templates]
-game_visible = "assets/templates/game_visible.png"
-inventory_open = "assets/templates/inventory_open.png"
-battle_active = "assets/templates/battle_active.png"
-```
-
-配置键会作为 `signal` 进入 `Observation`，然后交给 `EventMachine`。模板图片需要由开发者自行截取和准备，当前仓库没有提供梦幻西游模板图片或训练权重。
-
----
-
-## 10. 输出数据
-
-### 10.1 JSONL 事件日志
-
-默认输出文件：
-
-```text
-runtime/events/events.jsonl
-```
-
-JSONL 的特点是每行一个 JSON 对象，适合追加写入、流式处理和后续导入数据库。
-
-事件字段说明：
-
-| 字段 | 含义 |
-|---|---|
-| `event_id` | 当前运行中的事件编号 |
-| `timestamp_ms` | 相对视频或输入流起点的毫秒时间戳 |
-| `timestamp` | 便于阅读的 `HH:MM:SS.mmm` 时间 |
-| `type` | 事件类型，例如 `battle_started` |
-| `status` | `confirmed` 或 `updated` |
-| `confidence` | 当前识别置信度 |
-| `payload` | 事件业务数据，例如地图名、物品列表、伤害数值 |
-| `evidence_frame_index` | 触发事件的证据帧编号 |
-| `evidence_path` | 证据图片路径 |
-| `source` | 事件来源标识 |
-| `pipeline_version` | 处理管线版本 |
-
-### 10.2 当前事件类型
-
-当前状态机内置或支持以下事件：
-
-```text
-application_opened
-inventory_opened
-inventory_closed
-battle_started
-battle_ended
-map_entered
-inventory_items_read
-skill_used
-damage_dealt
-```
-
-其中部分事件需要感知模块提供对应信号后才会实际产生。例如没有 OCR 模块提供 `map_name` 时，不会产生有效的 `map_entered` 地图名称事件。
-
-### 10.3 证据帧
-
-默认目录：
-
-```text
-runtime/evidence/
-```
-
-当状态机产生事件时，`EvidenceWriter` 会尝试保存触发事件的图像，并把路径写入事件对象。证据帧用于：
-
-- 人工核对识别是否正确。
-- 分析误报和漏报。
-- 制作后续训练集。
-- 对事件规则进行回放调试。
-
-运行时数据被 `.gitignore` 忽略，不应把大量视频、图片和日志提交到 Git 仓库。
-
----
-
-## 11. 项目文件说明
-
-### 11.1 根目录文件
-
-| 文件/目录 | 作用 |
-|---|---|
-| `README.md` | 项目背景、架构、安装、运行、配置和开发说明 |
-| `pyproject.toml` | 项目元数据、Python 版本、运行依赖、开发依赖、pytest 和 Ruff 配置 |
-| `uv.lock` | uv 锁定的依赖版本，保证不同环境尽量使用一致的依赖 |
-| `.gitignore` | 忽略虚拟环境、缓存、运行时日志、录制视频和图片等本地文件 |
-| `configs/` | TOML 配置文件目录 |
-| `datasets/mhxy_ui_detection/` | 梦幻西游界面双类别 YOLO 数据集，包含 `equipment_tooltip` 和 `inventory_panel` |
-| `docs/` | 项目定义、技术架构、数据方案和路线图文档 |
-| `models/equipment_tooltip/` | 训练完成后的 YOLO 推理权重目录，正式权重文件名为 `best.pt` |
-| `scripts/` | YOLO 数据集划分和训练脚本 |
-| `src/` | Python 源代码目录 |
-| `tests/` | 自动化测试目录 |
-| `runtime/` | 程序运行时生成的日志、证据帧和调试帧，不纳入 Git |
-
-### 11.2 `src/hoyo_analyzer/` 文件
-
-| 文件 | 作用 |
-|---|---|
-| `__init__.py` | 定义 `hoyo_analyzer` Python 包和当前版本号 |
-| `__main__.py` | 支持 `python -m hoyo_analyzer`，将命令转交给 CLI |
-| `models.py` | 定义核心数据结构：`FramePacket`、`Observation`、`Event`、`RuntimeState` 等 |
-| `config.py` | 定义配置数据类，并从 TOML 文件加载配置 |
-| `capture.py` | 统一视频源工厂；组织视频文件、WGC、摄像头和采集卡输入 |
-| `wgc.py` | Windows窗口枚举、HWND状态检查和Windows Graphics Capture实时帧源 |
-| `sampler.py` | 抽帧策略和 `LatestFrameQueue` 有界最新帧队列 |
-| `realtime.py` | 实时分析主流程；组织采集线程、队列、抽帧、感知、状态机和输出 |
-| `roi.py` | 提供像素 ROI、相对比例 ROI 和安全裁剪函数 |
-| `perception.py` | 当前基础感知实现；包含帧变化检测、可选 OpenCV 模板匹配和装备浮窗信号输出 |
-| `yolo_detector.py` | YOLO 一次推理检测背包面板和装备属性浮窗；分别输出候选框、置信度和稳定帧数 |
-| `equipment_detector.py` | 旧版 OpenCV 规则检测器，仅用于兼容和调试 |
-| `equipment_slots.py` | 根据背包标题模板和鼠标坐标定位左侧八个装备槽位；右侧道具栏不会通过门控 |
-| `equipment_region.py` | 使用 Ultralytics YOLO 在完整游戏截图中定位 `equipment_tooltip` 浮窗并返回检测框 |
-| `equipment_recognition.py` | 按 YOLO 检测框裁剪浮窗，调用本地 RapidOCR/Tesseract，并将文本解析为装备名称、类型、等级和属性 |
-| `equipment_dialog.py` | “装备识别”桌面弹窗；支持选图、剪贴板粘贴、后台识别、结果卡片生成和另存 |
-| `ocr.py` | OCR 接口协议、OCR 结果结构和当前的空 OCR 实现 `NullOcrEngine` |
-| `event_machine.py` | 时序状态机；对观察信号执行多帧确认、进入/退出事件、去重和冷却控制 |
-| `evidence.py` | 保存事件触发时的证据图像，以及装备属性浮窗裁剪图 |
-| `storage.py` | JSONL 事件写入、控制台输出和多个输出通道组合 |
-| `cli.py` | 命令行参数、离线/实时分析、窗口/设备枚举、抽帧和桌面入口 |
-| `gui.py` | PySide6 桌面 UI、左上角登录/采集状态、梦幻西游窗口过滤与自动启动、遮挡告警、实时预览、运行状态和后台分析线程 |
-
-### 11.3 `tests/` 文件
-
-| 文件 | 测试内容 |
-|---|---|
-| `test_models.py` | 时间戳格式和 `FramePacket` 基础行为 |
-| `test_event_machine.py` | 背包、战斗和地图事件的状态确认与去重 |
-| `test_gui.py` | 梦幻西游窗口过滤、无游戏禁用、自动启动、登录状态、三态采集标签、运行状态布局和 1% 遮挡告警测试 |
-| `test_realtime.py` | 实时分析器、采集线程异常传播和事件输出 |
-| `test_wgc.py` | WGC 视频源工厂、窗口信息、最小化行为和遮挡面积计算测试 |
-| `test_sampler.py` | 抽帧频率和有界队列丢弃旧帧行为 |
-| `test_roi.py` | ROI 越界裁剪和相对比例转换 |
-| `test_storage.py` | JSONL UTF-8 写入和控制台输出 |
-| `test_equipment_detector.py` | OpenCV 浮窗候选检测、连续帧稳定、消失重置和裁剪图保存 |
-| `test_equipment_slots.py` | 左侧装备槽位坐标缩放、鼠标悬停命中和右侧道具栏排除测试 |
-| `test_equipment_recognition.py` | OCR 文本解析、中文路径图片读取、无效图片和空结果测试 |
-| `test_equipment_yolo_recognition.py` | 验证完整截图先经过YOLO裁剪、YOLO漏检时不调用全图OCR |
-| `test_equipment_recognition_gui.py` | 装备识别入口按钮和选图/粘贴/识别对话框控件测试 |
-
-### 11.4 `docs/` 文件
-
-详细设计文档见[文档目录说明](#12-文档目录说明)。
-
----
-
-## 12. 文档目录说明
-
-| 文档 | 内容 |
-|---|---|
-| [`docs/01-project-definition.md`](docs/01-project-definition.md) | 项目输入、输出、识别目标、观察/状态/事件三层模型 |
-| [`docs/02-architecture.md`](docs/02-architecture.md) | 总体技术架构、模块边界、进程建议和可观测指标 |
-| [`docs/03-video-ingest-and-frame-extraction.md`](docs/03-video-ingest-and-frame-extraction.md) | 视频输入、时间戳、抽帧、队列和延迟控制 |
-| [`docs/04-event-recognition.md`](docs/04-event-recognition.md) | 地图、背包、战斗、技能、伤害等事件的识别方案 |
-| [`docs/05-model-selection.md`](docs/05-model-selection.md) | 规则、模板、OCR、YOLO 和视觉大模型的选型建议 |
-| [`docs/06-data-schema.md`](docs/06-data-schema.md) | Observation、Event、JSONL、SQLite 和后续数据模型设计 |
-| [`docs/07-roadmap-and-mvp.md`](docs/07-roadmap-and-mvp.md) | MVP 路线图、阶段目标、验收标准和不建议过早做的事情 |
-| [`docs/08-equipment-tooltip-detection.md`](docs/08-equipment-tooltip-detection.md) | 装备属性浮窗的 YOLO 检测、手动 OCR 识别、数据集目录、标注和推理接入 |
-
-建议阅读顺序：
-
-```text
-README.md
-  → 01-project-definition.md
-  → 02-architecture.md
-  → 03-video-ingest-and-frame-extraction.md
-  → 04-event-recognition.md
-  → 08-equipment-tooltip-detection.md
-  → 05-model-selection.md
-  → 06-data-schema.md
-  → 07-roadmap-and-mvp.md
-```
-
----
-
-## 13. 开发与测试
-
-### 13.1 运行自动化测试
-
-```powershell
-uv run pytest -q
-```
-
-### 13.2 运行代码检查
-
-```powershell
-uv run ruff check .
-```
-
-### 13.3 自动格式化
-
-```powershell
-uv run ruff format .
-```
-
-### 13.4 完整验证
-
-```powershell
-uv run ruff check .
-uv run pytest -q
-uv run python -m hoyo_analyzer --help
-uv run python -m hoyo_analyzer desktop --help
-```
-
-### 13.5 测试实时链路的建议顺序
-
-1. 启动桌面程序，确认没有游戏时显示“未检测到梦幻西游窗口，当前不能监控”。
-2. 启动游戏，确认程序在约 3 秒内自动发现窗口并显示“已开始自动采集”。
-3. 确认视频预览能显示游戏画面。
-4. 用其他窗口遮挡游戏至少 1%，确认“窗口被遮挡”状态标签显示遮挡比例；将鼠标移开后确认状态恢复。
-5. 运行 1～5 分钟，观察采集 FPS、分析 FPS 和丢帧数。
-6. 检查 `runtime/events/events.jsonl` 是否持续写入。
-7. 检查 `runtime/evidence/` 是否产生事件证据图。
-8. 使用一段录制视频进行离线复现，比较实时和离线结果。
-
-如果使用采集卡或普通摄像头兼容模式，再通过 `list-devices` 检查 OpenCV 视频设备编号。
-
-### 13.6 添加新的识别信号
-
-建议遵循以下步骤：
-
-```text
-1. 定义 Observation 信号
-2. 实现模板、规则、YOLO 或 OCR 适配器
-3. 在 perception.py 中输出信号
-4. 在 event_machine.py 中增加状态转换规则
-5. 增加证据帧和 JSONL 字段
-6. 添加自动化测试
-7. 用未参与训练的视频段进行回放验证
-```
-
-不要直接在 GUI 中写识别逻辑。GUI 只负责展示状态、启动/停止任务和接收回调，识别逻辑应该保持在感知层和事件层。
-
----
-
-## 14. 常见问题
-
-### 14.1 窗口列表中找不到梦幻西游
-
-桌面程序只接受标题包含 `window_title_keyword`（默认“梦幻西游”）的窗口。请确认游戏已经启动、窗口标题包含该关键字且没有处于隐藏状态。程序会每约 3 秒自动检测并更新“当前窗口”文本。如果游戏以管理员权限运行，建议让分析程序使用相同权限级别。还可以执行：
-
-```powershell
-uv run python -m hoyo_analyzer list-windows
-```
-
-如果游戏刚刚重启，原来的 HWND 会失效；程序停止旧采集后会继续自动检测新的游戏窗口。
-
-### 14.2 窗口采集没有画面
-
-请确认：
-
-1. 先恢复游戏窗口测试一次，确认正常状态下能够收到画面。
-2. “当前窗口”文本显示的是游戏主窗口，而不是启动器或登录器。
-3. Windows 版本支持 Windows Graphics Capture。
-4. 游戏没有使用系统禁止采集的受保护画面。
-5. 查看底部运行动态和界面错误提示，确认具体失败原因。
-
-程序不会再因为最小化主动停止采集会话，但很多游戏会在最小化后暂停渲染。此时没有新的真实画面可供任何窗口采集 API 读取，程序会显示“等待游戏后台画面”，并在窗口恢复、游戏重新渲染后自动继续。项目不会重复旧帧伪装成实时画面。
-
-### 14.3 画面有预览，但没有事件
-
-这是当前版本的预期现象之一。请确认：
-
-- `configs/default.toml` 中是否配置了有效模板。
-- 模板图片路径是否正确。
-- 当前是否已经接入真实 OCR。
-- 当前是否已经接入 YOLO 权重。
-- `perception.py` 是否输出了 `EventMachine` 需要的信号。
-
-只接入视频并不会自动获得地图、物品、技能或伤害语义。
-
-### 14.4 丢帧数增加是否一定是错误
-
-不一定。实时队列的设计是优先处理最新画面。当分析速度低于采集速度时，程序会丢弃旧帧来避免延迟越来越大。
-
-如果丢帧过多，可以尝试：
-
-- 降低输入分辨率。
-- 降低 `normal_fps`。
-- 缩小 ROI。
-- 使用更轻量的模型。
-- 减少每帧执行的 OCR 次数。
-- 调整 `queue_size`，但不要无限增大队列。
-
-### 14.5 是否必须保存视频
-
-不必须。MVP 主链路是实时分析：
-
-```text
-Windows Graphics Capture → NumPy/OpenCV帧 → 实时分析
-```
-
-保存视频是可选旁路，主要用于：
-
-- 问题复现。
-- 离线回放。
-- 制作训练数据。
-- 识别结果人工复核。
-
----
-
-## 15. 后续规划
-
-### 阶段 0：稳定视频输入（1～2 天）
-
-目标：不使用 AI 也能稳定获取画面。
-
-- 完成 Windows Graphics Capture 指定窗口连接。
-- 保持 Windows Graphics Capture 主链路稳定，并为未来的采集卡双机方案预留接口。
-- 确认分辨率、FPS、色彩格式和延迟。
-- 连续运行 30 分钟观察断流、黑屏和重连。
-- 完善视频设备错误提示和恢复机制。
-
-验收标准：可以稳定采集，能够记录采集帧数、分析帧数、丢帧数和错误。
-
-### 阶段 1：完善抽帧与证据链（2～3 天）
-
-- 增加按场景变化触发的自适应抽帧。
-- 完善事件前后证据帧保存。
-- 支持断线和恢复后的时间戳处理。
-- 增加 ROI 调试导出。
-
-验收标准：同一段视频能够复现稳定的帧号、时间戳和证据图片。
-
-### 阶段 2：模板、OCR 与 YOLO 感知（3～7 天）
-
-装备属性浮窗已经切换为 YOLO；OpenCV 规则检测器仅作为兼容和调试方案保留：
-
-- 游戏主界面模板。
-- 背包面板模板。
-- 战斗 UI 模板。
-- 地图名称固定 ROI。
-- 伤害数字固定 ROI。
-- 中文 OCR。
-- 文本清洗、白名单和常见错字纠正。
-
-验收标准：能够在短视频上输出游戏打开、地图变化、背包打开和战斗开始等候选事件。
-
-### 阶段 3：收集数据并训练轻量 YOLO（当前进行中，约 1～2 周）
-
-当前数据集已首先标注两个类别；不要把每个装备名称做成 YOLO 类别：
-
-```text
-inventory_panel
-battle_panel
-skill_region
-item_slot
-map_name_region
-damage_region
-```
-
-流程：
-
-```text
-录制/采集 → 抽帧 → 去重 → 标注 → train/val/test 划分
-→ 训练 → 评估 → 未见视频段回放 → 修正数据
-```
-
-数据集应该按“视频段”划分，而不是把相邻帧随机拆到训练集和验证集，否则评估指标可能虚高。
-
-### 阶段 4：接入真实 OCR 和识别融合（约 1 周）
-
-- 接入中文 OCR 引擎。
-- 增加地图、物品、技能和数字的文本清洗。
-- 将 YOLO 的区域定位结果传给 OCR。
-- 将 OCR 结果与模板、帧变化和状态机融合。
-- 保留原始文本、归一化文本和置信度。
-
-### 阶段 5：完善事件引擎（约 1 周）
-
-- 增加场景、地图、面板、战斗和回合状态。
-- 增加技能与伤害的时间关联。
-- 增加事件去重和冷却时间。
-- 增加低置信度人工复核标记。
-- 增加任务级事件，例如“师门任务开始/完成”。
-
-### 阶段 6：离线回放和评估（约 1 周）
-
-建立回放工具，显示：
-
-- 原始画面。
-- ROI 区域。
-- YOLO 检测框和置信度。
-- OCR 原文和归一化文本。
-- 当前状态。
-- 已输出事件。
-
-评估指标至少包括：
-
-```text
-事件精确率 = 正确输出事件数 / 输出事件总数
-事件召回率 = 正确识别事件数 / 真值事件总数
-时间误差   = 预测事件时间 - 人工标注时间
-```
-
-不要只看 YOLO mAP 或 OCR 字符准确率，最终要看业务事件是否正确。
-
-### 阶段 7：数据查询和报表
-
-- 将 JSONL 导入 SQLite。
-- 支持按日期、地图、战斗和事件类型查询。
-- 统计技能使用次数和伤害。
-- 生成游戏行为时间线。
-- 对低置信度事件提供人工修正。
-
-### 后续架构演进
-
-MVP 阶段保持单机、单进程、多线程：
-
-```text
-capture thread → bounded queue → inference worker → event writer
-```
-
-规模变大后再考虑拆分为：
-
-```text
-capture_service
-perception_service
-event_service
-review_tool
-```
-
-不建议在识别链路尚未稳定前过早微服务化。
-
----
-
-## 16. 贡献与开发原则
-
-### 16.1 先闭环，再追求模型复杂度
-
-优先完成：
-
-```text
-采集 → 抽帧 → 一个可靠信号 → 一个事件 → 一条日志 → 一张证据图
-```
-
-然后再逐步增加识别种类。
-
-### 16.2 每个识别结果都要可解释
-
-事件应尽可能保留：
-
-- 时间戳。
-- 证据帧。
-- 识别来源。
-- 模型或规则版本。
-- 置信度。
-- 原始文本。
-- 归一化文本。
-
-### 16.3 不要用单帧结论直接驱动业务事件
-
-应通过连续帧、时间窗口、冷却时间和上下文状态减少误报。
-
-### 16.4 训练集和验证集必须按视频段隔离
-
-相邻视频帧高度相似。如果随机拆分相邻帧，模型可能只是记住画面，而不是学会泛化。
-
-### 16.5 控制运行时数据体积
-
-视频、原始帧、证据图和日志默认保存在 `runtime/` 或 `recordings/`，这些目录已被 Git 忽略。提交代码时只提交必要的配置、文档、测试和小型示例。
-
-### 16.6 版本提交建议
-
-每次增加能力时，建议按以下顺序提交：
-
-```text
-1. 先提交数据模型或接口
-2. 再提交实现
-3. 添加测试
-4. 更新 README 或 docs
-5. 执行 pytest 和 ruff
-6. 最后提交和推送
-```
-
----
-
-## 当前项目一句话总结
-
-这是一个以 Windows Graphics Capture 指定游戏窗口为唯一桌面实时入口、以 NumPy/OpenCV 为图像处理基础、以 YOLO/OCR/模板匹配为可插拔感知手段、以时序状态机为事件确认核心，最终将《梦幻西游》游戏画面转换为可查询结构化数据的工程化 MVP。
+## 安全与隐私
+
+- `runtime/`、`.env`、`deployment-credentials.json`、证书私钥、SQLite 数据库和打包目录均被 Git 忽略。
+- 仓库只提供占位配置，不包含线上服务器地址、真实令牌或密码。
+- 每台从机使用独立密钥；密钥只经 HTTPS 发送。
+- 游戏截图只在本机内存中分析，不上传云端。
+- 提交前建议运行 `git status --short`，确认没有通过强制添加绕过 `.gitignore`。
+
+## 已知限制
+
+- Windows Graphics Capture 无法可靠读取已最小化窗口，因此最小化时暂停背包分析并显示状态。
+- 背包必须打开且完整可见；游戏内弹窗覆盖背包会被判定为检测受阻。
+- 识别效果依赖窗口尺寸、界面缩放和模板匹配，换分辨率后应先用真实截图验证。

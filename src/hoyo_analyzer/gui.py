@@ -16,13 +16,13 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", os.environ.get("HOYO_OPENCV_LOG_LEVEL"
 import cv2
 
 from .capture import make_source
-from .cli import _make_perception, _make_sink
+from .cli import _make_event_machine, _make_perception, _make_sink
 from .config import AppConfig, load_config
 from .equipment_dialog import EquipmentRecognitionDialog
 from .equipment_recognition import EquipmentRecognitionResult
-from .event_machine import EventMachine
 from .evidence import EvidenceWriter
 from .models import Event
+from .paths import application_root
 from .realtime import LiveStats, RealtimeAnalyzer
 from .wgc import (
     WindowInfo,
@@ -58,7 +58,7 @@ except ImportError as exc:
     raise RuntimeError("桌面界面需要 PySide6，请先执行：uv sync --dev") from exc
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = application_root()
 WGC_SOURCE = "windows-graphics-capture"
 OCCLUSION_WARNING_RATIO = 0.01
 WINDOW_WIDTH = 880
@@ -148,7 +148,7 @@ class RealtimeWorker(QObject):
                 source,
                 self.config,
                 _make_perception(self.config),
-                EventMachine(),
+                _make_event_machine(self.config),
                 _make_sink(self.config),
                 EvidenceWriter(
                     self.config.evidence.directory,
@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         self.game_window_present = False
         self.missing_game_scan_ticks = 0
         self.window_scan_quiet = False
+        self._active_alerts: set[QMessageBox] = set()
 
         self._build_ui()
         self._refresh_windows()
@@ -1004,6 +1005,43 @@ class MainWindow(QMainWindow):
         self.events.scrollToBottom()
         self.log.appendPlainText(f"{event.display_time} {event.display_name} {event.payload}")
         self.output_label.setText("正在输出事件")
+        self._show_local_inventory_alert(event)
+
+    def _show_local_inventory_alert(self, event: Event) -> None:
+        messages = {
+            "inventory_full": (
+                QMessageBox.Icon.Critical,
+                "背包已满",
+                "检测到当前游戏窗口的 20 个背包格子已经全部占用，请尽快处理。",
+            ),
+            "inventory_not_open": (
+                QMessageBox.Icon.Warning,
+                "请打开背包",
+                "当前游戏窗口没有打开背包，程序无法检查是否已满。请让操作员工打开背包。",
+            ),
+            "inventory_detection_blocked": (
+                QMessageBox.Icon.Warning,
+                "背包检测被遮挡",
+                "背包可能被聊天、属性或其他窗口遮挡，请关闭遮挡窗口并保持背包可见。",
+            ),
+        }
+        alert_details = messages.get(event.type)
+        if alert_details is None:
+            return
+        icon, title, text = alert_details
+        QApplication.beep()
+        alert = QMessageBox(self)
+        alert.setIcon(icon)
+        alert.setWindowTitle(title)
+        alert.setText(text)
+        alert.setInformativeText(f"窗口：{self.selected_window_name}\n时间：{event.display_time}")
+        alert.setStandardButtons(QMessageBox.StandardButton.Ok)
+        alert.setWindowModality(Qt.WindowModality.NonModal)
+        alert.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        alert.finished.connect(lambda _result, current=alert: self._active_alerts.discard(current))
+        self._active_alerts.add(alert)
+        alert.show()
+        alert.raise_()
 
     def _refresh_status(self) -> None:
         self._refresh_occlusion_status_async()
@@ -1070,6 +1108,8 @@ class MainWindow(QMainWindow):
         self._update_start_availability()
 
     def closeEvent(self, event: Any) -> None:
+        for alert in tuple(self._active_alerts):
+            alert.close()
         if self.worker is not None:
             self.worker.stop()
         if self.thread is not None:

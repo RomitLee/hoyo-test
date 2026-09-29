@@ -7,6 +7,8 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .pyright/
+build/
+dist/
 
 # Runtime data
 runtime/
@@ -41,6 +43,17 @@ models/**/*.pt
 # Local secrets and settings
 .env
 *.local.toml
+deployment-credentials.json
+*.pem
+*.key
+*.sqlite3
+server/certbot/
+server/Caddyfile.runtime
+
+# Private/custom alarm media. The application generates a built-in alarm
+# melody when this optional file is absent.
+*.flac
+assets/sounds/inventory_alert.wav
 
 # Versioned visual templates
 !assets/

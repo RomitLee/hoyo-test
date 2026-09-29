@@ -58,11 +58,35 @@ OcrCallback = Callable[[np.ndarray], tuple[str, str]]
 RegionDetector = Callable[[np.ndarray], EquipmentRegionDetection | None]
 
 ATTRIBUTE_NAMES = (
-    "法术伤害", "法术防御", "力量", "体质", "魔力", "耐力", "敏捷", "伤害", "命中", "防御",
-    "气血", "速度", "躲避", "灵力", "等级",
+    "法术伤害",
+    "法术防御",
+    "力量",
+    "体质",
+    "魔力",
+    "耐力",
+    "敏捷",
+    "伤害",
+    "命中",
+    "防御",
+    "气血",
+    "速度",
+    "躲避",
+    "灵力",
+    "等级",
 )
 CATEGORY_NAMES = (
-    "武器", "头盔", "发钗", "项链", "铠甲", "女衣", "腰带", "鞋子", "戒指", "耳饰", "手镯", "配饰",
+    "武器",
+    "头盔",
+    "发钗",
+    "项链",
+    "铠甲",
+    "女衣",
+    "腰带",
+    "鞋子",
+    "戒指",
+    "耳饰",
+    "手镯",
+    "配饰",
 )
 
 
@@ -108,7 +132,12 @@ def parse_equipment_text(raw_text: str) -> dict[str, Any]:
         for index, line in enumerate(lines[:8], start=1):
             if line != equipment_name:
                 attributes[f"识别文本{index}"] = line
-    return {"equipment_name": equipment_name or "未识别", "level": level, "category": category, "attributes": attributes}
+    return {
+        "equipment_name": equipment_name or "未识别",
+        "level": level,
+        "category": category,
+        "attributes": attributes,
+    }
 
 
 @lru_cache(maxsize=1)
@@ -209,7 +238,9 @@ class EquipmentImageRecognizer:
             return callback
         return None
 
-    def _detect_and_crop(self, image: np.ndarray) -> tuple[np.ndarray | None, EquipmentRegionDetection | None, str | None]:
+    def _detect_and_crop(
+        self, image: np.ndarray
+    ) -> tuple[np.ndarray | None, EquipmentRegionDetection | None, str | None]:
         if not self._require_region:
             return image, None, None
         assert self._yolo_detector is not None
@@ -225,7 +256,9 @@ class EquipmentImageRecognizer:
         crop = image[y1:y2, x1:x2]
         if crop.size == 0:
             return None, None, "YOLO检测框无效，无法裁剪装备属性浮窗。"
-        adjusted = EquipmentRegionDetection((x1, y1, x2, y2), detection.confidence, detection.class_id, detection.class_name)
+        adjusted = EquipmentRegionDetection(
+            (x1, y1, x2, y2), detection.confidence, detection.class_id, detection.class_name
+        )
         return crop, adjusted, None
 
     def recognize(self, image_path: str | Path) -> EquipmentRecognitionResult:
@@ -234,7 +267,9 @@ class EquipmentImageRecognizer:
         now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
         base = {"source_path": str(path), "image_width": 0, "image_height": 0, "recognized_at": now}
         if image is None or image.size == 0:
-            return EquipmentRecognitionResult(status="invalid_image", message="无法读取图片，请重新选择 PNG、JPG 或 BMP 图片。", **base)
+            return EquipmentRecognitionResult(
+                status="invalid_image", message="无法读取图片，请重新选择 PNG、JPG 或 BMP 图片。", **base
+            )
         base.update(image_width=int(image.shape[1]), image_height=int(image.shape[0]))
 
         crop, detection, detector_error = self._detect_and_crop(image)
@@ -251,7 +286,9 @@ class EquipmentImageRecognizer:
 
         region_path: str | None = None
         if detection is not None and self.region_output_dir:
-            region_file = self.region_output_dir / f"tooltip_{datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S_%f')}.png"
+            region_file = (
+                self.region_output_dir / f"tooltip_{datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M%S_%f')}.png"
+            )
             if _write_image(region_file, crop):
                 region_path = str(region_file)
 
@@ -282,7 +319,9 @@ class EquipmentImageRecognizer:
         has_content = bool(raw_text.strip())
         return EquipmentRecognitionResult(
             status="recognized" if has_content else "empty_result",
-            message="已用YOLO定位浮窗并完成OCR，请核对名称和属性。" if has_content else "已定位浮窗，但OCR未识别到文字，请换一张清晰截图。",
+            message="已用YOLO定位浮窗并完成OCR，请核对名称和属性。"
+            if has_content
+            else "已定位浮窗，但OCR未识别到文字，请换一张清晰截图。",
             engine=engine_name or self._engine_name or "OCR",
             raw_text=raw_text.strip(),
             **common,

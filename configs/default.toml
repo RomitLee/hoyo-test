@@ -1,40 +1,24 @@
 [capture]
 source = "windows-graphics-capture"
-path = "recordings/demo.mp4"
-device_index = 0
-source_id = "wgc-window"
 window_title_keyword = "梦幻西游"
 
 [sampling]
 normal_fps = 5.0
-battle_fps = 10.0
-burst_fps = 20.0
-burst_duration_ms = 1500
-queue_size = 3
-
-[evidence]
-pre_buffer_ms = 2000
-post_buffer_ms = 3000
-directory = "runtime/evidence"
-
-[equipment]
-# 正式界面检测使用双类别 YOLO：equipment_tooltip + inventory_panel。OpenCV 规则检测器仅保留为兼容/调试后端。
-enabled = true
-backend = "yolo"
-model_path = "models/equipment_tooltip/best.pt"
-confidence = 0.65
-image_size = 640
-device = "auto"
-stable_frames = 3
-output_directory = "runtime/equipment/tooltips"
 
 [output]
-event_log = "runtime/events/events.jsonl"
-console = true
+event_log = "runtime/events/inventory_events.jsonl"
 
-# 模板匹配命中后会产生同名 signal。当前内置背包标题栏模板，
-# 用于将“画面变化”进一步识别为 inventory_opened。
-[templates]
-inventory_open = "assets/templates/inventory_open.png"
-# 后续可继续添加：
-# game_visible = "assets/templates/game_visible.png"
+[inventory_monitor]
+# 连续 3 个分析帧结果一致才确认，避免动画、鼠标悬停和短时遮挡误报。
+enabled = true
+template_path = "assets/templates/inventory_open.png"
+confirm_frames = 3
+# 所有告警状态必须连续保持约 5 秒才允许告警；中途恢复即重新计时。
+alert_confirm_seconds = 5.0
+# 背包满载只在状态刚变为 full 时提醒；若频繁变化，仍至少间隔 5 分钟。
+full_cooldown_seconds = 300
+# 程序启动后给员工 10 秒打开背包；仍未打开则每 60 秒提醒一次。
+closed_grace_seconds = 10
+closed_reminder_seconds = 60
+# 背包被其他窗口遮挡时每 2 分钟提醒一次。
+invalid_reminder_seconds = 120

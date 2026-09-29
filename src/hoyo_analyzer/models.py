@@ -31,6 +31,9 @@ EVENT_NAMES_ZH: dict[str, str] = {
     "battle_ended": "战斗结束",
     "map_entered": "进入地图",
     "inventory_items_read": "读取背包物品",
+    "inventory_full": "背包已满",
+    "inventory_not_open": "背包未打开",
+    "inventory_detection_blocked": "背包检测被遮挡",
     "skill_used": "使用技能",
     "damage_dealt": "造成伤害",
 }

@@ -11,7 +11,9 @@ from .config import AppConfig, load_config
 from .equipment_detector import OpenCVTooltipDetector, TooltipDetectorConfig
 from .event_machine import EventMachine
 from .evidence import EvidenceWriter
+from .inventory_fullness import InventoryFullnessDetector
 from .models import FramePacket
+from .paths import resolve_application_path
 from .perception import RuleBasedPerception, TemplateSpec
 from .realtime import RealtimeAnalyzer
 from .sampler import AdaptiveSampler, SamplingProfile
@@ -70,7 +72,7 @@ def _resolve_project_path(value: str) -> Path:
     candidate = Path(value).expanduser()
     if candidate.is_absolute():
         return candidate
-    project_candidate = Path(__file__).resolve().parents[2] / candidate
+    project_candidate = resolve_application_path(candidate)
     return project_candidate if project_candidate.exists() else candidate
 
 
@@ -105,7 +107,18 @@ def _make_perception(config: AppConfig) -> RuleBasedPerception:
                 device=config.equipment.device,
                 stable_frames=config.equipment.stable_frames,
             )
-    return RuleBasedPerception(templates, equipment_detector=equipment_detector)
+    inventory_detector = None
+    if config.inventory_monitor.enabled:
+        inventory_detector = InventoryFullnessDetector(_resolve_project_path(config.inventory_monitor.template_path))
+    return RuleBasedPerception(
+        templates,
+        equipment_detector=equipment_detector,
+        inventory_fullness_detector=inventory_detector,
+    )
+
+
+def _make_event_machine(config: AppConfig) -> EventMachine:
+    return EventMachine(inventory_monitor=config.inventory_monitor)
 
 
 def _make_sink(config: AppConfig) -> CompositeEventSink:
@@ -116,7 +129,7 @@ def _make_sink(config: AppConfig) -> CompositeEventSink:
 
 
 def analyze_packets(packets: Iterable[FramePacket], config: AppConfig, fps: float | None = None) -> int:
-    sampler, perception, machine = _make_sampler(config, fps), _make_perception(config), EventMachine()
+    sampler, perception, machine = _make_sampler(config, fps), _make_perception(config), _make_event_machine(config)
     evidence = EvidenceWriter(config.evidence.directory, config.evidence.pre_buffer_ms)
     sink = _make_sink(config)
     last = None
@@ -192,7 +205,7 @@ def run_live(args: argparse.Namespace, config: AppConfig) -> int:
         source,
         config,
         _make_perception(config),
-        EventMachine(),
+        _make_event_machine(config),
         sink,
         EvidenceWriter(config.evidence.directory, config.evidence.pre_buffer_ms),
     )

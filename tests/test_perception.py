@@ -1,5 +1,6 @@
 import numpy as np
 
+from hoyo_analyzer.inventory_fullness import InventoryAnalysis, InventoryStatus
 from hoyo_analyzer.models import FramePacket
 from hoyo_analyzer.perception import RuleBasedPerception, TemplateSpec
 
@@ -87,3 +88,22 @@ def test_yolo_inventory_panel_signal_is_used_for_slot_gate():
 
     assert observation.get("inventory_open")["active"] is True
     assert observation.get("equipment_slot_hover")["active"] is True
+
+
+def test_inventory_fullness_detector_is_exposed_as_observation_signal():
+    class FakeInventoryDetector:
+        def analyze(self, _image):
+            return InventoryAnalysis(
+                InventoryStatus.FULL,
+                0.96,
+                "all 20 slots are occupied",
+                grid_bbox=(10, 20, 110, 120),
+            )
+
+    perception = RuleBasedPerception(inventory_fullness_detector=FakeInventoryDetector())
+    observation = perception.observe(FramePacket(0, 0, np.zeros((200, 200, 3), dtype=np.uint8)))
+
+    signal = observation.signals["inventory_fullness"]
+    assert signal["status"] == "full"
+    assert signal["active"] is True
+    assert signal["grid_bbox"] == [10, 20, 110, 120]

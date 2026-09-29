@@ -1,3 +1,4 @@
+from hoyo_analyzer.config import InventoryMonitorConfig
 from hoyo_analyzer.event_machine import EventMachine
 from hoyo_analyzer.models import Observation
 
@@ -103,3 +104,98 @@ def test_equipment_tooltip_is_blocked_over_right_item_grid():
 
     assert [event.type for event in opened] == ["inventory_opened"]
     assert machine.update(obs(2, inventory_open=True, equipment_slot_hover=False, equipment_tooltip=tooltip)) == []
+
+
+def fullness_signal(status: str, empty_count: int = 0):
+    return {
+        "status": status,
+        "confidence": 0.96,
+        "empty_count": empty_count,
+        "occupied_count": 20 - empty_count,
+        "unknown_count": 0,
+        "reason": "test",
+    }
+
+
+def test_inventory_full_alert_requires_three_consecutive_frames():
+    policy = InventoryMonitorConfig(confirm_frames=3, alert_confirm_seconds=0, full_cooldown_seconds=300)
+    machine = EventMachine(rules=(), inventory_monitor=policy)
+
+    assert machine.update(obs(0, inventory_fullness=fullness_signal("full"))) == []
+    assert machine.update(obs(1, inventory_fullness=fullness_signal("full"))) == []
+    events = machine.update(obs(2, inventory_fullness=fullness_signal("full")))
+
+    assert [event.type for event in events] == ["inventory_full"]
+    assert events[0].payload["occupied_count"] == 20
+    assert machine.update(obs(3, inventory_fullness=fullness_signal("full"))) == []
+
+
+def test_inventory_full_alert_requires_five_continuous_seconds():
+    policy = InventoryMonitorConfig(confirm_frames=3, alert_confirm_seconds=5, full_cooldown_seconds=300)
+    machine = EventMachine(rules=(), inventory_monitor=policy)
+
+    for index in range(50):
+        assert machine.update(obs(index, inventory_fullness=fullness_signal("full"))) == []
+    events = machine.update(obs(50, inventory_fullness=fullness_signal("full")))
+
+    assert [event.type for event in events] == ["inventory_full"]
+
+
+def test_non_full_frame_breaks_full_confirmation():
+    machine = EventMachine(
+        rules=(), inventory_monitor=InventoryMonitorConfig(confirm_frames=3, alert_confirm_seconds=0)
+    )
+    machine.update(obs(0, inventory_fullness=fullness_signal("full")))
+    machine.update(obs(1, inventory_fullness=fullness_signal("not_full", 8)))
+    machine.update(obs(2, inventory_fullness=fullness_signal("full")))
+    assert machine.update(obs(3, inventory_fullness=fullness_signal("full"))) == []
+
+    events = machine.update(obs(4, inventory_fullness=fullness_signal("full")))
+    assert [event.type for event in events] == ["inventory_full"]
+
+
+def test_inventory_closed_reminder_respects_grace_and_repeats_after_cooldown():
+    policy = InventoryMonitorConfig(
+        confirm_frames=3,
+        alert_confirm_seconds=0,
+        closed_grace_seconds=1,
+        closed_reminder_seconds=1,
+    )
+    machine = EventMachine(rules=(), inventory_monitor=policy)
+
+    for index in range(10):
+        assert machine.update(obs(index, inventory_fullness=fullness_signal("inventory_closed"))) == []
+    first = machine.update(obs(10, inventory_fullness=fullness_signal("inventory_closed")))
+    assert [event.type for event in first] == ["inventory_not_open"]
+    assert machine.update(obs(11, inventory_fullness=fullness_signal("inventory_closed"))) == []
+    repeated = machine.update(obs(20, inventory_fullness=fullness_signal("inventory_closed")))
+    assert [event.type for event in repeated] == ["inventory_not_open"]
+
+
+def test_invalid_inventory_emits_blocked_alert_after_confirmation():
+    policy = InventoryMonitorConfig(
+        confirm_frames=3,
+        alert_confirm_seconds=5,
+        invalid_reminder_seconds=120,
+    )
+    machine = EventMachine(rules=(), inventory_monitor=policy)
+
+    for index in range(50):
+        assert machine.update(obs(index, inventory_fullness=fullness_signal("invalid"))) == []
+    events = machine.update(obs(50, inventory_fullness=fullness_signal("invalid")))
+
+    assert [event.type for event in events] == ["inventory_detection_blocked"]
+
+
+def test_short_invalid_inventory_hint_does_not_alert_and_resets_timer():
+    policy = InventoryMonitorConfig(confirm_frames=3, alert_confirm_seconds=5)
+    machine = EventMachine(rules=(), inventory_monitor=policy)
+
+    for index in range(30):
+        assert machine.update(obs(index, inventory_fullness=fullness_signal("invalid"))) == []
+    assert machine.update(obs(30, inventory_fullness=fullness_signal("not_full", 8))) == []
+    for index in range(31, 81):
+        assert machine.update(obs(index, inventory_fullness=fullness_signal("invalid"))) == []
+
+    events = machine.update(obs(81, inventory_fullness=fullness_signal("invalid")))
+    assert [event.type for event in events] == ["inventory_detection_blocked"]

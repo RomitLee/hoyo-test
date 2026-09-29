@@ -1,0 +1,53 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - relay_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RELAY_IP_ADDRESS: ${RELAY_IP_ADDRESS}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.runtime:/etc/caddy/Caddyfile:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    networks:
+      - internal
+
+  certbot:
+    image: certbot/certbot:v5.4.0
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+
+networks:
+  internal:
+
+volumes:
+  relay_data:
+  caddy_data:
+  caddy_config:
+  caddy_logs:

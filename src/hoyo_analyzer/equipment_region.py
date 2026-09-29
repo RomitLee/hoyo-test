@@ -134,9 +134,7 @@ class YoloEquipmentRegionDetector:
             class_name = self._class_name(result, class_id)
             # A class-id fallback makes models exported without names usable,
             # while named classes remain the safe/default path.
-            if class_name != self.REQUIRED_CLASS_NAME and not (
-                class_name.startswith("class_") and class_id == 0
-            ):
+            if class_name != self.REQUIRED_CLASS_NAME and not (class_name.startswith("class_") and class_id == 0):
                 continue
             bbox: BBox = (
                 max(0, min(width, round(float(xyxy[0])))),

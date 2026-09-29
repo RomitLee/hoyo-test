@@ -86,7 +86,9 @@ class EquipmentRecognitionDialog(QDialog):
         title = QLabel("装备识别")
         title.setObjectName("resultTitle")
         root.addWidget(title)
-        hint = QLabel("支持选择游戏完整截图或直接粘贴剪贴板图片（Ctrl+V）。YOLO会先定位装备属性浮窗，再交给OCR读取名称和属性。")
+        hint = QLabel(
+            "支持选择游戏完整截图或直接粘贴剪贴板图片（Ctrl+V）。YOLO会先定位装备属性浮窗，再交给OCR读取名称和属性。"
+        )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -103,7 +105,9 @@ class EquipmentRecognitionDialog(QDialog):
         right.setSpacing(8)
         self.result_text = QPlainTextEdit()
         self.result_text.setReadOnly(True)
-        self.result_text.setPlaceholderText("识别结果会显示在这里…\n请先训练并放置 YOLO 权重：models/equipment_tooltip/best.pt")
+        self.result_text.setPlaceholderText(
+            "识别结果会显示在这里…\n请先训练并放置 YOLO 权重：models/equipment_tooltip/best.pt"
+        )
         right.addWidget(self.result_text, 1)
         body.addLayout(right, 1)
         root.addLayout(body, 1)
@@ -156,7 +160,11 @@ class EquipmentRecognitionDialog(QDialog):
         self.result = None
         self.save_button.setEnabled(False)
         self.result_text.clear()
-        self.preview.setPixmap(QPixmap.fromImage(image).scaled(self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.preview.setPixmap(
+            QPixmap.fromImage(image).scaled(
+                self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+        )
         self.recognize_button.setEnabled(True)
 
     @Slot()
@@ -176,7 +184,9 @@ class EquipmentRecognitionDialog(QDialog):
 
         clipboard_image = QApplication.clipboard().image()
         if clipboard_image.isNull():
-            QMessageBox.information(self, "剪贴板没有图片", "请先复制一张装备属性面板图片，再点击“粘贴图片”或按 Ctrl+V。")
+            QMessageBox.information(
+                self, "剪贴板没有图片", "请先复制一张装备属性面板图片，再点击“粘贴图片”或按 Ctrl+V。"
+            )
             return
         output_dir = self.project_root / "runtime" / "equipment" / "recognition_inputs"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -274,12 +284,24 @@ class EquipmentRecognitionDialog(QDialog):
         if self.selected_image_path:
             source = QPixmap(str(self.selected_image_path))
             if not source.isNull():
-                painter.drawPixmap(44, 120, source.scaled(812, 360, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                painter.drawPixmap(
+                    44,
+                    120,
+                    source.scaled(
+                        812, 360, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                    ),
+                )
         if result.detected_region_path:
             region = QPixmap(result.detected_region_path)
             if not region.isNull():
                 painter.drawText(44, 510, "YOLO定位的装备属性浮窗")
-                painter.drawPixmap(44, 525, region.scaled(380, 250, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                painter.drawPixmap(
+                    44,
+                    525,
+                    region.scaled(
+                        380, 250, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                    ),
+                )
         painter.setPen(Qt.GlobalColor.black)
         y = 810
         rows = [("装备名称", result.equipment_name), ("装备类型", result.category), ("装备等级", result.level)]

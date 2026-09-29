@@ -1,19 +1,16 @@
 [project]
 name = "hoyo-analyzer"
-version = "0.1.0"
-description = "梦幻西游-希联文超助手：Windows 游戏窗口实时视频行为分析 MVP"
+version = "0.3.0"
+description = "梦幻西游 Windows 游戏窗口背包状态监控"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26,<3",
     "opencv-python>=4.9,<5",
+    "pygame>=2.6,<3",
     "PySide6>=6.7,<7",
     "windows-capture>=2.0.1,<3 ; sys_platform == 'win32'",
 ]
-
-[project.optional-dependencies]
-yolo = ["ultralytics>=8.0"]
-equipment = ["rapidocr>=3.9,<4", "onnxruntime>=1.20", "ultralytics>=8.0"]
 
 [dependency-groups]
 dev = ["pytest>=8.0,<9", "ruff>=0.6,<1"]

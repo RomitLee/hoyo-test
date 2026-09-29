@@ -1,0 +1,38 @@
+{
+    default_sni {$RELAY_IP_ADDRESS}
+}
+
+http://{$RELAY_IP_ADDRESS} {
+    handle /.well-known/acme-challenge/* {
+        root * /var/www/certbot
+        file_server
+    }
+
+    handle {
+        redir https://{$RELAY_IP_ADDRESS}{uri} permanent
+    }
+}
+
+https://{$RELAY_IP_ADDRESS} {
+    tls /etc/letsencrypt/live/{$RELAY_IP_ADDRESS}/fullchain.pem /etc/letsencrypt/live/{$RELAY_IP_ADDRESS}/privkey.pem
+    encode zstd gzip
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+    }
+
+    reverse_proxy relay:8000
+
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 10MiB
+            roll_keep 5
+            roll_keep_for 168h
+        }
+        format json
+    }
+}

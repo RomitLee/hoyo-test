@@ -1,0 +1,10 @@
+http://{$RELAY_IP_ADDRESS} {
+    handle /.well-known/acme-challenge/* {
+        root * /var/www/certbot
+        file_server
+    }
+
+    handle {
+        reverse_proxy relay:8000
+    }
+}

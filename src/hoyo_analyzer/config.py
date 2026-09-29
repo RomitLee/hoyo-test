@@ -68,12 +68,27 @@ class EquipmentConfig:
 
 
 @dataclass(slots=True)
+class InventoryMonitorConfig:
+    """Inventory-fullness detection and local reminder policy."""
+
+    enabled: bool = True
+    template_path: str = "assets/templates/inventory_open.png"
+    confirm_frames: int = 3
+    alert_confirm_seconds: float = 5.0
+    full_cooldown_seconds: int = 300
+    closed_grace_seconds: int = 10
+    closed_reminder_seconds: int = 60
+    invalid_reminder_seconds: int = 120
+
+
+@dataclass(slots=True)
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     equipment: EquipmentConfig = field(default_factory=EquipmentConfig)
+    inventory_monitor: InventoryMonitorConfig = field(default_factory=InventoryMonitorConfig)
     templates: dict[str, str] = field(default_factory=dict)
 
 
@@ -89,6 +104,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ("evidence", config.evidence),
         ("output", config.output),
         ("equipment", config.equipment),
+        ("inventory_monitor", config.inventory_monitor),
     ):
         section = data.get(name, {})
         if isinstance(section, dict):

@@ -9,6 +9,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from .equipment_slots import detect_equipment_slot_hover
+from .inventory_fullness import InventoryFullnessDetector, InventoryStatus
 from .models import FramePacket, Observation
 from .ocr import NullOcrEngine, OcrEngine
 from .roi import PixelROI, RelativeROI, crop_roi
@@ -45,11 +46,13 @@ class RuleBasedPerception:
         ocr: OcrEngine | None = None,
         change_threshold: float = 0.025,
         equipment_detector: TooltipDetector | None = None,
+        inventory_fullness_detector: InventoryFullnessDetector | None = None,
     ) -> None:
         self.templates = templates or []
         self.ocr = ocr or NullOcrEngine()
         self.change_threshold = change_threshold
         self.equipment_detector = equipment_detector
+        self.inventory_fullness_detector = inventory_fullness_detector
         self._previous_gray: np.ndarray | None = None
         self._loaded_templates: dict[str, np.ndarray] = {}
 
@@ -148,6 +151,19 @@ class RuleBasedPerception:
             "change_score": change_score,
         }
         signals.update(self._template_signals(packet.image))
+        if self.inventory_fullness_detector is not None:
+            fullness = self.inventory_fullness_detector.analyze(packet.image)
+            signals["inventory_fullness"] = {
+                "active": fullness.status is InventoryStatus.FULL,
+                "status": fullness.status.value,
+                "confidence": fullness.confidence,
+                "reason": fullness.reason,
+                "empty_count": fullness.empty_count,
+                "occupied_count": fullness.occupied_count,
+                "unknown_count": fullness.unknown_count,
+                "grid_bbox": list(fullness.grid_bbox) if fullness.grid_bbox else None,
+                "location_method": fullness.location_method,
+            }
         tooltip: dict[str, Any] | None = None
         if self.equipment_detector is not None:
             tooltip = self.equipment_detector.update(packet.image)

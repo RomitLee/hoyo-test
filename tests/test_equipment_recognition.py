@@ -7,9 +7,7 @@ from hoyo_analyzer.equipment_recognition import EquipmentImageRecognizer, parse_
 
 
 def test_parse_equipment_text_extracts_name_level_category_and_attributes():
-    parsed = parse_equipment_text(
-        "紫香乌金裙\n120级 女衣\n防御 300\n力量 +20\n敏捷 +15\n"
-    )
+    parsed = parse_equipment_text("紫香乌金裙\n120级 女衣\n防御 300\n力量 +20\n敏捷 +15\n")
 
     assert parsed["equipment_name"] == "紫香乌金裙"
     assert parsed["level"] == "120级"
@@ -24,9 +22,7 @@ def test_recognizer_reads_unicode_path_and_uses_injected_ocr(tmp_path: Path):
     assert success
     encoded.tofile(image_path)
 
-    recognizer = EquipmentImageRecognizer(
-        ocr_callback=lambda _image: ("紫香乌金裙\n120级 女衣\n力量 +20", "测试OCR")
-    )
+    recognizer = EquipmentImageRecognizer(ocr_callback=lambda _image: ("紫香乌金裙\n120级 女衣\n力量 +20", "测试OCR"))
     result = recognizer.recognize(image_path)
 
     assert result.status == "recognized"
@@ -40,9 +36,7 @@ def test_recognizer_reads_unicode_path_and_uses_injected_ocr(tmp_path: Path):
 
 
 def test_recognizer_returns_invalid_image_for_missing_file(tmp_path: Path):
-    result = EquipmentImageRecognizer(ocr_callback=lambda _image: ("", "测试OCR")).recognize(
-        tmp_path / "missing.png"
-    )
+    result = EquipmentImageRecognizer(ocr_callback=lambda _image: ("", "测试OCR")).recognize(tmp_path / "missing.png")
 
     assert result.status == "invalid_image"
     assert "无法读取图片" in result.message

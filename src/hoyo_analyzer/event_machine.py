@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .config import InventoryMonitorConfig
 from .models import Event, EventStatus, Observation, RuntimeState, format_beijing_time
 
 
@@ -43,7 +44,12 @@ DEFAULT_RULES = (
 class EventMachine:
     """Convert noisy per-frame signals into confirmed enter/exit events."""
 
-    def __init__(self, rules: tuple[SignalRule, ...] = DEFAULT_RULES, map_cooldown_ms: int = 500) -> None:
+    def __init__(
+        self,
+        rules: tuple[SignalRule, ...] = DEFAULT_RULES,
+        map_cooldown_ms: int = 500,
+        inventory_monitor: InventoryMonitorConfig | None = None,
+    ) -> None:
         self.rules = rules
         self.state = RuntimeState()
         self._event_counter = 0
@@ -52,6 +58,15 @@ class EventMachine:
         self.map_cooldown_ms = map_cooldown_ms
         self._last_skill = None
         self._last_damage = None
+        self.inventory_monitor = inventory_monitor or InventoryMonitorConfig()
+        self._inventory_tracker: dict[str, Any] = {
+            "candidate": None,
+            "candidate_since_ms": None,
+            "count": 0,
+            "stable": None,
+            "full_alert_attempted": False,
+        }
+        self._inventory_monitor_started_ms: int | None = None
 
     def _new_event(self, obs: Observation, kind: str, payload: dict[str, Any] | None = None) -> Event:
         self._event_counter += 1
@@ -82,6 +97,78 @@ class EventMachine:
             return None
         self._last_event_ms[event.type] = event.timestamp_ms
         return event
+
+    def _update_inventory_alerts(self, obs: Observation) -> list[Event]:
+        config = self.inventory_monitor
+        raw = obs.get("inventory_fullness")
+        if not config.enabled or not isinstance(raw, dict):
+            return []
+        status = str(raw.get("status", ""))
+        if status not in {"full", "almost_full", "not_full", "inventory_closed", "invalid"}:
+            return []
+        if self._inventory_monitor_started_ms is None:
+            self._inventory_monitor_started_ms = obs.timestamp_ms
+
+        tracker = self._inventory_tracker
+        if tracker["candidate"] == status:
+            tracker["count"] += 1
+            if tracker["candidate_since_ms"] is None or obs.timestamp_ms < tracker["candidate_since_ms"]:
+                tracker["candidate_since_ms"] = obs.timestamp_ms
+        else:
+            tracker.update(
+                candidate=status,
+                candidate_since_ms=obs.timestamp_ms,
+                count=1,
+                full_alert_attempted=False,
+            )
+        if tracker["count"] >= max(1, int(config.confirm_frames)) and tracker["stable"] != status:
+            tracker["stable"] = status
+        if tracker["stable"] != status:
+            return []
+
+        payload = {
+            "inventory_status": status,
+            "empty_count": int(raw.get("empty_count", 0)),
+            "occupied_count": int(raw.get("occupied_count", 0)),
+            "unknown_count": int(raw.get("unknown_count", 0)),
+            "reason": str(raw.get("reason", "")),
+        }
+        if raw.get("grid_bbox") is not None:
+            payload["grid_bbox"] = raw["grid_bbox"]
+
+        kind: str | None = None
+        cooldown_ms = 0
+        candidate_since = tracker["candidate_since_ms"]
+        candidate_since_ms = obs.timestamp_ms if candidate_since is None else int(candidate_since)
+        candidate_duration_ms = max(0, obs.timestamp_ms - candidate_since_ms)
+        alert_confirm_ms = max(0.0, float(config.alert_confirm_seconds)) * 1000
+        if status == "full" and candidate_duration_ms >= alert_confirm_ms and not tracker["full_alert_attempted"]:
+            tracker["full_alert_attempted"] = True
+            kind = "inventory_full"
+            cooldown_ms = max(0, int(config.full_cooldown_seconds)) * 1000
+        elif status == "inventory_closed":
+            started_ms = (
+                self._inventory_monitor_started_ms
+                if self._inventory_monitor_started_ms is not None
+                else obs.timestamp_ms
+            )
+            grace_ms = max(0, int(config.closed_grace_seconds)) * 1000
+            if obs.timestamp_ms - started_ms >= grace_ms and candidate_duration_ms >= alert_confirm_ms:
+                kind = "inventory_not_open"
+                cooldown_ms = max(0, int(config.closed_reminder_seconds)) * 1000
+        elif status == "invalid" and candidate_duration_ms >= alert_confirm_ms:
+            kind = "inventory_detection_blocked"
+            cooldown_ms = max(0, int(config.invalid_reminder_seconds)) * 1000
+
+        if kind is None:
+            return []
+        event = self._new_event(obs, kind, payload)
+        try:
+            event.confidence = float(raw.get("confidence", obs.confidence))
+        except (TypeError, ValueError):
+            event.confidence = obs.confidence
+        emitted = self._emit_if_allowed(event, cooldown_ms)
+        return [emitted] if emitted is not None else []
 
     def update(self, obs: Observation) -> list[Event]:
         events: list[Event] = []
@@ -148,6 +235,7 @@ class EventMachine:
                 event = None
             if event:
                 events.append(event)
+        events.extend(self._update_inventory_alerts(obs))
         map_name = obs.get("map_name")
         if map_name and map_name != self.state.map_name:
             event = self._emit_if_allowed(
