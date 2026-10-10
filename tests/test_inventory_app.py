@@ -6,8 +6,10 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
+from hoyo_analyzer import __version__
 from hoyo_analyzer.inventory_app import (
     APP_NAME,
     MAX_MONITORED_WINDOWS,
@@ -17,8 +19,8 @@ from hoyo_analyzer.inventory_app import (
 )
 from hoyo_analyzer.inventory_fullness import InventoryAnalysis, InventoryStatus, SlotResult, SlotState
 from hoyo_analyzer.multi_inventory_app import InventoryMonitorWindow
-from hoyo_analyzer.slave_settings import ALERT_LOCAL, ALERT_NONE, SlaveSettings
-from hoyo_analyzer.wgc import OccludingWindow, WindowOcclusionStatus
+from hoyo_analyzer.slave_settings import CAPACITY_ALERT_HOST_LOCAL, SlaveSettings
+from hoyo_analyzer.wgc import OccludingWindow, WindowInfo, WindowOcclusionStatus
 
 
 @pytest.fixture(autouse=True)
@@ -57,12 +59,21 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
     window = InventoryMonitorWindow()
     try:
         assert window.windowTitle() == APP_NAME
-        assert (window.width(), window.height()) == (800, 600)
+        assert not window.windowIcon().isNull()
+        assert (window.width(), window.height()) == (800, 632)
+        assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+        assert window.title_bar.height() == 32
         assert window.add_window_button.text() == "＋ 增加窗口"
+        assert window.add_window_button.property("role") == "primary"
         assert window.monitoring_button.text() == "暂停监控"
+        assert window.minimize_all_button.text() == "一键最小化"
+        assert window.minimize_all_button.property("role") == "danger"
         assert window.settings_button.text() == "设置"
         assert window.background_button.text() == "后台监控"
+        assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
+        assert __version__ == "V1.2.0"
+        assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
         assert not hasattr(window, "minimize_warning_checkbox")
@@ -85,6 +96,84 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         app.processEvents()
 
 
+def test_mini_mode_preserves_runtime_and_restores_geometry(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.move(120, 80)
+    window.show()
+    app.processEvents()
+    original_position = window.pos()
+    timers = (
+        window.scan_timer,
+        window.window_state_timer,
+        window.occlusion_timer,
+        window.status_timer,
+    )
+    relay_client = window.relay_client
+    try:
+        window.mini_button.click()
+        app.processEvents()
+
+        assert window._mini_mode
+        assert (window.width(), window.height()) == (300, 90)
+        assert window.full_content.isHidden()
+        assert window.mini_content.isVisible()
+        assert window.mini_status_label.text() == "监控中"
+        assert window.mini_count_label.text() == "监控窗口 0"
+        assert window.relay_client is relay_client
+        assert all(timer.isActive() for timer in timers)
+        assert not window.monitoring_paused
+
+        window.move(360, 240)
+        window.restore_button.click()
+        app.processEvents()
+
+        assert not window._mini_mode
+        assert (window.width(), window.height()) == (800, 632)
+        assert window.pos() == original_position
+        assert window.full_content.isVisible()
+        assert window.mini_content.isHidden()
+        assert window.relay_client is relay_client
+        assert all(timer.isActive() for timer in timers)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_mini_status_tracks_pause_and_monitored_window_count(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    panels = []
+    try:
+        window._enter_mini_mode()
+        window._set_monitoring_paused(True)
+        assert window.mini_status_label.text() == "已暂停"
+
+        for index in range(2):
+            account = parse_account_info(f"[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 角色{index}[5458823{index}])]")
+            panel = window._make_output_panel(index + 1, account)[0]
+            panels.append(panel)
+            window.sessions[index + 1] = SimpleNamespace(output_panel=panel)
+        window._update_output_panels()
+        assert window.mini_count_label.text() == "监控窗口 2"
+
+        window.sessions.pop(1)
+        window._update_output_panels()
+        assert window.mini_count_label.text() == "监控窗口 1"
+
+        window.sessions.clear()
+        window._set_monitoring_paused(False)
+        assert window.mini_status_label.text() == "监控中"
+    finally:
+        window.sessions.clear()
+        for panel in panels:
+            panel.deleteLater()
+        window.close()
+        app.processEvents()
+
+
 def test_account_information_is_parsed_from_window_title() -> None:
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
 
@@ -100,7 +189,7 @@ def test_only_real_game_client_titles_are_accepted() -> None:
     assert not is_mhxy_game_window_title("记事本")
 
 
-def test_minimized_warning_setting_controls_popup(monkeypatch) -> None:
+def test_minimized_window_updates_status_without_alert(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.is_window_available", lambda _hwnd: True)
@@ -134,7 +223,6 @@ def test_minimized_warning_setting_controls_popup(monkeypatch) -> None:
             output_occlusion=output_occlusion,
         )
         window.sessions[0x1234] = session
-        window.slave_settings.minimize_alert = ALERT_NONE
         window._poll_active_window_states()
 
         assert session.minimized
@@ -144,14 +232,13 @@ def test_minimized_warning_setting_controls_popup(monkeypatch) -> None:
         minimized = False
         current_time = 1.0
         window._poll_active_window_states()
-        window.slave_settings.minimize_alert = ALERT_LOCAL
         minimized = True
         current_time = 2.0
         window._poll_active_window_states()
         current_time = 7.0
         window._poll_active_window_states()
 
-        assert alerts == [("背包检测已暂停", "梦幻西游窗口已连续最小化 5 秒，请恢复窗口后继续检测。")]
+        assert alerts == []
     finally:
         window.sessions.clear()
         output_panel.deleteLater()
@@ -211,70 +298,120 @@ def test_occlusion_percentage_is_displayed_without_source(monkeypatch) -> None:
         app.processEvents()
 
 
-def test_occlusion_warning_triggers_once_when_threshold_is_crossed(monkeypatch) -> None:
+def test_occlusion_never_creates_an_alert_record(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
-    window.slave_settings.occlusion_threshold_percent = 30
-    window.slave_settings.occlusion_alert = ALERT_LOCAL
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
-    session = SimpleNamespace(account=account, occlusion_alert_active=False, occlusion_candidate_since=None)
-    alerts: list[str] = []
-    monkeypatch.setattr(window, "_show_alert", lambda _icon, title, _message, _details="": alerts.append(title))
+    output_panel, _title, _preview, _status, _detail, output_occlusion = window._make_output_panel(0x1234, account)
+    session = SimpleNamespace(
+        account=account,
+        output_occlusion=output_occlusion,
+        occlusion_alert_active=False,
+        occlusion_candidate_since=None,
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(window, "_send_host_alert", lambda *_args, **_kwargs: sent.append("sent"))
     try:
-        window._update_occlusion_alert(session, 29.9, 0.0)
-        window._update_occlusion_alert(session, 30.0, 1.0)
-        window._update_occlusion_alert(session, 80.0, 6.0)
-        window._update_occlusion_alert(session, 10.0, 7.0)
-        window._update_occlusion_alert(session, 30.0, 8.0)
-        window._update_occlusion_alert(session, 30.0, 13.0)
+        window._apply_occlusion(
+            session,
+            WindowOcclusionStatus(0x1234, 10_000, 8_000, 0.8, ()),
+        )
 
-        assert alerts == ["游戏窗口被遮挡", "游戏窗口被遮挡"]
+        assert output_occlusion.text() == "遮挡 80.0%｜最小化 否"
+        assert sent == []
     finally:
+        output_panel.deleteLater()
         window.close()
         app.processEvents()
 
 
-def test_inventory_warning_uses_configured_remaining_slot_threshold(monkeypatch) -> None:
+def test_enabled_capacity_alert_reports_full_inventory_to_host(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
-    window.slave_settings.inventory_empty_threshold = 3
-    window.slave_settings.inventory_alert = ALERT_LOCAL
+    window.slave_settings.inventory_capacity_alert_enabled = True
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None)
-    alerts: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        window,
-        "_show_alert",
-        lambda _icon, title, message, _details="": alerts.append((title, message)),
-    )
+    sent: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(window, "_send_host_alert", lambda _session, kind, **data: sent.append((kind, data)))
     try:
-        window._update_capacity_alert(session, {"status": "not_full", "empty_count": 4}, 0.0)
-        window._update_capacity_alert(session, {"status": "almost_full", "empty_count": 3}, 1.0)
-        window._update_capacity_alert(session, {"status": "almost_full", "empty_count": 2}, 6.0)
-        window._update_capacity_alert(session, {"status": "not_full", "empty_count": 5}, 7.0)
-        window._update_capacity_alert(session, {"status": "almost_full", "empty_count": 3}, 8.0)
-        window._update_capacity_alert(session, {"status": "almost_full", "empty_count": 3}, 13.0)
+        window._update_capacity_alert(session, {"status": "not_full", "empty_count": 1}, 0.0)
+        window._update_capacity_alert(session, {"status": "full", "empty_count": 0}, 1.0)
+        window._update_capacity_alert(session, {"status": "full", "empty_count": 0, "confidence": 0.96}, 6.0)
+        window._update_capacity_alert(session, {"status": "full", "empty_count": 0}, 7.0)
 
-        assert [title for title, _message in alerts] == ["背包容量警告", "背包容量警告"]
-        assert "只剩 2 个空格" in alerts[0][1]
+        assert [kind for kind, _data in sent] == ["inventory_full"]
+        assert sent[0][1]["empty_slots"] == 0
+        assert sent[0][1]["confidence"] == 0.96
     finally:
         window.close()
         app.processEvents()
 
 
-def test_inventory_state_alerts_follow_their_own_settings(monkeypatch) -> None:
+def test_disabled_capacity_alert_does_not_report_full_inventory(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None)
+    sent: list[str] = []
+    monkeypatch.setattr(window, "_send_host_alert", lambda *_args, **_kwargs: sent.append("sent"))
+    try:
+        window._update_capacity_alert(session, {"status": "full", "empty_count": 0}, 0.0)
+        window._update_capacity_alert(session, {"status": "full", "empty_count": 0}, 10.0)
+
+        assert sent == []
+        assert session.capacity_candidate_since is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_local_capacity_level_reports_host_and_plays_local_alarm_after_five_seconds(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.slave_settings.inventory_capacity_alert_level = CAPACITY_ALERT_HOST_LOCAL
+    window.slave_settings.inventory_capacity_threshold = 3
+    account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None)
+    sent: list[tuple[str, dict[str, object]]] = []
+    local: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(window, "_send_host_alert", lambda _session, kind, **data: sent.append((kind, data)))
+    monkeypatch.setattr(window, "_show_alert", lambda *args, **kwargs: local.append((args, kwargs)))
+    try:
+        window._update_capacity_alert(session, {"status": "not_full", "empty_count": 3}, 10.0)
+        window._update_capacity_alert(session, {"status": "not_full", "empty_count": 3}, 14.9)
+        assert sent == []
+        assert local == []
+
+        window._update_capacity_alert(
+            session,
+            {"status": "not_full", "empty_count": 2, "confidence": 0.95},
+            15.0,
+        )
+
+        assert [kind for kind, _data in sent] == ["inventory_capacity"]
+        assert sent[0][1]["empty_slots"] == 2
+        assert sent[0][1]["details"]["threshold"] == 3
+        assert len(local) == 1
+        assert local[0][1]["with_sound"] is True
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_non_capacity_inventory_states_do_not_create_alerts(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     window.sessions[0x1234] = SimpleNamespace(account=account, minimized=False)
     alerts: list[str] = []
-    monkeypatch.setattr(window, "_show_alert", lambda _icon, title, _message, _details="": alerts.append(title))
+    monkeypatch.setattr(window, "_show_alert", lambda *_args, **_kwargs: alerts.append("local"))
+    monkeypatch.setattr(window, "_send_host_alert", lambda *_args, **_kwargs: alerts.append("host"))
     try:
-        window.slave_settings.inventory_not_open_alert = ALERT_NONE
-        window.slave_settings.inventory_blocked_alert = ALERT_LOCAL
         window._on_event(
             0x1234,
             SimpleNamespace(type="inventory_not_open", display_time="12:00:00", display_name="背包未打开"),
@@ -288,7 +425,9 @@ def test_inventory_state_alerts_follow_their_own_settings(monkeypatch) -> None:
             ),
         )
 
-        assert alerts == ["背包检测被遮挡"]
+        assert alerts == []
+        assert "背包未打开" in window.log.toPlainText()
+        assert "背包检测被遮挡" in window.log.toPlainText()
     finally:
         window.sessions.clear()
         window.close()
@@ -368,6 +507,40 @@ def test_background_monitoring_button_minimizes_main_window(monkeypatch) -> None
         app.processEvents()
 
 
+def test_one_click_minimize_pauses_and_includes_unmonitored_game_windows(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    windows = [WindowInfo(index, f"【梦幻西游 ONLINE】角色{index}", 100 + index, "GameWindow") for index in range(1, 5)]
+    minimized: set[int] = set()
+    paused: list[bool] = []
+    window.sessions = {1: object(), 2: object(), 3: object()}
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.list_capturable_windows", lambda: windows)
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.is_window_available", lambda hwnd: hwnd in range(1, 5))
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.is_window_minimized", lambda hwnd: hwnd in minimized)
+    monkeypatch.setattr(
+        "hoyo_analyzer.multi_inventory_app.minimize_window",
+        lambda hwnd: minimized.add(hwnd) is None,
+    )
+    monkeypatch.setattr(window, "_set_monitoring_paused", lambda value: paused.append(value))
+    try:
+        window.minimize_all_button.click()
+        window.minimize_verify_timer.stop()
+
+        assert paused == [True]
+        assert minimized == {1, 2, 3, 4}
+        assert not window.minimize_all_button.isEnabled()
+
+        window.sessions.clear()
+        window._finish_minimize_all_game_windows()
+        assert window.minimize_all_button.isEnabled()
+        assert "4 个梦幻西游窗口已全部最小化" in window.log.toPlainText()
+    finally:
+        window.sessions.clear()
+        window.close()
+        app.processEvents()
+
+
 def test_monitoring_button_pauses_alerts_and_resumes_from_fresh_state(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
@@ -428,7 +601,6 @@ def test_new_desktop_alert_replaces_existing_alert(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
-    window.slave_settings.local_alert_style = "popup_sound"
     played: list[bool] = []
     stopped: list[bool] = []
     monkeypatch.setattr(window, "_play_alarm_sound", lambda: played.append(True))
@@ -442,19 +614,50 @@ def test_new_desktop_alert_replaces_existing_alert(monkeypatch) -> None:
         available = screen.availableGeometry()
 
         assert first.isVisible()
-        assert first.button(QMessageBox.StandardButton.Close).text() == "确认并停止声音"
+        assert first.button(QMessageBox.StandardButton.Close).text() == "确认"
         assert abs((available.right() - 16) - first.geometry().right()) <= 2
         assert abs((available.bottom() - 16) - first.geometry().bottom()) <= 2
 
         window._show_alert(QMessageBox.Icon.Warning, "告警二", "第二条告警")
         app.processEvents()
-        assert played == [True]
+        assert played == []
         assert len(window.alerts) == 1
         assert next(iter(window.alerts)) is first
         assert first.windowTitle() == "告警二"
         assert first.text() == "第二条告警"
 
         first.close()
+        app.processEvents()
+        assert stopped == []
+        assert window.alerts == set()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_sounding_desktop_alert_loops_until_user_closes_it(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    played: list[bool] = []
+    stopped: list[bool] = []
+    monkeypatch.setattr(window, "_play_alarm_sound", lambda: played.append(True))
+    monkeypatch.setattr(window, "_stop_alarm_sound", lambda: stopped.append(True))
+    try:
+        window._show_alert(
+            QMessageBox.Icon.Critical,
+            "背包容量提醒",
+            "达到空格阈值",
+            with_sound=True,
+        )
+        app.processEvents()
+        alert = next(iter(window.alerts))
+
+        assert played == [True]
+        assert stopped == []
+        assert alert.button(QMessageBox.StandardButton.Close).text() == "确认并停止声音"
+
+        alert.close()
         app.processEvents()
         assert stopped == [True]
         assert window.alerts == set()

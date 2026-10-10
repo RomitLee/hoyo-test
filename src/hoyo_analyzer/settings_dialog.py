@@ -1,9 +1,9 @@
-"""Settings dialog for local warnings and cloud relay connectivity."""
+"""Settings dialog for the slave capacity alert and cloud relay."""
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -11,143 +11,132 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from .desktop_theme import MUTED, PRIMARY, apply_desktop_theme
 from .slave_settings import (
-    ALERT_HOST,
-    ALERT_LOCAL,
-    ALERT_LOCAL_HOST,
-    ALERT_NONE,
-    LOCAL_ALERT_POPUP,
-    LOCAL_ALERT_POPUP_SOUND,
+    CAPACITY_ALERT_HOST,
+    CAPACITY_ALERT_HOST_LOCAL,
+    CAPACITY_ALERT_NONE,
+    MAX_CAPACITY_THRESHOLD,
+    MIN_CAPACITY_THRESHOLD,
     SlaveSettings,
 )
 
 
 class SlaveSettingsDialog(QDialog):
-    """Edit slave warning behavior and HTTPS cloud relay credentials."""
-
-    ALERT_ITEMS = (
-        ("不警告", ALERT_NONE),
-        ("当前程序警告", ALERT_LOCAL),
-        ("主机警告（经云端）", ALERT_HOST),
-        ("本地弹窗 + 主机警告", ALERT_LOCAL_HOST),
-    )
+    """Edit the capacity warning delivery mode and HTTPS credentials."""
 
     def __init__(self, settings: SlaveSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("从机设置")
         self.setFixedWidth(560)
+        apply_desktop_theme(self)
         self._build_ui()
         self._load_values(settings)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+
+        title = QLabel("从机控制中心")
+        title.setStyleSheet("font-size:20px;font-weight:800;color:#F3F7FD;")
+        subtitle = QLabel("设置背包容量提醒与从机配对")
+        subtitle.setStyleSheet(f"color:{MUTED};font-size:11px;")
+        root.addWidget(title)
+        root.addWidget(subtitle)
 
         warning_group = QGroupBox("告警设置")
         warning_form = QFormLayout(warning_group)
-        self.minimize_alert_combo = self._make_alert_combo()
-        warning_form.addRow("游戏窗口最小化：", self.minimize_alert_combo)
-
-        occlusion_row = QHBoxLayout()
-        self.occlusion_threshold_spin = QSpinBox()
-        self.occlusion_threshold_spin.setRange(1, 100)
-        self.occlusion_threshold_spin.setSuffix(" %")
-        self.occlusion_threshold_spin.setToolTip("100% 表示窗口完全被遮挡时触发；30% 表示遮挡达到 30% 时触发")
-        self.occlusion_alert_combo = self._make_alert_combo()
-        occlusion_row.addWidget(QLabel("达到"))
-        occlusion_row.addWidget(self.occlusion_threshold_spin)
-        occlusion_row.addWidget(self.occlusion_alert_combo, 1)
-        warning_form.addRow("窗口遮挡：", occlusion_row)
-
-        inventory_row = QHBoxLayout()
-        self.inventory_threshold_spin = QSpinBox()
-        self.inventory_threshold_spin.setRange(0, 20)
-        self.inventory_threshold_spin.setSuffix(" 格")
-        self.inventory_threshold_spin.setToolTip("0 表示背包已满时触发；3 表示只剩 3 格或更少时触发")
-        self.inventory_alert_combo = self._make_alert_combo()
-        inventory_row.addWidget(QLabel("剩余不超过"))
-        inventory_row.addWidget(self.inventory_threshold_spin)
-        inventory_row.addWidget(self.inventory_alert_combo, 1)
-        warning_form.addRow("背包容量：", inventory_row)
-
-        self.inventory_not_open_alert_combo = self._make_alert_combo()
-        warning_form.addRow("背包未打开：", self.inventory_not_open_alert_combo)
-
-        self.inventory_blocked_alert_combo = self._make_alert_combo()
-        warning_form.addRow("背包被遮挡：", self.inventory_blocked_alert_combo)
-
-        self.local_alert_style_combo = QComboBox()
-        self.local_alert_style_combo.addItem("弹窗警告", LOCAL_ALERT_POPUP)
-        self.local_alert_style_combo.addItem("弹窗 + 持续声音（关闭告警后停止）", LOCAL_ALERT_POPUP_SOUND)
-        warning_form.addRow("当前程序警告：", self.local_alert_style_combo)
+        capacity_row = QHBoxLayout()
+        self.capacity_alert_slider = QSlider(Qt.Orientation.Horizontal)
+        self.capacity_alert_slider.setRange(CAPACITY_ALERT_NONE, CAPACITY_ALERT_HOST_LOCAL)
+        self.capacity_alert_slider.setSingleStep(1)
+        self.capacity_alert_slider.setPageStep(1)
+        self.capacity_alert_slider.setTickInterval(1)
+        self.capacity_alert_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.capacity_alert_slider.setToolTip(
+            "1 档不提醒；2 档上报主机；3 档上报主机并在本机弹窗、循环播放声音"
+        )
+        self.capacity_alert_label = QLabel()
+        self.capacity_alert_label.setMinimumWidth(154)
+        self.capacity_alert_slider.valueChanged.connect(self._refresh_capacity_label)
+        capacity_row.addWidget(self.capacity_alert_slider, 1)
+        capacity_row.addWidget(self.capacity_alert_label)
+        warning_form.addRow("背包容量：", capacity_row)
+        self.capacity_threshold_spin = QSpinBox()
+        self.capacity_threshold_spin.setRange(MIN_CAPACITY_THRESHOLD, MAX_CAPACITY_THRESHOLD)
+        self.capacity_threshold_spin.setSuffix(" 格")
+        self.capacity_threshold_spin.setToolTip("当背包剩余空格小于或等于此数值并持续 5 秒时触发")
+        warning_form.addRow("空格阈值：", self.capacity_threshold_spin)
+        note = QLabel(
+            "达到空格阈值并连续确认 5 秒后：2 档上报告警记录到主机；"
+            "3 档同样上报主机，并在本机弹窗、循环播放声音，直到手动确认。"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{MUTED};padding:4px 0;")
+        warning_form.addRow(note)
         root.addWidget(warning_group)
 
-        host_group = QGroupBox("云端中转连接")
+        host_group = QGroupBox("从机配对")
         host_form = QFormLayout(host_group)
-        self.relay_url_edit = QLineEdit()
-        self.relay_url_edit.setPlaceholderText("https://服务器公网 IP")
-        host_form.addRow("云端地址：", self.relay_url_edit)
-        self.device_id_edit = QLineEdit()
-        self.device_id_edit.setPlaceholderText("例如：slave-01")
-        host_form.addRow("设备编号：", self.device_id_edit)
-        self.device_token_edit = QLineEdit()
-        self.device_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.device_token_edit.setPlaceholderText("该从机独立设备密钥")
-        host_form.addRow("设备密钥：", self.device_token_edit)
-        note = QLabel("从机仍可离线执行本地检测；选择“主机警告”或“本地弹窗 + 主机警告”后，异常才会经 HTTPS 发送到主机。")
+        self.binding_status_label = QLabel()
+        host_form.addRow("当前状态：", self.binding_status_label)
+        self.pairing_code_edit = QLineEdit()
+        self.pairing_code_edit.setMaxLength(6)
+        self.pairing_code_edit.setPlaceholderText("输入主机生成的 6 位配对码")
+        host_form.addRow("配对码：", self.pairing_code_edit)
+        note = QLabel(
+            "服务器地址已内置。输入一次性配对码并保存后，程序会自动完成绑定；"
+            "配对码有效期为 5 分钟且只能使用一次。"
+        )
         note.setWordWrap(True)
-        note.setStyleSheet("color:#64748b;")
+        note.setStyleSheet(f"color:{MUTED};padding:4px 0;")
         host_form.addRow(note)
         root.addWidget(host_group)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setProperty("role", "primary")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
-    def _make_alert_combo(self) -> QComboBox:
-        combo = QComboBox()
-        for label, value in self.ALERT_ITEMS:
-            combo.addItem(label, value)
-        combo.setItemData(2, "通过公网 HTTPS 中转给主机程序", role=3)
-        combo.setItemData(3, "从机弹窗，同时通过公网 HTTPS 中转给主机程序", role=3)
-        return combo
-
     def _load_values(self, settings: SlaveSettings) -> None:
-        self._select_data(self.minimize_alert_combo, settings.minimize_alert)
-        self.occlusion_threshold_spin.setValue(settings.occlusion_threshold_percent)
-        self._select_data(self.occlusion_alert_combo, settings.occlusion_alert)
-        self.inventory_threshold_spin.setValue(settings.inventory_empty_threshold)
-        self._select_data(self.inventory_alert_combo, settings.inventory_alert)
-        self._select_data(self.inventory_not_open_alert_combo, settings.inventory_not_open_alert)
-        self._select_data(self.inventory_blocked_alert_combo, settings.inventory_blocked_alert)
-        self._select_data(self.local_alert_style_combo, settings.local_alert_style)
-        self.relay_url_edit.setText(settings.relay_url)
-        self.device_id_edit.setText(settings.device_id)
-        self.device_token_edit.setText(settings.device_token)
+        self._source_settings = settings
+        self.capacity_alert_slider.setValue(settings.inventory_capacity_alert_level)
+        self.capacity_threshold_spin.setValue(settings.inventory_capacity_threshold)
+        self._refresh_capacity_label()
+        self.binding_status_label.setText(
+            f"已绑定 · {settings.device_id}" if settings.device_id and settings.device_token else "尚未绑定"
+        )
+        self.pairing_code_edit.setText(settings.pairing_code)
 
-    @staticmethod
-    def _select_data(combo: QComboBox, value: str) -> None:
-        index = combo.findData(value)
-        combo.setCurrentIndex(max(index, 0))
+    def _refresh_capacity_label(self) -> None:
+        level = self.capacity_alert_slider.value()
+        labels = {
+            CAPACITY_ALERT_NONE: "1 档 · 不提醒",
+            CAPACITY_ALERT_HOST: "2 档 · 主机推送",
+            CAPACITY_ALERT_HOST_LOCAL: "3 档 · 主机推送 + 本机提醒",
+        }
+        enabled = level != CAPACITY_ALERT_NONE
+        self.capacity_alert_label.setText(labels[level])
+        self.capacity_alert_label.setMinimumWidth(220)
+        self.capacity_alert_label.setStyleSheet(f"color:{PRIMARY if enabled else MUTED};font-weight:700;")
+        self.capacity_threshold_spin.setEnabled(enabled)
 
     def settings(self) -> SlaveSettings:
         return SlaveSettings(
-            minimize_alert=str(self.minimize_alert_combo.currentData()),
-            occlusion_threshold_percent=self.occlusion_threshold_spin.value(),
-            occlusion_alert=str(self.occlusion_alert_combo.currentData()),
-            inventory_empty_threshold=self.inventory_threshold_spin.value(),
-            inventory_alert=str(self.inventory_alert_combo.currentData()),
-            inventory_not_open_alert=str(self.inventory_not_open_alert_combo.currentData()),
-            inventory_blocked_alert=str(self.inventory_blocked_alert_combo.currentData()),
-            local_alert_style=str(self.local_alert_style_combo.currentData()),
-            relay_url=self.relay_url_edit.text().strip(),
-            device_id=self.device_id_edit.text().strip(),
-            device_token=self.device_token_edit.text().strip(),
+            inventory_capacity_alert_level=self.capacity_alert_slider.value(),
+            inventory_capacity_threshold=self.capacity_threshold_spin.value(),
+            device_id=self._source_settings.device_id,
+            device_token=self._source_settings.device_token,
+            installation_id=self._source_settings.installation_id,
+            pairing_code=self.pairing_code_edit.text().strip().upper(),
         )

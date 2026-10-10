@@ -10,6 +10,7 @@ from hoyo_analyzer.wgc import (
     WindowOcclusionStatus,
     WindowsGraphicsCaptureSource,
     _rect_union_area,
+    minimize_window,
 )
 
 
@@ -27,6 +28,17 @@ def test_window_occlusion_status_reports_any_covered_area():
     status = WindowOcclusionStatus(0x1234, target_area=10_000, occluded_area=100, ratio=0.01)
     assert status.occluded
     assert status.ratio == 0.01
+
+
+def test_minimize_window_uses_async_windows_request(monkeypatch):
+    calls: list[tuple[int, int]] = []
+    user32 = SimpleNamespace(ShowWindowAsync=lambda hwnd, command: calls.append((hwnd.value, command)) or 1)
+    monkeypatch.setattr("hoyo_analyzer.wgc.is_window_available", lambda _hwnd: True)
+    monkeypatch.setattr("hoyo_analyzer.wgc.is_window_minimized", lambda _hwnd: False)
+    monkeypatch.setattr("hoyo_analyzer.wgc._require_windows", lambda: user32)
+
+    assert minimize_window(0x1234)
+    assert calls == [(0x1234, 6)]
 
 
 def test_wgc_factory():

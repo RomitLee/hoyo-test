@@ -3,7 +3,7 @@ from hoyo_analyzer.master_settings import MasterSettings, load_master_settings, 
 
 def test_master_settings_round_trip(tmp_path) -> None:
     path = tmp_path / "runtime" / "master_settings.json"
-    expected = MasterSettings("https://relay.example.com", "master-secret", 8)
+    expected = MasterSettings("https://relay.example.com", "master-secret", 8, True)
 
     save_master_settings(expected, path)
 

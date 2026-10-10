@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import sys
 import traceback
 import wave
@@ -42,6 +43,7 @@ def _run_package_self_test() -> int:
         import windows_capture
         from PySide6.QtCore import qVersion
 
+        from hoyo_analyzer import __version__
         from hoyo_analyzer.alarm_sound import ensure_alarm_sound_file
 
         alarm_path = ensure_alarm_sound_file()
@@ -56,6 +58,7 @@ def _run_package_self_test() -> int:
         result.update(
             {
                 "ok": True,
+                "client_version": __version__,
                 "qt": qVersion(),
                 "opencv": cv2.__version__,
                 "pygame": pygame.version.ver,
@@ -76,8 +79,72 @@ def _run_package_self_test() -> int:
     return 0 if result["ok"] else 1
 
 
+def _run_package_ui_self_test() -> int:
+    """Create the packaged slave window so packaging checks the real UI path."""
+    result: dict[str, object] = {"ok": False}
+    app = None
+    window = None
+    try:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from PySide6.QtWidgets import QApplication
+
+        from hoyo_analyzer.app_identity import (
+            SLAVE_APP_ID,
+            apply_application_icon,
+            configure_windows_app_id,
+        )
+        from hoyo_analyzer.multi_inventory_app import InventoryMonitorWindow
+
+        configure_windows_app_id(SLAVE_APP_ID)
+        app = QApplication.instance() or QApplication(["hoyo-package-ui-self-test"])
+        icon = apply_application_icon(app)
+        window = InventoryMonitorWindow()
+        window.show()
+        app.processEvents()
+        checks = {
+            "window_visible": window.isVisible(),
+            "window_size": [window.width(), window.height()],
+            "title_bar_height": window.title_bar.height(),
+            "icon_loaded": not icon.isNull() and not window.windowIcon().isNull(),
+            "add_window_button": window.add_window_button.text(),
+        }
+        result.update(
+            {
+                "ok": all(
+                    (
+                        checks["window_visible"],
+                        checks["window_size"] == [800, 632],
+                        checks["title_bar_height"] == 32,
+                        checks["icon_loaded"],
+                        checks["add_window_button"] == "＋ 增加窗口",
+                    )
+                ),
+                "checks": checks,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - the report must retain every startup failure
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        result["traceback"] = traceback.format_exc()
+    finally:
+        if window is not None:
+            window.close()
+        if app is not None:
+            app.processEvents()
+
+    output_directory = application_root() / "runtime"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    (output_directory / "package-ui-self-test.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return 0 if result["ok"] else 1
+
+
 if "--package-self-test" in sys.argv:
     raise SystemExit(_run_package_self_test())
+
+if "--package-ui-self-test" in sys.argv:
+    raise SystemExit(_run_package_ui_self_test())
 
 from hoyo_analyzer.multi_inventory_app import main
 

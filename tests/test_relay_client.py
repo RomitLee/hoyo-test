@@ -81,6 +81,21 @@ def test_relay_url_requires_https() -> None:
         normalize_relay_url("http://relay.example.com")
 
 
+def test_desktop_clients_use_fixed_cloud_endpoint() -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from hoyo_analyzer.cloud_config import CLOUD_RELAY_URL
+    from hoyo_analyzer.relay_client import MasterRelayClient, SlaveRelayClient
+
+    app = QApplication.instance() or QApplication([])
+    master = MasterRelayClient(app)
+    master.configure("session-token")
+    slave = SlaveRelayClient(app)
+    slave.configure("slave-001-001", "device-token")
+    assert master._base_url == CLOUD_RELAY_URL
+    assert slave._base_url == CLOUD_RELAY_URL
+
+
 def test_event_payload_matches_server_contract() -> None:
     payload = make_event_payload(
         "inventory_full",

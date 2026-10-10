@@ -11,9 +11,14 @@ from .paths import application_root
 
 @dataclass(slots=True)
 class MasterSettings:
+    # ``relay_url`` and ``master_token`` are accepted while migrating an old
+    # installation. New versions use the fixed endpoint and ``access_token``.
     relay_url: str = ""
     master_token: str = ""
     poll_seconds: int = 5
+    popup_alert_enabled: bool = False
+    username: str = ""
+    access_token: str = ""
 
 
 def master_settings_path() -> Path:
@@ -38,6 +43,9 @@ def load_master_settings(path: Path | None = None) -> MasterSettings:
         relay_url=str(raw.get("relay_url", "")).strip().rstrip("/"),
         master_token=str(raw.get("master_token", "")).strip(),
         poll_seconds=max(2, min(60, poll_seconds)),
+        popup_alert_enabled=_boolean(raw.get("popup_alert_enabled", False)),
+        username=str(raw.get("username", "")).strip(),
+        access_token=str(raw.get("access_token", "")).strip(),
     )
 
 
@@ -47,3 +55,11 @@ def save_master_settings(settings: MasterSettings, path: Path | None = None) -> 
     temporary = target.with_suffix(f"{target.suffix}.tmp")
     temporary.write_text(json.dumps(asdict(settings), ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(target)
+
+
+def _boolean(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().casefold() in {"1", "true", "yes", "on"}

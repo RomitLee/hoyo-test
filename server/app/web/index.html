@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>梦幻西游手机监控</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">HOYO MONITOR</p>
+        <h1>手机监控</h1>
+      </div>
+      <button id="refresh-button" class="icon-button" type="button" title="立即刷新" aria-label="立即刷新">↻</button>
+    </header>
+
+    <section id="login-panel" class="panel login-panel">
+      <div class="panel-heading">
+        <div>
+          <h2>登录主机账号</h2>
+          <p>使用与 Windows 主机程序相同的账号和密码。</p>
+        </div>
+        <span class="lock-icon" aria-hidden="true">⌕</span>
+      </div>
+      <form id="login-form">
+        <div class="login-fields">
+          <label for="username">账号</label>
+          <input id="username" name="username" type="text" autocomplete="username" minlength="3" maxlength="32" placeholder="请输入主机账号" required>
+          <label for="password">密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" minlength="8" maxlength="128" placeholder="请输入账号密码" required>
+        </div>
+        <button id="login-button" class="primary-button login-button" type="submit">登录</button>
+        <p class="hint">浏览器只保存登录会话，不保存密码；会话失效后需要重新登录。</p>
+        <p id="login-error" class="error-text" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <section id="dashboard" hidden>
+      <div class="summary-grid" aria-live="polite">
+        <div class="summary-card"><span>云端连接</span><strong id="connection-state" class="state-dot state-unknown">未连接</strong></div>
+        <div class="summary-card"><span>从机数量</span><strong id="device-count">—</strong></div>
+        <div class="summary-card"><span>游戏窗口</span><strong id="window-count">—</strong></div>
+        <div class="summary-card"><span>最后更新</span><strong id="last-updated">—</strong></div>
+      </div>
+
+      <nav class="dashboard-tabs" aria-label="监控功能">
+        <button class="tab-button active" type="button" data-tab="status">实时状态 <span id="status-count">0</span></button>
+        <button class="tab-button" type="button" data-tab="alerts">告警记录 <span id="alert-count">0</span></button>
+        <button class="tab-button" type="button" data-tab="management">从机管理 <span id="managed-count">0</span></button>
+        <button class="tab-button" type="button" data-tab="notifications">手机通知 <span id="bark-state">关</span></button>
+      </nav>
+
+      <div id="message" class="message" role="status" hidden></div>
+
+      <section id="status-page" class="tab-page active" data-page="status">
+        <section id="devices" class="devices" aria-live="polite"></section>
+        <div id="empty-state" class="empty-state" hidden>
+          <div class="empty-icon">◌</div>
+          <h2>暂时没有从机状态</h2>
+          <p>确认从机已启动，并且已经连接到云端。</p>
+        </div>
+      </section>
+
+      <section id="alerts-page" class="tab-page" data-page="alerts" hidden>
+        <div class="page-toolbar">
+          <div><h2>告警记录</h2><p>确认后记录继续保留，并标记为已处理。</p></div>
+          <button id="refresh-alerts" class="secondary-button" type="button">刷新</button>
+        </div>
+        <div id="alerts-list" class="alerts-list" aria-live="polite"></div>
+        <div id="alerts-empty" class="compact-empty" hidden>暂无告警记录</div>
+      </section>
+
+      <section id="management-page" class="tab-page" data-page="management" hidden>
+        <div class="page-toolbar">
+          <div><h2>从机管理</h2><p>添加、命名、禁用或重新配对从机。</p></div>
+          <button id="add-device" class="primary-button toolbar-button" type="button">＋ 添加从机</button>
+        </div>
+        <div id="pairing-result" class="pairing-result" hidden>
+          <span>一次性配对码</span><strong id="pairing-code">——</strong><small>5 分钟内有效，只能使用一次</small>
+        </div>
+        <div id="managed-devices" class="managed-devices" aria-live="polite"></div>
+        <div id="managed-empty" class="compact-empty" hidden>当前账号尚未绑定从机</div>
+      </section>
+
+      <section id="notifications-page" class="tab-page" data-page="notifications" hidden>
+        <div class="page-toolbar">
+          <div><h2>Bark 手机通知</h2><p>告警由云服务器直接推送到 iPhone，不依赖主机程序在线。</p></div>
+        </div>
+        <form id="bark-form" class="notification-card">
+          <label class="switch-row" for="bark-enabled">
+            <span><strong>启用 Bark 推送</strong><small>从机产生新告警时立即通知手机</small></span>
+            <input id="bark-enabled" type="checkbox">
+          </label>
+          <label for="bark-key">Bark 测试地址或设备密钥</label>
+          <input id="bark-key" type="password" autocomplete="off" placeholder="可直接粘贴 Bark App 首页显示的完整测试地址">
+          <p id="bark-key-hint" class="field-hint">密钥仅保存在服务器数据库，不会显示在页面或写入安装包。</p>
+          <label class="switch-row" for="bark-call">
+            <span><strong>连续呼叫</strong><small>启用 Bark 的约 30 秒重复铃声</small></span>
+            <input id="bark-call" type="checkbox" checked>
+          </label>
+          <label for="bark-repeat">未处理重复提醒</label>
+          <select id="bark-repeat">
+            <option value="0">不重复</option>
+            <option value="5">每 5 分钟</option>
+            <option value="10" selected>每 10 分钟</option>
+            <option value="30">每 30 分钟</option>
+            <option value="60">每 60 分钟</option>
+          </select>
+          <div class="notification-actions">
+            <button id="bark-save" class="primary-button toolbar-button" type="submit">保存设置</button>
+            <button id="bark-test" class="secondary-button" type="button">发送测试通知</button>
+          </div>
+          <p id="bark-feedback" class="form-feedback" role="status" hidden></p>
+        </form>
+        <div class="notification-help">
+          <strong>如何找到设备密钥？</strong>
+          <ol><li>在 iPhone 打开 Bark。</li><li>复制 App 首页显示的测试地址。</li><li>回到这里直接粘贴完整地址并保存，系统会自动提取设备密钥。</li></ol>
+        </div>
+      </section>
+    </section>
+
+    <footer class="footer">
+      <span>每 5 秒自动刷新</span>
+      <button id="logout-button" class="text-button" type="button">退出登录</button>
+    </footer>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

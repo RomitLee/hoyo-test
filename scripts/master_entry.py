@@ -15,8 +15,18 @@ def _self_test() -> int:
         import pygame
         from PySide6.QtCore import qVersion
 
+        from hoyo_analyzer import __version__
+
         ssl.create_default_context()
-        result.update({"ok": True, "qt": qVersion(), "pygame": pygame.version.ver, "tls": "available"})
+        result.update(
+            {
+                "ok": True,
+                "client_version": __version__,
+                "qt": qVersion(),
+                "pygame": pygame.version.ver,
+                "tls": "available",
+            }
+        )
     except Exception as exc:  # noqa: BLE001 - packaging report must include every startup dependency failure
         result["error"] = f"{type(exc).__name__}: {exc}"
     output = application_root() / "runtime" / "master-package-self-test.json"

@@ -14,20 +14,21 @@ class Settings:
     master_token: str
     device_tokens: dict[str, str]
     retention_days: int = 30
+    update_directory: Path = Path("/releases")
 
     @classmethod
     def from_env(cls) -> Settings:
         master_token = os.environ.get("HOYO_MASTER_TOKEN", "").strip()
-        if len(master_token) < 32:
+        if master_token and len(master_token) < 32:
             raise RuntimeError("HOYO_MASTER_TOKEN must contain at least 32 characters")
 
-        raw_tokens = os.environ.get("HOYO_DEVICE_TOKENS", "").strip()
+        raw_tokens = os.environ.get("HOYO_DEVICE_TOKENS", "{}").strip() or "{}"
         try:
             parsed_tokens = json.loads(raw_tokens)
         except json.JSONDecodeError as exc:
             raise RuntimeError("HOYO_DEVICE_TOKENS must be a JSON object") from exc
-        if not isinstance(parsed_tokens, dict) or not parsed_tokens:
-            raise RuntimeError("HOYO_DEVICE_TOKENS must contain at least one device")
+        if not isinstance(parsed_tokens, dict):
+            raise TypeError("HOYO_DEVICE_TOKENS must be a JSON object")
 
         device_tokens: dict[str, str] = {}
         for raw_device_id, raw_token in parsed_tokens.items():
@@ -49,4 +50,5 @@ class Settings:
             master_token=master_token,
             device_tokens=device_tokens,
             retention_days=max(1, min(retention_days, 3650)),
+            update_directory=Path(os.environ.get("HOYO_UPDATE_DIRECTORY", "/releases")),
         )

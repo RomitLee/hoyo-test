@@ -9,6 +9,7 @@ venv/
 .pyright/
 build/
 dist/
+dist-*/
 
 # Runtime data
 runtime/
@@ -49,6 +50,8 @@ deployment-credentials.json
 *.sqlite3
 server/certbot/
 server/Caddyfile.runtime
+server/releases/*
+!server/releases/.gitkeep
 
 # Private/custom alarm media. The application generates a built-in alarm
 # melody when this optional file is absent.

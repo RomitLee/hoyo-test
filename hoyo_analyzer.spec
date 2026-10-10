@@ -47,6 +47,7 @@ exe = EXE(
     upx=True,
     console=False,
     disable_windowed_traceback=True,
+    icon=str(project_root / "assets" / "icons" / "hoyo_monitor.ico"),
 )
 
 coll = COLLECT(

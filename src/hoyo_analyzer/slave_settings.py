@@ -6,58 +6,81 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .paths import application_root
 
-ALERT_NONE = "none"
-ALERT_LOCAL = "local"
-ALERT_HOST = "host"
-ALERT_LOCAL_HOST = "local_host"
-ALERT_MODES = {ALERT_NONE, ALERT_LOCAL, ALERT_HOST, ALERT_LOCAL_HOST}
+CAPACITY_ALERT_NONE = 1
+CAPACITY_ALERT_HOST = 2
+CAPACITY_ALERT_HOST_LOCAL = 3
+CAPACITY_ALERT_LEVELS = {
+    CAPACITY_ALERT_NONE,
+    CAPACITY_ALERT_HOST,
+    CAPACITY_ALERT_HOST_LOCAL,
+}
+MIN_CAPACITY_THRESHOLD = 0
+MAX_CAPACITY_THRESHOLD = 20
 
-LOCAL_ALERT_POPUP = "popup"
-LOCAL_ALERT_POPUP_SOUND = "popup_sound"
-LOCAL_ALERT_STYLES = {LOCAL_ALERT_POPUP, LOCAL_ALERT_POPUP_SOUND}
+# Legacy values are retained only so an existing settings file can be migrated.
+_LEGACY_ALERT_LEVELS = {
+    "host": CAPACITY_ALERT_HOST,
+    "local_host": CAPACITY_ALERT_HOST_LOCAL,
+}
 
 
 @dataclass(slots=True)
 class SlaveSettings:
-    """User-configurable warning and cloud-relay settings."""
+    """User-configurable inventory alert and cloud-relay settings."""
 
-    minimize_alert: str = ALERT_LOCAL
-    occlusion_threshold_percent: int = 100
-    occlusion_alert: str = ALERT_LOCAL
-    inventory_empty_threshold: int = 0
-    inventory_alert: str = ALERT_LOCAL
-    inventory_not_open_alert: str = ALERT_LOCAL
-    inventory_blocked_alert: str = ALERT_LOCAL
-    local_alert_style: str = LOCAL_ALERT_POPUP_SOUND
+    inventory_capacity_alert_level: int = CAPACITY_ALERT_NONE
+    inventory_capacity_threshold: int = MIN_CAPACITY_THRESHOLD
+    # ``relay_url`` remains only for reading old settings. New clients always
+    # use CLOUD_RELAY_URL and never ask the operator for a server address.
     relay_url: str = ""
     device_id: str = ""
     device_token: str = ""
+    installation_id: str = ""
+    pairing_code: str = ""
+
+    @property
+    def inventory_capacity_alert_enabled(self) -> bool:
+        """Compatibility view used by older callers and settings files."""
+
+        return self.inventory_capacity_alert_level >= CAPACITY_ALERT_HOST
+
+    @inventory_capacity_alert_enabled.setter
+    def inventory_capacity_alert_enabled(self, enabled: bool) -> None:
+        self.inventory_capacity_alert_level = CAPACITY_ALERT_HOST if enabled else CAPACITY_ALERT_NONE
+
+    @property
+    def inventory_capacity_local_alert_enabled(self) -> bool:
+        return self.inventory_capacity_alert_level == CAPACITY_ALERT_HOST_LOCAL
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> SlaveSettings:
-        settings = cls()
-        for key in asdict(settings):
-            if key in raw:
-                setattr(settings, key, raw[key])
-        settings.minimize_alert = _alert_mode(settings.minimize_alert)
-        settings.occlusion_alert = _alert_mode(settings.occlusion_alert)
-        settings.inventory_alert = _alert_mode(settings.inventory_alert)
-        settings.inventory_not_open_alert = _alert_mode(settings.inventory_not_open_alert)
-        settings.inventory_blocked_alert = _alert_mode(settings.inventory_blocked_alert)
-        settings.local_alert_style = (
-            str(settings.local_alert_style)
-            if str(settings.local_alert_style) in LOCAL_ALERT_STYLES
-            else LOCAL_ALERT_POPUP_SOUND
+        if "inventory_capacity_alert_level" in raw:
+            alert_level = _alert_level(raw["inventory_capacity_alert_level"])
+        elif "inventory_capacity_alert_enabled" in raw:
+            alert_level = (
+                CAPACITY_ALERT_HOST
+                if _boolean(raw["inventory_capacity_alert_enabled"])
+                else CAPACITY_ALERT_NONE
+            )
+        else:
+            alert_level = _LEGACY_ALERT_LEVELS.get(
+                str(raw.get("inventory_alert", "none")), CAPACITY_ALERT_NONE
+            )
+        return cls(
+            inventory_capacity_alert_level=alert_level,
+            inventory_capacity_threshold=_capacity_threshold(
+                raw.get("inventory_capacity_threshold", MIN_CAPACITY_THRESHOLD)
+            ),
+            relay_url=str(raw.get("relay_url", "")).strip().rstrip("/"),
+            device_id=str(raw.get("device_id", "")).strip(),
+            device_token=str(raw.get("device_token", "")).strip(),
+            installation_id=str(raw.get("installation_id", "")).strip() or uuid4().hex,
+            pairing_code=str(raw.get("pairing_code", "")).strip().upper(),
         )
-        settings.occlusion_threshold_percent = _bounded_int(settings.occlusion_threshold_percent, 1, 100, 100)
-        settings.inventory_empty_threshold = _bounded_int(settings.inventory_empty_threshold, 0, 20, 0)
-        settings.relay_url = str(settings.relay_url).strip().rstrip("/")
-        settings.device_id = str(settings.device_id).strip()
-        settings.device_token = str(settings.device_token).strip()
-        return settings
 
 
 def settings_path() -> Path:
@@ -67,11 +90,11 @@ def settings_path() -> Path:
 def load_slave_settings(path: Path | None = None) -> SlaveSettings:
     target = path or settings_path()
     if not target.exists():
-        return SlaveSettings()
+        return SlaveSettings(installation_id=uuid4().hex)
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return SlaveSettings()
+        return SlaveSettings(installation_id=uuid4().hex)
     return SlaveSettings.from_mapping(raw) if isinstance(raw, dict) else SlaveSettings()
 
 
@@ -84,14 +107,25 @@ def save_slave_settings(settings: SlaveSettings, path: Path | None = None) -> No
     temporary.replace(target)
 
 
-def _alert_mode(value: Any) -> str:
-    normalized = str(value)
-    return normalized if normalized in ALERT_MODES else ALERT_LOCAL
+def _boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def _bounded_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
+def _alert_level(value: Any) -> int:
     try:
-        parsed = int(value)
+        level = int(value)
     except (TypeError, ValueError):
-        return fallback
-    return max(minimum, min(maximum, parsed))
+        return CAPACITY_ALERT_NONE
+    return level if level in CAPACITY_ALERT_LEVELS else CAPACITY_ALERT_NONE
+
+
+def _capacity_threshold(value: Any) -> int:
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError):
+        return MIN_CAPACITY_THRESHOLD
+    return max(MIN_CAPACITY_THRESHOLD, min(MAX_CAPACITY_THRESHOLD, threshold))

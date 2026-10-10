@@ -13,6 +13,7 @@ from PySide6.QtCore import QByteArray, QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from . import __version__
+from .cloud_config import CLOUD_RELAY_URL
 
 
 def normalize_relay_url(value: str) -> str:
@@ -60,6 +61,7 @@ class SlaveRelayClient(QObject):
 
     connection_changed = Signal(bool, str)
     event_result = Signal(bool, str)
+    pairing_result = Signal(bool, str, object)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -80,10 +82,18 @@ class SlaveRelayClient(QObject):
     def online(self) -> bool:
         return self._online
 
-    def configure(self, relay_url: str, device_id: str, device_token: str) -> None:
-        self._base_url = normalize_relay_url(relay_url)
-        self._device_id = device_id.strip()
-        self._device_token = device_token.strip()
+    def configure(
+        self, device_id_or_url: str, device_token_or_id: str, legacy_device_token: str | None = None
+    ) -> None:
+        """Configure a device while accepting the old three-argument call."""
+
+        self._base_url = CLOUD_RELAY_URL
+        if legacy_device_token is None:
+            self._device_id = device_id_or_url.strip()
+            self._device_token = device_token_or_id.strip()
+        else:
+            self._device_id = device_token_or_id.strip()
+            self._device_token = legacy_device_token.strip()
         self._heartbeat_timer.stop()
         self._set_online(False, "尚未连接")
         if self.configured:
@@ -91,7 +101,7 @@ class SlaveRelayClient(QObject):
 
     def connect_now(self) -> None:
         if not self.configured:
-            self._set_online(False, "请先在设置中填写云端地址、设备编号和设备密钥")
+            self._set_online(False, "请在设置中输入主机生成的配对码")
             return
         self._post(
             "/api/v1/slave/heartbeat",
@@ -118,12 +128,30 @@ class SlaveRelayClient(QObject):
             return
         self._post("/api/v1/slave/events", payload, "event")
 
-    def _post(self, path: str, payload: dict[str, Any], kind: str) -> None:
+    def pair(self, pairing_code: str, installation_id: str) -> None:
+        code = pairing_code.strip().upper()
+        if not code:
+            self.pairing_result.emit(False, "请输入配对码", {})
+            return
+        self._base_url = CLOUD_RELAY_URL
+        self._post(
+            "/api/v1/slave/pair",
+            {
+                "pairing_code": code,
+                "installation_id": installation_id,
+                "hostname": platform.node() or None,
+                "app_version": __version__,
+            },
+            "pair",
+            authenticated=False,
+        )
+
+    def _post(self, path: str, payload: dict[str, Any], kind: str, *, authenticated: bool = True) -> None:
         # QNetworkRequest.setTransferTimeout() does not reliably abort a TLS
         # handshake on every Windows/Qt network backend. Keep an explicit
         # watchdog so the UI can never remain in "连接中" forever.
         try:
-            request = self._request(path)
+            request = self._request(path, authenticated=authenticated)
             reply = self._manager.post(
                 request,
                 QByteArray(
@@ -146,11 +174,12 @@ class SlaveRelayClient(QObject):
         reply.finished.connect(lambda current=reply: self._on_finished(current))
         timeout_timer.start()
 
-    def _request(self, path: str) -> QNetworkRequest:
+    def _request(self, path: str, *, authenticated: bool = True) -> QNetworkRequest:
         request = QNetworkRequest(QUrl(urljoin(f"{self._base_url}/", path.lstrip("/"))))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
-        request.setRawHeader(b"Authorization", f"Bearer {self._device_token}".encode())
-        request.setRawHeader(b"X-Device-ID", self._device_id.encode("utf-8"))
+        if authenticated:
+            request.setRawHeader(b"Authorization", f"Bearer {self._device_token}".encode())
+            request.setRawHeader(b"X-Device-ID", self._device_id.encode("utf-8"))
         request.setTransferTimeout(10_000)
         return request
 
@@ -162,6 +191,8 @@ class SlaveRelayClient(QObject):
         self._set_online(False, message)
         if str(reply.property("relay_kind")) == "event":
             self.event_result.emit(False, f"云端告警发送失败：{message}")
+        elif str(reply.property("relay_kind")) == "pair":
+            self.pairing_result.emit(False, message, {})
         # Abort after publishing the timeout state. The finished callback will
         # clean up the reply without emitting a second result.
         reply.abort()
@@ -176,17 +207,25 @@ class SlaveRelayClient(QObject):
 
         kind = str(reply.property("relay_kind"))
         status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
-        success = reply.error() == QNetworkReply.NetworkError.NoError and status in {200, 202}
-        message = ""
-        if not success:
-            message = reply.errorString()
+        success = reply.error() == QNetworkReply.NetworkError.NoError and status in {200, 201, 202}
+        message = "" if success else reply.errorString()
+        data: dict[str, Any] = {}
+        raw = bytes(reply.readAll())
+        if raw:
             try:
-                body = json.loads(bytes(reply.readAll()).decode("utf-8"))
-                message = str(body.get("detail") or message)
+                parsed = json.loads(raw.decode("utf-8"))
+                data = parsed if isinstance(parsed, dict) else {}
+                if not success:
+                    message = str(data.get("detail") or message)
             except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-                pass
+                if success:
+                    success = False
+                    message = "云端返回的数据格式不正确"
         reply.deleteLater()
         if success:
+            if kind == "pair":
+                self.pairing_result.emit(True, "从机配对成功", data)
+                return
             self._set_online(True, "HTTPS 连接正常")
             if kind == "event":
                 self.event_result.emit(True, "告警已发送到云端")
@@ -194,6 +233,8 @@ class SlaveRelayClient(QObject):
         self._set_online(False, message or "连接失败")
         if kind == "event":
             self.event_result.emit(False, f"云端告警发送失败：{message or '连接失败'}")
+        elif kind == "pair":
+            self.pairing_result.emit(False, message or "配对失败", {})
 
     def _set_online(self, online: bool, message: str) -> None:
         self._online = online
@@ -210,6 +251,9 @@ class MasterRelayClient(QObject):
     devices_received = Signal(object)
     status_received = Signal(object)
     acknowledge_result = Signal(int, bool, str)
+    authentication_result = Signal(bool, str, object)
+    pairing_code_received = Signal(bool, str, object)
+    device_action_result = Signal(bool, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -224,13 +268,15 @@ class MasterRelayClient(QObject):
     def configured(self) -> bool:
         return bool(self._base_url and self._master_token)
 
-    def configure(self, relay_url: str, master_token: str) -> None:
-        self._base_url = normalize_relay_url(relay_url)
-        self._master_token = master_token.strip()
+    def configure(self, token_or_url: str, legacy_token: str | None = None) -> None:
+        """Use the fixed endpoint; accept the former (url, token) signature."""
+
+        self._base_url = CLOUD_RELAY_URL
+        self._master_token = (legacy_token if legacy_token is not None else token_or_url).strip()
 
     def poll(self) -> None:
         if not self.configured:
-            self.connection_changed.emit(False, "请先填写云端地址和主机密钥")
+            self.connection_changed.emit(False, "请先登录主机账号")
             return
         if self._pending_kinds:
             return
@@ -257,6 +303,53 @@ class MasterRelayClient(QObject):
         reply.setProperty("server_event_id", server_event_id)
         self._watch(reply)
 
+    def authenticate(self, username: str, password: str, *, register: bool = False) -> None:
+        path = "/api/v1/auth/register" if register else "/api/v1/auth/login"
+        payload: dict[str, Any] = {"username": username.strip(), "password": password}
+        if register:
+            payload["display_name"] = username.strip()
+        self._post_json(path, payload, "auth", authenticated=False)
+
+    def create_pairing_code(self, target_device_id: str | None = None) -> None:
+        self._post_json(
+            "/api/v1/master/pairing-codes",
+            {"target_device_id": target_device_id},
+            "pairing_code",
+        )
+
+    def update_device(self, device_id: str, changes: dict[str, Any]) -> None:
+        self._send_custom("PATCH", f"/api/v1/master/devices/{device_id}", changes, "device_action")
+
+    def remove_device(self, device_id: str) -> None:
+        self._send_custom("DELETE", f"/api/v1/master/devices/{device_id}", {}, "device_action")
+
+    def reissue_device(self, device_id: str) -> None:
+        self._post_json(f"/api/v1/master/devices/{device_id}/reissue", {}, "pairing_code")
+
+    def _post_json(
+        self, path: str, payload: dict[str, Any], kind: str, *, authenticated: bool = True
+    ) -> None:
+        self._send_custom("POST", path, payload, kind, authenticated=authenticated)
+
+    def _send_custom(
+        self, method: str, path: str, payload: dict[str, Any], kind: str, *, authenticated: bool = True
+    ) -> None:
+        try:
+            request = self._request(path, authenticated=authenticated)
+            body = QByteArray(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode())
+            reply = self._manager.sendCustomRequest(request, method.encode(), body)
+        except Exception as exc:  # noqa: BLE001
+            message = f"无法发起 HTTPS 请求：{exc}"
+            if kind == "auth":
+                self.authentication_result.emit(False, message, {})
+            elif kind == "pairing_code":
+                self.pairing_code_received.emit(False, message, {})
+            else:
+                self.device_action_result.emit(False, message)
+            return
+        reply.setProperty("relay_kind", kind)
+        self._watch(reply)
+
     def _get(self, path: str, kind: str) -> None:
         try:
             reply = self._manager.get(self._request(path))
@@ -275,10 +368,11 @@ class MasterRelayClient(QObject):
         reply.finished.connect(lambda current=reply: self._on_finished(current))
         timeout_timer.start()
 
-    def _request(self, path: str) -> QNetworkRequest:
+    def _request(self, path: str, *, authenticated: bool = True) -> QNetworkRequest:
         request = QNetworkRequest(QUrl(urljoin(f"{self._base_url}/", path.lstrip("/"))))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
-        request.setRawHeader(b"Authorization", f"Bearer {self._master_token}".encode())
+        if authenticated:
+            request.setRawHeader(b"Authorization", f"Bearer {self._master_token}".encode())
         request.setTransferTimeout(10_000)
         return request
 
@@ -290,6 +384,12 @@ class MasterRelayClient(QObject):
         kind = str(reply.property("relay_kind"))
         if kind == "ack":
             self.acknowledge_result.emit(int(reply.property("server_event_id") or 0), False, message)
+        elif kind == "auth":
+            self.authentication_result.emit(False, message, {})
+        elif kind == "pairing_code":
+            self.pairing_code_received.emit(False, message, {})
+        elif kind == "device_action":
+            self.device_action_result.emit(False, message)
         else:
             self._finish_poll_kind(kind, message)
         # Abort after publishing the timeout state. The finished callback will
@@ -307,7 +407,7 @@ class MasterRelayClient(QObject):
         kind = str(reply.property("relay_kind"))
         event_id = int(reply.property("server_event_id") or 0)
         status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
-        success = reply.error() == QNetworkReply.NetworkError.NoError and status == 200
+        success = reply.error() == QNetworkReply.NetworkError.NoError and status in {200, 201, 202, 204}
         raw = bytes(reply.readAll())
         message = reply.errorString() if not success else ""
         data: dict[str, Any] = {}
@@ -337,5 +437,11 @@ class MasterRelayClient(QObject):
             self.devices_received.emit(data.get("devices", []))
         elif kind == "ack":
             self.acknowledge_result.emit(event_id, success, message)
-        if kind != "ack":
+        elif kind == "auth":
+            self.authentication_result.emit(success, message, data)
+        elif kind == "pairing_code":
+            self.pairing_code_received.emit(success, message, data)
+        elif kind == "device_action":
+            self.device_action_result.emit(success, message)
+        if kind not in {"ack", "auth", "pairing_code", "device_action"}:
             self._finish_poll_kind(kind, "" if success else message or "连接失败")

@@ -86,6 +86,18 @@ def is_window_minimized(hwnd: int) -> bool:
     return bool(ctypes.windll.user32.IsIconic(wintypes.HWND(hwnd)))
 
 
+def minimize_window(hwnd: int) -> bool:
+    """Asynchronously ask Windows to minimize a top-level window."""
+    if not is_window_available(hwnd):
+        return False
+    if is_window_minimized(hwnd):
+        return True
+    try:
+        return bool(_require_windows().ShowWindowAsync(wintypes.HWND(hwnd), 6))  # SW_MINIMIZE
+    except (OSError, ValueError):
+        return False
+
+
 def get_window_title(hwnd: int) -> str:
     """Read the current title of an HWND."""
     if not is_window_available(hwnd):
