@@ -827,16 +827,18 @@ class InventoryMonitorWindow(QMainWindow):
         else:
             title = "背包容量提醒"
             message = f"检测到背包剩余 {empty_count} 格，已达到提醒阈值（≤ {threshold} 格），请及时处理。"
+        host_alert = self.slave_settings.inventory_capacity_host_alert_enabled
         local_alert = self.slave_settings.inventory_capacity_local_alert_enabled
-        action = "正在上报主机并触发本机提醒" if local_alert else "正在上报主机"
+        action = "正在上报主机" if host_alert else "正在触发本机提醒"
         self.log.appendPlainText(f"{title}：{account_label}，{action}")
-        self._send_host_alert(
-            session,
-            "inventory_full" if threshold == 0 else "inventory_capacity",
-            empty_slots=empty_count,
-            confidence=float(signal.get("confidence", 0.0)),
-            details={"threshold": threshold, "message": message},
-        )
+        if host_alert:
+            self._send_host_alert(
+                session,
+                "inventory_full" if threshold == 0 else "inventory_capacity",
+                empty_slots=empty_count,
+                confidence=float(signal.get("confidence", 0.0)),
+                details={"threshold": threshold, "message": message},
+            )
         if local_alert:
             self._show_alert(
                 QMessageBox.Icon.Critical,

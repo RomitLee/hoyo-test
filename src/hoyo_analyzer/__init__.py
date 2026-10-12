@@ -2,4 +2,4 @@
 
 # The master and slave are always released from this single version constant.
 # Every desktop release must increment it before both packages are rebuilt.
-__version__ = "V1.2.0"
+__version__ = "V1.3.0"

@@ -19,7 +19,7 @@ from hoyo_analyzer.inventory_app import (
 )
 from hoyo_analyzer.inventory_fullness import InventoryAnalysis, InventoryStatus, SlotResult, SlotState
 from hoyo_analyzer.multi_inventory_app import InventoryMonitorWindow
-from hoyo_analyzer.slave_settings import CAPACITY_ALERT_HOST_LOCAL, SlaveSettings
+from hoyo_analyzer.slave_settings import CAPACITY_ALERT_LOCAL, SlaveSettings
 from hoyo_analyzer.wgc import OccludingWindow, WindowInfo, WindowOcclusionStatus
 
 
@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V1.2.0"
+        assert __version__ == "V1.3.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -368,11 +368,11 @@ def test_disabled_capacity_alert_does_not_report_full_inventory(monkeypatch) -> 
         app.processEvents()
 
 
-def test_local_capacity_level_reports_host_and_plays_local_alarm_after_five_seconds(monkeypatch) -> None:
+def test_local_capacity_level_only_plays_local_alarm_after_five_seconds(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
-    window.slave_settings.inventory_capacity_alert_level = CAPACITY_ALERT_HOST_LOCAL
+    window.slave_settings.inventory_capacity_alert_level = CAPACITY_ALERT_LOCAL
     window.slave_settings.inventory_capacity_threshold = 3
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None)
@@ -392,9 +392,7 @@ def test_local_capacity_level_reports_host_and_plays_local_alarm_after_five_seco
             15.0,
         )
 
-        assert [kind for kind, _data in sent] == ["inventory_capacity"]
-        assert sent[0][1]["empty_slots"] == 2
-        assert sent[0][1]["details"]["threshold"] == 3
+        assert sent == []
         assert len(local) == 1
         assert local[0][1]["with_sound"] is True
     finally:

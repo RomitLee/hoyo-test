@@ -12,11 +12,11 @@ from .paths import application_root
 
 CAPACITY_ALERT_NONE = 1
 CAPACITY_ALERT_HOST = 2
-CAPACITY_ALERT_HOST_LOCAL = 3
+CAPACITY_ALERT_LOCAL = 3
 CAPACITY_ALERT_LEVELS = {
     CAPACITY_ALERT_NONE,
     CAPACITY_ALERT_HOST,
-    CAPACITY_ALERT_HOST_LOCAL,
+    CAPACITY_ALERT_LOCAL,
 }
 MIN_CAPACITY_THRESHOLD = 0
 MAX_CAPACITY_THRESHOLD = 20
@@ -24,7 +24,8 @@ MAX_CAPACITY_THRESHOLD = 20
 # Legacy values are retained only so an existing settings file can be migrated.
 _LEGACY_ALERT_LEVELS = {
     "host": CAPACITY_ALERT_HOST,
-    "local_host": CAPACITY_ALERT_HOST_LOCAL,
+    "local_host": CAPACITY_ALERT_LOCAL,
+    "local": CAPACITY_ALERT_LOCAL,
 }
 
 
@@ -46,7 +47,7 @@ class SlaveSettings:
     def inventory_capacity_alert_enabled(self) -> bool:
         """Compatibility view used by older callers and settings files."""
 
-        return self.inventory_capacity_alert_level >= CAPACITY_ALERT_HOST
+        return self.inventory_capacity_alert_level in {CAPACITY_ALERT_HOST, CAPACITY_ALERT_LOCAL}
 
     @inventory_capacity_alert_enabled.setter
     def inventory_capacity_alert_enabled(self, enabled: bool) -> None:
@@ -54,7 +55,11 @@ class SlaveSettings:
 
     @property
     def inventory_capacity_local_alert_enabled(self) -> bool:
-        return self.inventory_capacity_alert_level == CAPACITY_ALERT_HOST_LOCAL
+        return self.inventory_capacity_alert_level == CAPACITY_ALERT_LOCAL
+
+    @property
+    def inventory_capacity_host_alert_enabled(self) -> bool:
+        return self.inventory_capacity_alert_level == CAPACITY_ALERT_HOST
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> SlaveSettings:
