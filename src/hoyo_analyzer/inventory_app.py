@@ -202,6 +202,7 @@ class InventoryMonitorWorker(QObject):
                     continue
                 if was_paused:
                     panel_tracker.reset_pending()
+                    money_tracker.reset_pending()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
                     sampler = AdaptiveSampler(
@@ -220,6 +221,7 @@ class InventoryMonitorWorker(QObject):
                 # inventory result.
                 if is_window_minimized(self.hwnd):
                     panel_tracker.reset_pending()
+                    money_tracker.reset_pending()
                     continue
                 now = monotonic()
                 if now - last_preview >= self.PREVIEW_INTERVAL_SECONDS:
@@ -243,7 +245,11 @@ class InventoryMonitorWorker(QObject):
                     if money_window_title != self.window_title:
                         money_tracker = MoneyTracker()
                         money_window_title = self.window_title
-                    money = money_detector.analyze(packet.image, panel.bbox) if panel.panel_type == "inventory" else None
+                    money = money_detector.read_fields(
+                        packet.image, panel.bbox if panel.panel_type == "inventory" else None,
+                        analysis.grid_bbox if panel.panel_type in {"inventory", "unknown"} else None,
+                    )
+                    signal["money_reason"] = money_detector.reason
                     signal.update(money_tracker.update(money, packet.timestamp_ms))
                     self.analysis_ready.emit(signal)
                     self.analysis_for_window.emit(self.hwnd, signal)

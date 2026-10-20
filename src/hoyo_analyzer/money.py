@@ -20,13 +20,22 @@ class MoneyDetector:
         # Field includes the flat grey background, but excludes its rounded edges.
         if field.shape != (14, 148, 3):
             return None
+        background_field = field
+        # Twelve digits occupy at most 84 pixels in this game font. A cursor
+        # over the far right of the input must not invalidate readable numbers.
+        field = field[:, :100]
         reference = np.array((190, 182, 174), dtype=np.int16)
         # Reject colourful overlays/cursors instead of silently reading a prefix.
         if np.any(np.ptp(field.astype(np.int16), axis=2) > 55):
             return None
-        if float((np.abs(field.astype(np.int16) - reference).max(axis=2) < 35).mean()) < 0.75:
+        if float((np.abs(background_field.astype(np.int16) - reference).max(axis=2) < 35).mean()) < 0.75:
             return None
-        mask = (cv2.cvtColor(field, cv2.COLOR_BGR2GRAY) < 100).astype(np.uint8)
+        gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
+        values = {value for threshold in (85, 100, 115, 130, 145)
+                  if (value := self._read_mask((gray < threshold).astype(np.uint8))) is not None}
+        return values.pop() if len(values) == 1 else None
+
+    def _read_mask(self, mask: np.ndarray) -> int | None:
         boxes = sorted(cv2.boundingRect(c) for c in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0])
         if not 1 <= len(boxes) <= 12 or boxes[0][0] > 5:
             return None
@@ -54,44 +63,81 @@ class MoneyDetector:
             return None
         return int(text)
 
-    def analyze(self, image: np.ndarray, title_bbox: tuple[int, int, int, int] | None) -> tuple[int, int] | None:
-        if title_bbox is None:
-            return None
-        x, y, right, _ = title_bbox
-        scale = (right - x) / 67
-        values = []
-        for offset_y in (273, 300):
-            left, top = round(x + 74 * scale), round(y + offset_y * scale)
-            end_x, end_y = round(x + 222 * scale), round(y + (offset_y + 14) * scale)
-            if left < 0 or top < 0 or end_x > image.shape[1] or end_y > image.shape[0]:
-                return None
-            field = cv2.resize(image[top:end_y, left:end_x], (148, 14), interpolation=cv2.INTER_AREA)
+    def _read_near(self, image: np.ndarray, x: float, y: float, scale: float) -> int | None:
+        # Title rounding at 125% can shift the distant money row by several
+        # pixels. Search only a small neighbourhood, never the whole screen.
+        candidates = set()
+        for dx, dy in [(0, 0)] + [(dx, dy) for dy in (0, -1, 1, -2, 2, -3, 3, -4, 4)
+                                   for dx in (-2, -1, 0, 1, 2) if (dx, dy) != (0, 0)]:
+            left, top = round(x) + dx, round(y) + dy
+            right, bottom = left + round(148 * scale), top + round(14 * scale)
+            if left < 0 or top < 0 or right > image.shape[1] or bottom > image.shape[0]:
+                continue
+            field = cv2.resize(image[top:bottom, left:right], (148, 14), interpolation=cv2.INTER_AREA)
             value = self._read(field)
-            if value is None:
-                return None
-            values.append(value)
-        return values[0], values[1]
+            if value is not None:
+                if (dx, dy) == (0, 0):
+                    return value
+                candidates.add(value)
+        return candidates.pop() if len(candidates) == 1 else None
+
+    def read_fields(
+        self, image: np.ndarray, title_bbox: tuple[int, int, int, int] | None,
+        grid_bbox: tuple[int, int, int, int] | None = None,
+    ) -> tuple[int | None, int | None]:
+        self.reason = "背包金额区域未定位"
+        anchors = []
+        if title_bbox is not None:
+            x, y, right, _ = title_bbox
+            scale = (right - x) / 67
+            anchors.append((x + 74 * scale, y + 273 * scale, scale))
+        elif grid_bbox is not None:
+            left, top, right, bottom = grid_bbox
+            scale = (right - left) / 255
+            if scale > 0 and abs((bottom - top) / scale - 204) < 12:
+                anchors.append((left + 56 * scale, bottom + 13 * scale, scale))
+        cash = bank = None
+        for left, top, scale in anchors:
+            if scale <= 0:
+                continue
+            cash = self._read_near(image, left, top, scale)
+            bank = self._read_near(image, left, top + 27 * scale, scale)
+        self.reason = ("现金、存银均可读" if cash is not None and bank is not None else
+                       "现金可读，存银不可读" if cash is not None else
+                       "存银可读，现金不可读" if bank is not None else
+                       "数字字形或金额背景不匹配" if anchors else self.reason)
+        return cash, bank
+
+    def analyze(self, image: np.ndarray, title_bbox: tuple[int, int, int, int] | None) -> tuple[int, int] | None:
+        cash, bank = self.read_fields(image, title_bbox)
+        return (cash, bank) if cash is not None and bank is not None else None
 
 
 class MoneyTracker:
-    """Keep last confirmed values; unknown observations break consecutive evidence."""
+    """Confirm cash and bank independently; retain each last confirmed value."""
 
     def __init__(self) -> None:
-        self.pending: tuple[int, int] | None = None
-        self.count = 0
         self.last_frame_ms: int | None = None
         self.confirmed: dict[str, object] = {}
+        self.reset_pending()
 
-    def update(self, value: tuple[int, int] | None, timestamp_ms: int) -> dict[str, object]:
-        if self.last_frame_ms is not None and timestamp_ms - self.last_frame_ms > 1500:
-            self.pending, self.count = None, 0
+    def reset_pending(self) -> None:
+        self.pending: list[int | None] = [None, None]
+        self.count = [0, 0]
+
+    def update(self, value: tuple[int | None, int | None] | None, timestamp_ms: int) -> dict[str, object]:
+        if self.last_frame_ms is not None and (timestamp_ms - self.last_frame_ms > 5000 or timestamp_ms <= self.last_frame_ms):
+            self.reset_pending()
         self.last_frame_ms = timestamp_ms
-        if value is None:
-            self.pending, self.count = None, 0
-        else:
-            self.count = self.count + 1 if self.pending == value else 1
-            self.pending = value
-            if self.count >= 3:
-                self.confirmed = {"cash": value[0], "bank_money": value[1],
-                                  "money_confirmed_at": datetime.now(UTC).isoformat(timespec="milliseconds")}
-        return {**self.confirmed, "money_readable": value is not None and self.count >= 3}
+        readable = []
+        for index, (key, amount) in enumerate(zip(("cash", "bank_money"), value or (None, None), strict=True)):
+            if amount is None:
+                self.pending[index], self.count[index] = None, 0
+            else:
+                self.count[index] = self.count[index] + 1 if self.pending[index] == amount else 1
+                self.pending[index] = amount
+                if self.count[index] >= 3:
+                    self.confirmed[key] = amount
+                    self.confirmed["money_confirmed_at"] = datetime.now(UTC).isoformat(timespec="milliseconds")
+            readable.append(amount is not None and self.count[index] >= 3)
+        return {**self.confirmed, "money_readable": all(readable)}

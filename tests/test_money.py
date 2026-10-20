@@ -8,6 +8,29 @@ import cv2
 import numpy as np
 
 from hoyo_analyzer.money import MoneyDetector, MoneyTracker
+from hoyo_analyzer.panels import PanelDetector
+
+
+def test_six_actual_game_amounts_from_panel_location_through_confirmation() -> None:
+    samples = json.loads((Path(__file__).parent / "fixtures/money_live_fields.json").read_text())
+    for sample in samples:
+        image = np.zeros((480, 640, 3), dtype=np.uint8)
+        x, y, right, bottom = sample["bbox"]
+        decode = lambda raw: cv2.imdecode(np.frombuffer(base64.b64decode(raw), np.uint8), 1)
+        image[y:bottom, x:right] = decode(sample["title"])
+        for top, raw in zip((y + 273, y + 300), sample["fields"], strict=True):
+            image[top:top + 14, x + 74:x + 222] = decode(raw)
+        panel = PanelDetector().analyze(image)
+        assert panel.panel_type == "inventory"
+        detector = MoneyDetector()
+        observation = detector.read_fields(image, panel.bbox)
+        assert observation == (sample["cash"], sample["bank_money"])
+        tracker = MoneyTracker()
+        for timestamp in (0, 200, 400):
+            result = tracker.update(observation, timestamp)
+        assert result["cash"] == sample["cash"]
+        assert result["bank_money"] == 0
+        assert result["money_readable"] is True
 
 
 def test_provided_cash_fields_and_cursor_occlusion() -> None:
@@ -73,3 +96,39 @@ def test_money_regions_follow_title_position_and_scale() -> None:
     assert detector.analyze(canvas, (x + 80, y + 60, x + 147, y + 80)) == (1450000, 0)
     assert detector.analyze(image, None) is None
     assert detector.analyze(image, (600, 450, 667, 470)) is None
+
+
+def test_cash_confirmation_does_not_depend_on_bank_reading() -> None:
+    tracker = MoneyTracker()
+    for timestamp in (0, 200, 400):
+        result = tracker.update((12179964, None), timestamp)
+    assert result["cash"] == 12179964
+    assert "bank_money" not in result
+    assert not result["money_readable"]
+
+
+def test_slow_analysis_can_confirm_but_pause_clears_pending_evidence() -> None:
+    tracker = MoneyTracker()
+    for timestamp in (0, 2000, 4000):
+        result = tracker.update((1450000, 0), timestamp)
+    assert result["cash"] == 1450000
+    tracker.update((4995810, 0), 4200)
+    tracker.reset_pending()
+    assert tracker.update((4995810, 0), 4400)["cash"] == 1450000
+
+
+def test_grid_location_is_usable_without_panel_title() -> None:
+    detector = MoneyDetector()
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    image[348:362, 361:509] = field("1450000")
+    image[375:389, 361:509] = field("0")
+    assert detector.read_fields(image, None, (305, 131, 560, 335)) == (1450000, 0)
+
+
+def test_reading_fields_independently_survives_bank_cursor() -> None:
+    samples = json.loads((Path(__file__).parent / "fixtures/money_fields.json").read_text())
+    sample = next(sample for sample in samples if not sample["readable"])
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    for top, raw in zip((348, 375), sample["fields"], strict=True):
+        image[top:top + 14, 361:509] = cv2.imdecode(np.frombuffer(base64.b64decode(raw), np.uint8), 1)
+    assert MoneyDetector().read_fields(image, (287, 75, 354, 95)) == (sample["cash"], None)

@@ -785,6 +785,13 @@ class InventoryMonitorWindow(QMainWindow):
         if session is None or session.minimized or self.monitoring_paused:
             return
         session.last_signal = signal
+        reason = str(signal.get("money_reason") or "等待金额识别")
+        cash = signal.get("cash")
+        bank = signal.get("bank_money")
+        session.output_detail.setToolTip(
+            f"现金：{cash if cash is not None else '未识别'}\n"
+            f"存银：{bank if bank is not None else '未识别'}\n{reason}"
+        )
         self._apply_signal(session, signal)
         self._update_capacity_alert(session, signal)
 

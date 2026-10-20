@@ -140,6 +140,42 @@ def _run_package_ui_self_test() -> int:
     return 0 if result["ok"] else 1
 
 
+def _run_money_diagnostic(path: str) -> int:
+    """Run the shipped recognizer against a local image without opening a UI."""
+    result: dict[str, object] = {"ok": False}
+    try:
+        import cv2
+        import numpy as np
+
+        from hoyo_analyzer import __version__
+        from hoyo_analyzer.inventory_fullness import InventoryFullnessDetector
+        from hoyo_analyzer.money import MoneyDetector, MoneyTracker
+        from hoyo_analyzer.panels import PanelDetector
+
+        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("无法读取诊断图片")
+        panel = PanelDetector().analyze(image)
+        analysis = InventoryFullnessDetector().analyze(image)
+        detector = MoneyDetector()
+        value = detector.read_fields(image, panel.bbox if panel.panel_type == "inventory" else None,
+                                     analysis.grid_bbox if panel.panel_type in {"inventory", "unknown"} else None)
+        tracker = MoneyTracker()
+        for timestamp in (0, 200, 400):
+            confirmed = tracker.update(value, timestamp)
+        result.update(ok=value[0] is not None, client_version=__version__, image_shape=list(image.shape),
+                      panel_type=panel.panel_type, reason=detector.reason, **confirmed)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must persist failures
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    output = application_root() / "runtime" / "money-diagnostic.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if result["ok"] else 1
+
+
+if "--diagnose-money" in sys.argv:
+    raise SystemExit(_run_money_diagnostic(sys.argv[sys.argv.index("--diagnose-money") + 1]))
+
 if "--package-self-test" in sys.argv:
     raise SystemExit(_run_package_self_test())
 
