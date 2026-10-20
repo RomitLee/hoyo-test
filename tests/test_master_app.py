@@ -42,7 +42,7 @@ def test_acknowledged_row_remains_and_button_disappears(window):
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert window.title_bar.height() == 32
-    assert __version__ == "V1.6.0"
+    assert __version__ == "V1.7.0"
     assert __version__ in window.subtitle_label.text()
     window._on_events_received([event()])
     assert window.table.cellWidget(0, 6) is not None
@@ -97,12 +97,30 @@ def test_status_renders_every_window_and_empty_offline_device(window):
         {"device_id": "slave-02", "last_seen_at": (now - timedelta(seconds=100)).isoformat(), "windows": []},
     ])
     assert window.status_table.rowCount() == 3
+    assert window.status_table.item(0, 5).text() == "0"
+    assert window.status_table.item(0, 6).text() == "96%"
+    assert window.status_table.item(0, 7).text() == "30.0%"
+    assert window.status_table.item(1, 8).text() == "是"
+    assert window.status_table.item(2, 10).text() == "离线"
+    assert window.status_table.item(2, 8).text() == "-"
+
+
+def test_money_is_visible_per_role_and_marks_last_confirmation(window):
+    now = datetime.now(UTC).isoformat()
+    rows = [
+        {"role_name": "角色甲", "cash": 1450000, "bank_money": 0,
+         "money_readable": True, "money_confirmed_at": now},
+        {"role_name": "角色乙", "cash": 4995810, "bank_money": 0,
+         "money_readable": False, "money_confirmed_at": now},
+        {"role_name": "角色丙"},
+    ]
+    window._on_status_received([{"device_id": "slave-01", "last_seen_at": now, "windows": rows}])
+    assert window.status_table.item(0, 2).text() == "1,450,000"
     assert window.status_table.item(0, 3).text() == "0"
-    assert window.status_table.item(0, 4).text() == "96%"
-    assert window.status_table.item(0, 5).text() == "30.0%"
-    assert window.status_table.item(1, 6).text() == "是"
-    assert window.status_table.item(2, 8).text() == "离线"
-    assert window.status_table.item(2, 6).text() == "-"
+    assert window.status_table.item(1, 2).text() == "4,995,810（上次确认）"
+    assert window.status_table.item(2, 2).text() == "未识别"
+    assert window.status_table.item(0, 11).text() != "-"
+    assert MasterWindow._format_money(rows[0], "cash", False).endswith("（上次确认）")
 
 
 def test_device_management_page_renders_devices_and_pairing_code(window):

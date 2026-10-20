@@ -30,6 +30,28 @@ def master_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MASTER_TOKEN}"}
 
 
+def test_money_snapshot_roundtrip_and_legacy_compatibility(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        window = {"window_id": "hwnd:money", "updated_at": "2026-10-20T22:00:00+08:00",
+                  "cash": 1450000, "bank_money": 0, "money_readable": True,
+                  "money_confirmed_at": "2026-10-20T22:00:00+08:00"}
+        snapshot = {"reported_at": window["updated_at"], "windows": [window]}
+        assert client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot).status_code == 202
+        row = client.get("/api/v1/master/status", headers=master_headers()).json()["devices"][0]["windows"][0]
+        assert row["cash"] == 1450000
+        assert row["bank_money"] == 0
+        assert row["money_readable"] == 1
+        assert row["money_confirmed_at"]
+        window["cash"] = -1
+        assert client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot).status_code == 422
+        for name in ("cash", "bank_money", "money_readable", "money_confirmed_at"):
+            window.pop(name)
+        assert client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot).status_code == 202
+        row = client.get("/api/v1/master/status", headers=master_headers()).json()["devices"][0]["windows"][0]
+        assert row["cash"] is None
+        assert not row["money_readable"]
+
+
 def test_monitor_logs_archive_abnormal_snapshots_and_deduplicate_retries(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         window = {

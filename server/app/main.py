@@ -25,7 +25,7 @@ from .bark import BarkPushError, event_message, send_bark_notification
 from .config import Settings
 from .database import RelayDatabase
 
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
@@ -101,6 +101,10 @@ class WindowStatusIn(BaseModel):
     status_text: str | None = Field(default=None, max_length=128)
     empty_slots: int | None = Field(default=None, ge=0, le=20)
     occupied_slots: int | None = Field(default=None, ge=0, le=20)
+    cash: int | None = Field(default=None, ge=0, le=999999999999)
+    bank_money: int | None = Field(default=None, ge=0, le=999999999999)
+    money_confirmed_at: datetime | None = None
+    money_readable: bool = False
     confidence: float | None = Field(default=None, ge=0, le=1)
     occlusion_percent: float | None = Field(default=None, ge=0, le=100)
     minimized: bool = False

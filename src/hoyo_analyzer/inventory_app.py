@@ -20,6 +20,7 @@ from .config import AppConfig, load_config
 from .event_machine import EventMachine
 from .inventory_fullness import InventoryAnalysis, InventoryFullnessDetector, InventoryStatus
 from .models import Event, Observation
+from .money import MoneyDetector, MoneyTracker
 from .panels import PanelDetector, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
@@ -172,6 +173,9 @@ class InventoryMonitorWorker(QObject):
             detector = InventoryFullnessDetector(template_path)
             panel_detector = PanelDetector()
             panel_tracker = PanelTracker()
+            money_detector = MoneyDetector()
+            money_tracker = MoneyTracker()
+            money_window_title = self.window_title
             last_panel_frame_ms: int | None = None
             sampler = AdaptiveSampler(
                 SamplingProfile(
@@ -236,6 +240,11 @@ class InventoryMonitorWorker(QObject):
                         analysis = detector.analyze(packet.image)
                     signal = _analysis_signal(analysis)
                     signal["panel_type"] = panel.panel_type
+                    if money_window_title != self.window_title:
+                        money_tracker = MoneyTracker()
+                        money_window_title = self.window_title
+                    money = money_detector.analyze(packet.image, panel.bbox) if panel.panel_type == "inventory" else None
+                    signal.update(money_tracker.update(money, packet.timestamp_ms))
                     self.analysis_ready.emit(signal)
                     self.analysis_for_window.emit(self.hwnd, signal)
                     observation = Observation(

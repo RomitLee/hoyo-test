@@ -729,6 +729,7 @@ class InventoryMonitorWindow(QMainWindow):
         return panel, title, preview, status, detail, occlusion
 
     def _update_session_identity(self, session: MonitorSession, title: str) -> None:
+        session.last_signal = None
         session.title = title
         session.account = parse_account_info(title)
         session.worker.window_title = title
@@ -1079,6 +1080,12 @@ class InventoryMonitorWindow(QMainWindow):
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         for session in tuple(self.sessions.values()):
             signal = session.last_signal or {}
+            money = {key: signal.get(key) for key in ("cash", "bank_money", "money_confirmed_at")}
+            money_current = bool(signal.get("money_readable"))
+            try:
+                money_current = money_current and (datetime.now(UTC) - datetime.fromisoformat(str(money["money_confirmed_at"]))).total_seconds() <= 5
+            except (TypeError, ValueError):
+                money_current = False
             # OS state remains measurable while inventory analysis is paused.
             # Never archive an old occlusion measurement as a fresh observation.
             minimized = is_window_minimized(session.hwnd)
@@ -1104,6 +1111,8 @@ class InventoryMonitorWindow(QMainWindow):
                 signal = {}  # Do not present a stale inventory result as current.
             windows.append(
                 {
+                    **money,
+                    "money_readable": money_current and not (self.monitoring_paused or minimized or session.removing) and occlusion_percent == 0,
                     "window_id": f"hwnd:{session.hwnd}",
                     "title": session.title,
                     "server_name": session.account.secondary_region,

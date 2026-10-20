@@ -148,7 +148,7 @@ class MasterWindow(QMainWindow):
     """Receive pending alarms from all configured slave computers."""
 
     COLUMNS: ClassVar[tuple[str, ...]] = ("编号", "从机", "区服 / 角色", "告警", "发生时间", "状态", "操作")
-    STATUS_COLUMNS: ClassVar[tuple[str, ...]] = ("从机编号", "窗口 / 角色", "当前状态", "空格", "置信度", "遮挡", "最小化", "最后更新", "在线")
+    STATUS_COLUMNS: ClassVar[tuple[str, ...]] = ("从机编号", "窗口 / 角色", "现金", "存银", "当前状态", "空格", "置信度", "遮挡", "最小化", "最后更新", "在线", "金额确认时间")
 
     def __init__(self) -> None:
         super().__init__()
@@ -251,7 +251,7 @@ class MasterWindow(QMainWindow):
         self.status_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.status_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.status_table.verticalHeader().setDefaultSectionSize(29)
-        for column, width in enumerate((70, 130, 90, 38, 50, 52, 50, 116, 46)):
+        for column, width in enumerate((70, 130, 112, 112, 90, 38, 50, 52, 50, 116, 46, 116)):
             self.status_table.setColumnWidth(column, width)
         self.status_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         monitor_layout.addWidget(self.status_table, 1)
@@ -641,6 +641,14 @@ class MasterWindow(QMainWindow):
         except (KeyError, TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _format_money(window: dict[str, Any], key: str, online: bool) -> str:
+        value = window.get(key)
+        if value is None:
+            return "未识别"
+        current = online and window.get("money_readable") and window.get("monitoring", True) and not window.get("minimized")
+        return f"{int(value):,}" + ("" if current else "（上次确认）")
+
     def _render_status(self) -> None:
         self.status_table.setRowCount(len(self.window_status))
         for row, item in enumerate(self.window_status):
@@ -654,6 +662,8 @@ class MasterWindow(QMainWindow):
             values = (
                 str(item.get("device_id") or "-"),
                 f"{window.get('server_name') or '-'} / {window.get('role_name') or '未监控窗口'}" if window else "暂无游戏窗口",
+                self._format_money(window, "cash", bool(item.get("online"))),
+                self._format_money(window, "bank_money", bool(item.get("online"))),
                 status_text,
                 "-" if empty is None else str(empty),
                 "-" if confidence is None else f"{float(confidence):.0%}",
@@ -661,6 +671,7 @@ class MasterWindow(QMainWindow):
                 ("是" if window.get("minimized") else "否") if window else "-",
                 self._format_time(window.get("updated_at")) if window else "-",
                 "在线" if item.get("online") else "离线",
+                self._format_time(window.get("money_confirmed_at")),
             )
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)

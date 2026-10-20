@@ -103,6 +103,8 @@ class RelayDatabase:
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
             self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
             self._ensure_column(connection, "monitor_logs", "message", "TEXT")
+            for name, kind in (("cash", "INTEGER"), ("bank_money", "INTEGER"), ("money_confirmed_at", "TEXT"), ("money_readable", "INTEGER NOT NULL DEFAULT 0")):
+                self._ensure_column(connection, "device_window_status", name, kind)
             now = utc_now()
             connection.execute(
                 "INSERT OR IGNORE INTO accounts(id, username, display_name, password_hash, created_at, disabled) VALUES (1, NULL, '原有主机', NULL, ?, 0)",
@@ -345,13 +347,14 @@ class RelayDatabase:
             connection.executemany(
                 """INSERT INTO device_window_status(device_id,window_id,title,server_name,role_name,character_id,
                    status,status_text,empty_slots,occupied_slots,confidence,occlusion_percent,minimized,monitoring,
-                   updated_at,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   updated_at,received_at,cash,bank_money,money_confirmed_at,money_readable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [(
                     device_id, str(w.get("window_id", "")), w.get("title"), w.get("server_name"),
                     w.get("role_name"), w.get("character_id"), str(w.get("status") or "unknown"),
                     w.get("status_text"), w.get("empty_slots"), w.get("occupied_slots"), w.get("confidence"),
                     w.get("occlusion_percent"), int(bool(w.get("minimized"))), int(bool(w.get("monitoring", True))),
                     str(w.get("updated_at") or received_at), received_at,
+                    w.get("cash"), w.get("bank_money"), w.get("money_confirmed_at"), int(bool(w.get("money_readable"))),
                 ) for w in windows if str(w.get("window_id", ""))],
             )
         return received_at
@@ -515,7 +518,7 @@ class RelayDatabase:
             windows = connection.execute(
                 """SELECT s.device_id,s.window_id,s.title,s.server_name,s.role_name,s.character_id,s.status,
                    s.status_text,s.empty_slots,s.occupied_slots,s.confidence,s.occlusion_percent,s.minimized,
-                   s.monitoring,s.updated_at,s.received_at FROM device_window_status s
+                   s.monitoring,s.updated_at,s.received_at,s.cash,s.bank_money,s.money_confirmed_at,s.money_readable FROM device_window_status s
                    JOIN devices d ON d.device_id=s.device_id WHERE d.account_id=? AND d.removed_at IS NULL
                    ORDER BY s.device_id,s.window_id""",
                 (account_id,),
@@ -525,6 +528,7 @@ class RelayDatabase:
             item = dict(row)
             item["minimized"] = bool(item["minimized"])
             item["monitoring"] = bool(item["monitoring"])
+            item["money_readable"] = bool(item["money_readable"])
             grouped.setdefault(str(item.pop("device_id")), []).append(item)
         for item in devices:
             item["windows"] = grouped.get(str(item["device_id"]), [])
