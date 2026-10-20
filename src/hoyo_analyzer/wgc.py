@@ -284,39 +284,42 @@ def list_capturable_windows() -> list[WindowInfo]:
 
     @enum_proc
     def callback(hwnd: int, _lparam: int) -> bool:
-        if not user32.IsWindowVisible(hwnd):
+        # EnumWindows returns pointer-sized handles. Passing a plain Python int
+        # to an untyped ctypes function truncates it to C int on 64-bit Windows.
+        window_handle = wintypes.HWND(hwnd)
+        if not user32.IsWindowVisible(window_handle):
             return True
-        if user32.GetWindowLongW(hwnd, gwl_exstyle) & ws_ex_toolwindow:
+        if user32.GetWindowLongW(window_handle, gwl_exstyle) & ws_ex_toolwindow:
             return True
 
         cloaked = c_int(0)
-        if dwmapi.DwmGetWindowAttribute(hwnd, dwmwa_cloaked, byref(cloaked), sizeof(cloaked)) == 0 and cloaked.value:
+        if dwmapi.DwmGetWindowAttribute(window_handle, dwmwa_cloaked, byref(cloaked), sizeof(cloaked)) == 0 and cloaked.value:
             return True
 
-        length = user32.GetWindowTextLengthW(hwnd)
+        length = user32.GetWindowTextLengthW(window_handle)
         if length <= 0:
             return True
         title_buffer = create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, title_buffer, length + 1)
+        user32.GetWindowTextW(window_handle, title_buffer, length + 1)
         title = title_buffer.value.strip()
         if not title:
             return True
 
         rect = wintypes.RECT()
-        if not user32.GetWindowRect(hwnd, byref(rect)) or rect.right <= rect.left or rect.bottom <= rect.top:
+        if not user32.GetWindowRect(window_handle, byref(rect)) or rect.right <= rect.left or rect.bottom <= rect.top:
             return True
 
         class_buffer = create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, class_buffer, len(class_buffer))
+        user32.GetClassNameW(window_handle, class_buffer, len(class_buffer))
         process_id = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, byref(process_id))
+        user32.GetWindowThreadProcessId(window_handle, byref(process_id))
         windows.append(
             WindowInfo(
                 hwnd=int(hwnd),
                 title=title,
                 process_id=int(process_id.value),
                 class_name=class_buffer.value,
-                minimized=bool(user32.IsIconic(hwnd)),
+                minimized=bool(user32.IsIconic(window_handle)),
             )
         )
         return True

@@ -51,6 +51,7 @@
         <button class="tab-button" type="button" data-tab="alerts">告警记录 <span id="alert-count">0</span></button>
         <button class="tab-button" type="button" data-tab="management">从机管理 <span id="managed-count">0</span></button>
         <button class="tab-button" type="button" data-tab="notifications">手机通知 <span id="bark-state">关</span></button>
+        <button class="tab-button" type="button" data-tab="logs">监控日志</button>
       </nav>
 
       <div id="message" class="message" role="status" hidden></div>
@@ -71,6 +72,16 @@
         </div>
         <div id="alerts-list" class="alerts-list" aria-live="polite"></div>
         <div id="alerts-empty" class="compact-empty" hidden>暂无告警记录</div>
+      </section>
+
+      <section id="logs-page" class="tab-page" data-page="logs" hidden>
+        <div class="page-toolbar">
+          <div><h2>监控日志</h2><p>保留异常状态上报及开始、暂停记录。</p></div>
+          <button id="logs-latest" class="secondary-button" type="button">最新记录</button>
+          <button id="logs-older" class="secondary-button" type="button" disabled>更早记录</button>
+        </div>
+        <div id="logs-list" class="alerts-list" aria-live="polite"></div>
+        <div id="logs-empty" class="compact-empty" hidden>暂无监控日志</div>
       </section>
 
       <section id="management-page" class="tab-page" data-page="management" hidden>

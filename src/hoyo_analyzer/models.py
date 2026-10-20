@@ -110,6 +110,8 @@ class Event:
 
     @property
     def display_name(self) -> str:
+        if self.type in {"panel_opened", "panel_closed", "game_default"}:
+            return str(self.payload.get("message") or self.type)
         return event_name_zh(self.type)
 
 

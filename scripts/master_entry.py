@@ -38,6 +38,50 @@ def _self_test() -> int:
 if "--package-self-test" in sys.argv:
     raise SystemExit(_self_test())
 
+
+def _ui_self_test() -> int:
+    import os
+    import traceback
+
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    result: dict[str, object] = {"ok": False}
+    app = None
+    window = None
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        from hoyo_analyzer import __version__
+        from hoyo_analyzer.master_app import MasterWindow
+
+        app = QApplication.instance() or QApplication(["hoyo-master-ui-self-test"])
+        window = MasterWindow()
+        window.show()
+        app.processEvents()
+        checks = {
+            "window_visible": window.isVisible(),
+            "window_size": [window.width(), window.height()],
+            "monitor_log_tab": any(window.tabs.tabText(index) == "监控日志" for index in range(window.tabs.count())),
+            "monitor_log_columns": window.monitor_log_table.columnCount(),
+            "client_version": __version__,
+        }
+        result.update(ok=checks["window_visible"] and checks["window_size"] == [800, 632]
+                      and checks["monitor_log_tab"] and checks["monitor_log_columns"] == 7, checks=checks)
+    except Exception as exc:  # noqa: BLE001 - persist frozen UI startup failures
+        result.update(error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
+    finally:
+        if window is not None:
+            window.close()
+        if app is not None:
+            app.processEvents()
+    output = application_root() / "runtime" / "master-package-ui-self-test.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if result["ok"] else 1
+
+
+if "--package-ui-self-test" in sys.argv:
+    raise SystemExit(_ui_self_test())
+
 from hoyo_analyzer.master_app import main
 
 raise SystemExit(main())

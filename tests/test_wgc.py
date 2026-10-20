@@ -19,6 +19,42 @@ def test_window_info_display_name():
     assert window.display_name == "梦幻西游 [已最小化] — 0x1234"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows pointer-sized callback")
+def test_window_enumeration_preserves_64_bit_handles(monkeypatch):
+    from hoyo_analyzer import wgc
+
+    handle = 0x123456789
+    calls = []
+
+    def checked(window_handle, *args):
+        assert window_handle.value == handle
+        calls.append(window_handle.value)
+        return 1
+
+    def read_text(window_handle, buffer, _length):
+        checked(window_handle)
+        buffer.value = "梦幻西游 ONLINE"
+        return len(buffer.value)
+
+    def read_rect(window_handle, pointer):
+        checked(window_handle)
+        pointer._obj.right, pointer._obj.bottom = 800, 600
+        return 1
+
+    user32 = SimpleNamespace(
+        EnumWindows=lambda callback, parameter: callback(handle, parameter),
+        IsWindowVisible=checked, GetWindowLongW=lambda hwnd, style: checked(hwnd) - 1,
+        GetWindowTextLengthW=lambda hwnd: checked(hwnd) + 30, GetWindowTextW=read_text,
+        GetWindowRect=read_rect, GetClassNameW=read_text, GetWindowThreadProcessId=checked,
+        IsIconic=lambda hwnd: checked(hwnd) - 1,
+    )
+    monkeypatch.setattr(wgc, "_require_windows", lambda: user32)
+    monkeypatch.setattr(wgc.ctypes.windll, "dwmapi", SimpleNamespace(DwmGetWindowAttribute=checked))
+    windows = wgc.list_capturable_windows()
+    assert len(windows) == 1 and windows[0].hwnd == handle
+    assert len(calls) == 9
+
+
 def test_rect_union_area_does_not_double_count_overlaps():
     rectangles = [(0, 0, 60, 100), (40, 0, 100, 100)]
     assert _rect_union_area(rectangles) == 10_000

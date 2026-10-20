@@ -13,12 +13,16 @@
     "add-device", "pairing-result", "pairing-code", "managed-devices", "managed-empty",
     "bark-state", "bark-form", "bark-enabled", "bark-key", "bark-key-hint", "bark-call",
     "bark-repeat", "bark-save", "bark-test", "bark-feedback",
+    "logs-list", "logs-empty", "logs-latest", "logs-older",
   ].map((id) => [id, document.getElementById(id)]));
 
   let token = localStorage.getItem(TOKEN_KEY) || "";
   let timer = null;
   let lastStatus = null;
   let barkDirty = false;
+  let logsBeforeId = 0;
+  let logsNextId = 0;
+  let logsLoading = false;
 
   const statusLabels = {
     full: "背包已满", almost_full: "接近满格", not_full: "背包未满",
@@ -163,6 +167,49 @@
     el["alerts-empty"].hidden = events.length !== 0;
   }
 
+  async function loadMonitorLogs(beforeId = logsBeforeId) {
+    if (!token || logsLoading) return;
+    logsLoading = true;
+    el["logs-older"].disabled = true;
+    try {
+      const data = await api(`/api/v1/master/monitor-logs?limit=100&before_id=${beforeId}`);
+      logsBeforeId = beforeId;
+      const logs = data.logs || [];
+      el["logs-list"].replaceChildren();
+      const labels = { window_occluded: "遮挡", window_minimized: "最小化", monitoring_started: "开始监控", monitoring_paused: "暂停监控" };
+      const reasons = { startup: "启动程序", resume: "点击开始", pause: "点击暂停", close: "关闭程序", recognition: "面板识别" };
+      const panelNames = { inventory: "背包", give: "给予面板", trade: "交易面板", attributes: "属性面板", stall: "摊位面板", stall_records: "摊位记录面板" };
+      logs.forEach((item) => {
+        const card = append(el["logs-list"], "article", "alert-card");
+        const head = append(card, "div", "alert-head");
+        const identity = append(head, "div", "alert-identity");
+        const action = item.event_type === "panel_opened" ? "打开" : "关闭";
+        const label = item.event_type === "game_default" ? "关闭面板，返回默认游戏界面"
+          : ["panel_opened", "panel_closed"].includes(item.event_type) ? action + (panelNames[item.panel_type] || "未知面板")
+          : labels[item.event_type] || item.event_type;
+        append(identity, "strong", "", item.message || label);
+        append(identity, "small", "", `${item.display_name || item.hostname || item.device_id} · ${item.device_id}`);
+        append(card, "div", "alert-body", [item.server_name, item.role_name].filter(Boolean).join(" / ") || "整台从机");
+        const body = append(card, "div", "alert-body");
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
+          timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+        }).formatToParts(new Date(item.occurred_at)).map((part) => [part.type, part.value]));
+        append(body, "time", "", `${parts.year}年${parts.month}月${parts.day}日${parts.hour}:${parts.minute}:${parts.second}`);
+        if (item.occlusion_percent != null) {
+          const percent = Number(item.occlusion_percent);
+          append(body, "span", "", `遮挡 ${percent > 0 && percent < 0.1 ? "<0.1" : percent.toFixed(1)}%`);
+        }
+        if (item.minimized != null) append(body, "span", "", `最小化 ${item.minimized ? "是" : "否"}`);
+        append(body, "span", "", reasons[item.reason] || "状态上报");
+      });
+      logsNextId = logs.length ? logs[logs.length - 1].id : 0;
+      el["logs-older"].disabled = !data.has_more;
+      el["logs-empty"].hidden = logs.length !== 0;
+    } catch (error) { handleError(error); }
+    finally { logsLoading = false; }
+  }
+
   function deviceAction(parent, label, handler, danger = false) {
     const button = append(parent, "button", `device-action${danger ? " danger" : ""}`, label);
     button.type = "button";
@@ -285,6 +332,7 @@
       if (!barkDirty) renderBark(bark);
       setConnection("已连接", "online");
       showMessage("");
+      if (document.querySelector('[data-page="logs"]').classList.contains("active")) await loadMonitorLogs();
     } catch (error) { handleError(error); }
   }
 
@@ -295,6 +343,7 @@
       page.classList.toggle("active", active);
       page.hidden = !active;
     });
+    if (name === "logs") loadMonitorLogs();
   }
 
   function startRefreshing() {
@@ -314,6 +363,9 @@
     localStorage.removeItem(TOKEN_KEY);
     token = "";
     lastStatus = null;
+    logsBeforeId = 0;
+    logsNextId = 0;
+    el["logs-list"].replaceChildren();
     if (timer !== null) window.clearInterval(timer);
     timer = null;
     el.dashboard.hidden = true;
@@ -357,6 +409,8 @@
   document.querySelectorAll(".tab-button").forEach((button) => button.addEventListener("click", () => selectTab(button.dataset.tab)));
   el["refresh-button"].addEventListener("click", loadAll);
   el["refresh-alerts"].addEventListener("click", loadAll);
+  el["logs-latest"].addEventListener("click", () => loadMonitorLogs(0));
+  el["logs-older"].addEventListener("click", () => loadMonitorLogs(logsNextId));
   el["add-device"].addEventListener("click", async () => {
     el["add-device"].disabled = true;
     try {
@@ -416,7 +470,7 @@
   localStorage.removeItem("hoyo.masterToken");
   el.username.value = localStorage.getItem(USERNAME_KEY) || "";
   const requestedTab = new URLSearchParams(window.location.search).get("tab");
-  if (["status", "alerts", "management", "notifications"].includes(requestedTab)) selectTab(requestedTab);
+  if (["status", "alerts", "management", "notifications", "logs"].includes(requestedTab)) selectTab(requestedTab);
   if (token) showDashboard();
   else {
     el.dashboard.hidden = true;

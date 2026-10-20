@@ -162,6 +162,17 @@ try {
     if (-not $MasterSelfTestResult.ok) { throw "Master package self-test reported a dependency failure." }
     if ($MasterSelfTestResult.client_version -ne $ClientVersion) { throw "Master package version does not match the release version." }
 
+    $MasterUiSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-ui-self-test" `
+        -WindowStyle Hidden -Wait -PassThru
+    if ($MasterUiSelfTest.ExitCode -ne 0) { throw "Master packaged UI startup self-test failed." }
+    $MasterUiResult = Get-Content -LiteralPath (Join-Path $MasterRuntime "master-package-ui-self-test.json") -Raw | ConvertFrom-Json
+    if (-not $MasterUiResult.ok) { throw "Master package UI self-test reported a startup failure." }
+    # UI self-tests create synthetic startup/close logs; never publish these.
+    $TestOutbox = Join-Path $SlaveRuntime "monitor-log-outbox.json"
+    if (Test-Path -LiteralPath $TestOutbox) {
+        Remove-Item -LiteralPath $TestOutbox -Force
+    }
+
     $SlaveArchive = Join-Path $DistRoot ((Split-Path -Leaf $SlaveOutputRoot) + ".zip")
     $MasterArchive = Join-Path $DistRoot ((Split-Path -Leaf $MasterOutputRoot) + ".zip")
     Compress-Archive -LiteralPath $SlaveOutputRoot -DestinationPath $SlaveArchive -CompressionLevel Optimal
@@ -203,6 +214,7 @@ try {
             slave_dependencies = $true
             slave_ui_startup = $true
             master_dependencies = $true
+            master_ui_startup = $true
             client_version_sync = $true
         }
         sha256 = [ordered]@{

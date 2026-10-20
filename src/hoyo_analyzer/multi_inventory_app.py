@@ -49,14 +49,13 @@ from .desktop_theme import (
 from .inventory_app import (
     APP_NAME,
     MAX_MONITORED_WINDOWS,
-    WINDOW_HEIGHT,
-    WINDOW_WIDTH,
     AccountInfo,
     InventoryMonitorWorker,
     is_mhxy_game_window_title,
     parse_account_info,
 )
 from .models import Event
+from .panels import PANEL_NAMES
 from .paths import application_root
 from .relay_client import SlaveRelayClient, make_event_payload
 from .settings_dialog import SlaveSettingsDialog
@@ -101,6 +100,9 @@ class MonitorSession:
 class InventoryMonitorWindow(QMainWindow):
     """Monitor up to eight game windows and show the selected live preview."""
 
+    FULL_WIDTH = 600
+    FULL_HEIGHT = 560
+    OUTPUT_COLUMNS = 3
     MINI_WIDTH = 300
     MINI_HEIGHT = 90
 
@@ -117,7 +119,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(application_icon())
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT + DarkTitleBar.HEIGHT)
+        self.setFixedSize(self.FULL_WIDTH, self.FULL_HEIGHT)
         root = application_root()
         path = config_path or root / "configs" / "default.toml"
         self.config = load_config(path if path.exists() else None)
@@ -137,6 +139,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.relay_client.event_result.connect(self._on_relay_event_result)
         self.relay_client.pairing_result.connect(self._on_pairing_result)
         self._configure_relay()
+        self.relay_client.send_monitor_log("monitoring_started", "startup")
 
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.refresh_windows)
@@ -176,14 +179,16 @@ class InventoryMonitorWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(7)
 
-        heading = QHBoxLayout()
+        heading = QVBoxLayout()
         heading_text = QVBoxLayout()
         title = QLabel("梦幻西游背包监控")
-        title.setStyleSheet("font-size:22px;font-weight:800;color:#F3F7FD;")
-        self.subtitle_label = QLabel(f"最多同时监控 8 个游戏窗口，只检测背包是否打开、是否已满 · 客户端 {__version__}")
+        title.setStyleSheet("font-size:16px;font-weight:800;color:#F3F7FD;")
+        self.subtitle_label = QLabel(f"最多监控 8 个窗口 · 客户端 {__version__}")
         self.subtitle_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
         heading_text.addWidget(title)
         heading_text.addWidget(self.subtitle_label)
+        title.setToolTip(self.subtitle_label.text())
+        self.subtitle_label.hide()
         heading.addLayout(heading_text, 1)
         heading_controls = QGridLayout()
         heading_controls.setContentsMargins(0, 0, 0, 0)
@@ -232,12 +237,11 @@ class InventoryMonitorWindow(QMainWindow):
         self.outputs_group = QGroupBox("窗口输出（0）")
         outputs_layout = QVBoxLayout(self.outputs_group)
         self.output_scroll = QScrollArea()
-        self.output_scroll.setWidgetResizable(False)
+        self.output_scroll.setWidgetResizable(True)
         self.output_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.output_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.output_scroll.setFixedSize(731, 385)
+        self.output_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.output_container = QWidget()
-        self.output_container.setFixedSize(729, 383)
+        self.output_container.setMinimumWidth(524)
         self.output_grid = QGridLayout(self.output_container)
         self.output_grid.setContentsMargins(5, 5, 5, 5)
         self.output_grid.setHorizontalSpacing(5)
@@ -248,7 +252,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.output_placeholder.setStyleSheet(
             f"color:{MUTED};background:#0A111E;border:1px dashed #30415D;border-radius:10px;padding:40px;"
         )
-        self.output_grid.addWidget(self.output_placeholder, 0, 0, 1, 4)
+        self.output_grid.addWidget(self.output_placeholder, 0, 0, 1, self.OUTPUT_COLUMNS)
         self.output_scroll.setWidget(self.output_container)
         outputs_layout.addWidget(self.output_scroll)
         layout.addWidget(self.outputs_group, 1)
@@ -256,7 +260,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(300)
-        self.log.setFixedHeight(42)
+        self.log.setFixedHeight(28)
         self.log.setPlaceholderText("所有窗口的提醒记录会显示在这里")
         layout.addWidget(self.log)
 
@@ -302,7 +306,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._mini_mode = False
         self.mini_content.hide()
         self.full_content.show()
-        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT + DarkTitleBar.HEIGHT)
+        self.setFixedSize(self.FULL_WIDTH, self.FULL_HEIGHT)
         if full_position is not None:
             self.move(full_position)
 
@@ -357,6 +361,9 @@ class InventoryMonitorWindow(QMainWindow):
         if self.monitoring_paused == paused:
             return
         self.monitoring_paused = paused
+        self.relay_client.send_monitor_log(
+            "monitoring_paused" if paused else "monitoring_started", "pause" if paused else "resume",
+        )
         self._refresh_mini_status()
         if self.monitoring_paused:
             self.monitoring_button.setText("开始监控")
@@ -670,7 +677,7 @@ class InventoryMonitorWindow(QMainWindow):
     ) -> tuple[QFrame, QLabel, QLabel, QLabel, QLabel, QLabel]:
         panel = QFrame()
         panel.setObjectName("outputCard")
-        panel.setFixedSize(176, 184)
+        panel.setFixedSize(168, 160)
         panel.setStyleSheet(
             "QFrame#outputCard{background:#111B2E;border:1px solid #293A55;border-radius:10px;}"
             "QFrame#outputCard:hover{border-color:#43638C;background:#142138;}"
@@ -700,7 +707,7 @@ class InventoryMonitorWindow(QMainWindow):
 
         preview = QLabel("等待游戏画面…")
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview.setFixedSize(164, 68)
+        preview.setFixedSize(156, 44)
         preview.setStyleSheet("background:#050912;color:#7F91A9;border:1px solid #202D42;border-radius:7px;")
         panel_layout.addWidget(preview)
 
@@ -735,7 +742,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.outputs_group.setTitle(f"窗口输出（{len(self.sessions)}）")
         self.output_placeholder.setVisible(not self.sessions)
         for index, session in enumerate(self.sessions.values()):
-            self.output_grid.addWidget(session.output_panel, index // 4, index % 4)
+            self.output_grid.addWidget(session.output_panel, index // self.OUTPUT_COLUMNS, index % self.OUTPUT_COLUMNS)
         available = any(hwnd not in self.sessions for hwnd in self._window_titles)
         self.add_window_button.setEnabled(available and len(self.sessions) < MAX_MONITORED_WINDOWS)
         self._refresh_mini_status()
@@ -783,6 +790,9 @@ class InventoryMonitorWindow(QMainWindow):
     def _apply_signal(self, session: MonitorSession, signal: dict[str, Any]) -> None:
         status = str(signal.get("status", "invalid"))
         text, foreground, background = self.STATUS_PRESENTATION.get(status, ("未知状态", "#AFC0D6", "#19263A"))
+        panel_type = signal.get("panel_type")
+        if panel_type in PANEL_NAMES and panel_type != "inventory":
+            text, foreground, background = PANEL_NAMES[panel_type], "#B9D8FF", "#16345A"
         session.output_status.setText(text)
         session.output_status.setStyleSheet(
             f"background:{background};color:{foreground};border:1px solid {foreground};"
@@ -851,10 +861,22 @@ class InventoryMonitorWindow(QMainWindow):
     @Slot(int, object)
     def _on_event(self, hwnd: int, event: Event) -> None:
         session = self.sessions.get(hwnd)
-        if session is None or session.minimized or self.monitoring_paused:
+        if session is None or self.monitoring_paused:
+            return
+        if session.minimized and (event.type not in {"panel_opened", "panel_closed", "game_default"}
+                                  or is_window_minimized(hwnd)):
             return
         account_label = f"{session.account.secondary_region} / {session.account.role_name}"
         self.log.appendPlainText(f"{event.display_time}  {account_label}  {event.display_name}")
+        if event.type in {"panel_opened", "panel_closed", "game_default"}:
+            self.relay_client.send_monitor_payload({
+                "event_id": event.event_id, "event_type": event.type, "reason": "recognition",
+                "occurred_at": event.payload["occurred_at"],
+                "window_id": f"hwnd:{hwnd}", "server_name": session.account.secondary_region,
+                "role_name": session.account.role_name, "character_id": session.account.role_id or None,
+                "panel_type": event.payload.get("panel_type"), "confidence": event.confidence,
+                "message": event.display_name,
+            })
 
     def _show_alert(
         self,
@@ -986,12 +1008,13 @@ class InventoryMonitorWindow(QMainWindow):
                 status = measure_window_occlusion(session.hwnd)
             except Exception as exc:  # noqa: BLE001 - native window-query failures belong in the UI
                 session.output_occlusion.setText(f"遮挡 检测失败｜最小化 {'是' if session.minimized else '否'}")
+                session.output_occlusion.setStyleSheet(f"color:{MUTED};font-size:11px;font-weight:700;")
                 session.output_occlusion.setToolTip(str(exc))
                 continue
             self._apply_occlusion(session, status)
 
     def _apply_occlusion(self, session: MonitorSession, status: WindowOcclusionStatus) -> None:
-        session.last_occlusion_percent = 0.0 if status.minimized else round(status.ratio * 100, 1)
+        session.last_occlusion_percent = 0.0 if status.minimized else status.ratio * 100
         if status.minimized:
             text = "遮挡 --｜最小化 是"
             color = WARNING
@@ -999,7 +1022,8 @@ class InventoryMonitorWindow(QMainWindow):
             session.occlusion_candidate_since = None
         else:
             percentage = status.ratio * 100
-            text = f"遮挡 {percentage:.1f}%｜最小化 否"
+            display = "<0.1" if 0 < percentage < 0.1 else f"{percentage:.1f}"
+            text = f"遮挡 {display}%｜最小化 否"
             color = SUCCESS if status.occluded_area == 0 else DANGER
         session.output_occlusion.setText(text)
         session.output_occlusion.setToolTip("根据其他桌面窗口覆盖游戏窗口的面积计算")
@@ -1055,19 +1079,28 @@ class InventoryMonitorWindow(QMainWindow):
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         for session in tuple(self.sessions.values()):
             signal = session.last_signal or {}
+            # OS state remains measurable while inventory analysis is paused.
+            # Never archive an old occlusion measurement as a fresh observation.
+            minimized = is_window_minimized(session.hwnd)
+            try:
+                measured = measure_window_occlusion(session.hwnd)
+                minimized = measured.minimized
+                occlusion_percent = 0.0 if minimized else measured.ratio * 100
+            except Exception:  # noqa: BLE001 - native query failure means unknown, never stale data
+                occlusion_percent = None
             if session.removing:
                 status = "removing"
                 status_text = "正在移除"
             elif self.monitoring_paused:
                 status = "paused"
                 status_text = "监控已暂停"
-            elif session.minimized:
+            elif minimized:
                 status = "minimized"
                 status_text = "窗口已最小化"
             else:
                 status = str(signal.get("status") or "waiting")
                 status_text = self.STATUS_PRESENTATION.get(status, ("等待检测", "", ""))[0]
-            if self.monitoring_paused or session.minimized or session.removing:
+            if self.monitoring_paused or minimized or session.removing:
                 signal = {}  # Do not present a stale inventory result as current.
             windows.append(
                 {
@@ -1081,8 +1114,8 @@ class InventoryMonitorWindow(QMainWindow):
                     "empty_slots": signal.get("empty_count"),
                     "occupied_slots": signal.get("occupied_count"),
                     "confidence": signal.get("confidence"),
-                    "occlusion_percent": session.last_occlusion_percent,
-                    "minimized": session.minimized,
+                    "occlusion_percent": occlusion_percent,
+                    "minimized": minimized,
                     "monitoring": not session.removing and not self.monitoring_paused,
                     "updated_at": now,
                 }
@@ -1090,11 +1123,16 @@ class InventoryMonitorWindow(QMainWindow):
         self.relay_client.send_status(windows)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._closing:
+            event.accept()
+            return
         self._closing = True
+        self.relay_client.send_monitor_log("monitoring_paused", "close")
         self.scan_timer.stop()
         self.window_state_timer.stop()
         self.occlusion_timer.stop()
         self.status_timer.stop()
+        self.relay_client.flush_monitor_logs()
         for alert in tuple(self.alerts):
             alert.close()
         self._sounding_alerts.clear()

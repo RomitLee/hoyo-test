@@ -14,6 +14,15 @@
 
 ## API
 
+- `POST /api/v1/slave/monitor-logs`：上报开始/暂停操作（`startup`、`resume`、`pause`、`close`），
+  使用独立事件 ID 幂等保存，不触发告警推送。
+- `GET /api/v1/master/monitor-logs?limit=100&before_id=0`：按当前账号查询监控日志，
+  ID 倒序分页，响应包含 `logs`、`has_more`。更早一页传入上一页最后一条 ID。
+
+从机状态快照中的每个最小化窗口、每个遮挡比例大于 0 的窗口，均在保存最新状态的同一事务中
+写入监控日志。相同快照重传幂等，不同时间的异常快照分别保存。日志独立保存，设备移除或
+状态快照被替换后历史仍保留；记录按账号隔离。现有数据库在服务启动时自动创建新表和索引。
+
 - `GET /healthz`：健康检查。
 - `POST /api/v1/auth/register`：注册主机账号。
 - `POST /api/v1/auth/login`：登录主机账号。

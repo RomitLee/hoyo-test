@@ -26,6 +26,17 @@ class RelayDatabase:
                 """
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = FULL;
+                CREATE TABLE IF NOT EXISTS monitor_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL, device_id TEXT NOT NULL,
+                    client_event_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                    window_id TEXT, server_name TEXT, role_name TEXT, character_id TEXT,
+                    occlusion_percent REAL, minimized INTEGER,
+                    occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, reason TEXT,
+                    UNIQUE(device_id, client_event_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_monitor_logs_account
+                ON monitor_logs(account_id, id DESC);
                 CREATE TABLE IF NOT EXISTS accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE, display_name TEXT, password_hash TEXT,
@@ -89,6 +100,9 @@ class RelayDatabase:
             self._ensure_column(connection, "events", "bark_last_sent_at", "TEXT")
             self._ensure_column(connection, "events", "bark_send_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "notify_after", "TEXT")
+            self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
+            self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
+            self._ensure_column(connection, "monitor_logs", "message", "TEXT")
             now = utc_now()
             connection.execute(
                 "INSERT OR IGNORE INTO accounts(id, username, display_name, password_hash, created_at, disabled) VALUES (1, NULL, '原有主机', NULL, ?, 0)",
@@ -310,9 +324,23 @@ class RelayDatabase:
                     raise
                 return int(row["id"]), True, str(row["received_at"])
 
-    def replace_window_status(self, device_id: str, windows: list[dict[str, Any]]) -> str:
+    def replace_window_status(
+        self, device_id: str, windows: list[dict[str, Any]], reported_at: str | None = None,
+    ) -> str:
         received_at = utc_now()
         with self._connect() as connection:
+            device = connection.execute("SELECT account_id FROM devices WHERE device_id=?", (device_id,)).fetchone()
+            for window in windows:
+                for kind, active in (
+                    ("window_occluded", float(window.get("occlusion_percent") or 0) > 0),
+                    ("window_minimized", bool(window.get("minimized"))),
+                ):
+                    if active and device:
+                        occurred = str(window.get("updated_at") or reported_at or received_at)
+                        self._insert_monitor_log(connection, int(device["account_id"]), device_id, {
+                            **window, "event_type": kind, "occurred_at": occurred,
+                            "event_id": f"status:{reported_at or occurred}:{window['window_id']}:{kind}",
+                        }, received_at)
             connection.execute("DELETE FROM device_window_status WHERE device_id=?", (device_id,))
             connection.executemany(
                 """INSERT INTO device_window_status(device_id,window_id,title,server_name,role_name,character_id,
@@ -327,6 +355,40 @@ class RelayDatabase:
                 ) for w in windows if str(w.get("window_id", ""))],
             )
         return received_at
+
+    @staticmethod
+    def _insert_monitor_log(
+        connection: sqlite3.Connection, account_id: int, device_id: str,
+        payload: dict[str, Any], received_at: str,
+    ) -> None:
+        connection.execute(
+            """INSERT OR IGNORE INTO monitor_logs(account_id,device_id,client_event_id,event_type,
+               window_id,server_name,role_name,character_id,occlusion_percent,minimized,
+               occurred_at,received_at,reason,panel_type,confidence,message) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (account_id, device_id, payload["event_id"], payload["event_type"], payload.get("window_id"),
+             payload.get("server_name"), payload.get("role_name"), payload.get("character_id"),
+             payload.get("occlusion_percent"),
+             None if payload.get("minimized") is None else int(payload["minimized"]),
+             str(payload["occurred_at"]), received_at, payload.get("reason"), payload.get("panel_type"),
+             payload.get("confidence"), payload.get("message")),
+        )
+
+    def insert_monitor_log(self, account_id: int, device_id: str, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            self._insert_monitor_log(connection, account_id, device_id, payload, utc_now())
+
+    def list_monitor_logs(
+        self, account_id: int, *, before_id: int = 0, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT l.*,d.display_name,d.hostname FROM monitor_logs l
+                   LEFT JOIN devices d ON d.device_id=l.device_id
+                   WHERE l.account_id=? AND (?=0 OR l.id<?) ORDER BY l.id DESC LIMIT ?""",
+                (account_id, before_id, before_id, limit),
+            ).fetchall()
+        return [{**dict(row), "minimized": None if row["minimized"] is None else bool(row["minimized"])}
+                for row in rows]
 
     def list_events(self, account_id: int, *, pending_only: bool, after_id: int, limit: int) -> list[dict[str, Any]]:
         predicates = ["account_id=?", "id>?"]

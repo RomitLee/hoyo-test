@@ -113,7 +113,7 @@ def _run_package_ui_self_test() -> int:
                 "ok": all(
                     (
                         checks["window_visible"],
-                        checks["window_size"] == [800, 632],
+                        checks["window_size"] == [600, 560],
                         checks["title_bar_height"] == 32,
                         checks["icon_loaded"],
                         checks["add_window_button"] == "＋ 增加窗口",

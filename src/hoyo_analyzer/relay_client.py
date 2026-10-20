@@ -9,11 +9,12 @@ from typing import Any
 from urllib.parse import urljoin
 from uuid import uuid4
 
-from PySide6.QtCore import QByteArray, QObject, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QEventLoop, QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from . import __version__
 from .cloud_config import CLOUD_RELAY_URL
+from .paths import application_root
 
 
 def normalize_relay_url(value: str) -> str:
@@ -70,6 +71,17 @@ class SlaveRelayClient(QObject):
         self._device_id = ""
         self._device_token = ""
         self._online = False
+        self._log_path = application_root() / "runtime" / "monitor-log-outbox.json"
+        try:
+            saved = json.loads(self._log_path.read_text(encoding="utf-8"))
+            self._log_outbox = saved if isinstance(saved, list) else []
+        except (OSError, ValueError):
+            self._log_outbox = []
+        self._log_inflight = False
+        self._log_timer = QTimer(self)
+        self._log_timer.setInterval(5000)
+        self._log_timer.timeout.connect(self._send_next_log)
+        self._log_timer.start()
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(30_000)
         self._heartbeat_timer.timeout.connect(self.connect_now)
@@ -128,6 +140,52 @@ class SlaveRelayClient(QObject):
             return
         self._post("/api/v1/slave/events", payload, "event")
 
+    def send_monitor_log(self, event_type: str, reason: str) -> None:
+        self.send_monitor_payload({
+            "event_id": uuid4().hex, "event_type": event_type, "reason": reason,
+            "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+        })
+
+    def send_monitor_payload(self, payload: dict[str, Any]) -> None:
+        self._log_outbox.append({"device_id": self._device_id, "payload": payload})
+        self._save_log_outbox()
+        self._send_next_log()
+
+    def _save_log_outbox(self) -> None:
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._log_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self._log_outbox, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(self._log_path)
+
+    def _send_next_log(self) -> None:
+        if not self.configured or self._log_inflight:
+            return
+        for item in self._log_outbox:
+            if not item["device_id"]:
+                item["device_id"] = self._device_id
+                self._save_log_outbox()
+            if item["device_id"] == self._device_id:
+                self._log_inflight = True
+                self._post("/api/v1/slave/monitor-logs", item["payload"], "monitor_log")
+                return
+
+    def flush_monitor_logs(self, timeout_ms: int = 2000) -> None:
+        """Give normal shutdown a bounded chance to deliver; retain failures on disk."""
+        self._send_next_log()
+        if not self.configured or not self._log_inflight:
+            return
+        loop = QEventLoop()
+        timeout = QTimer()
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(loop.quit)
+        check = QTimer()
+        check.timeout.connect(lambda: loop.quit() if not self._log_inflight else None)
+        check.start(25)
+        timeout.start(timeout_ms)
+        loop.exec()
+        check.stop()
+        timeout.stop()
+
     def pair(self, pairing_code: str, installation_id: str) -> None:
         code = pairing_code.strip().upper()
         if not code:
@@ -159,6 +217,8 @@ class SlaveRelayClient(QObject):
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - report network setup failures to the UI
+            if kind == "monitor_log":
+                self._log_inflight = False
             message = f"无法发起 HTTPS 请求：{exc}"
             self._set_online(False, message)
             if kind == "event":
@@ -166,6 +226,8 @@ class SlaveRelayClient(QObject):
             return
 
         reply.setProperty("relay_kind", kind)
+        if kind == "monitor_log":
+            reply.setProperty("log_event_id", payload["event_id"])
         timeout_timer = QTimer(reply)
         timeout_timer.setSingleShot(True)
         timeout_timer.setInterval(12_000)
@@ -187,6 +249,8 @@ class SlaveRelayClient(QObject):
         if reply.isFinished():
             return
         reply.setProperty("relay_timed_out", True)
+        if str(reply.property("relay_kind")) == "monitor_log":
+            self._log_inflight = False
         message = "连接超时，请检查云端地址、网络或 HTTPS 证书"
         self._set_online(False, message)
         if str(reply.property("relay_kind")) == "event":
@@ -222,6 +286,14 @@ class SlaveRelayClient(QObject):
                     success = False
                     message = "云端返回的数据格式不正确"
         reply.deleteLater()
+        if kind == "monitor_log":
+            self._log_inflight = False
+            if success:
+                log_id = reply.property("log_event_id")
+                self._log_outbox = [item for item in self._log_outbox
+                                    if item["payload"]["event_id"] != log_id]
+                self._save_log_outbox()
+                self._send_next_log()
         if success:
             if kind == "pair":
                 self.pairing_result.emit(True, "从机配对成功", data)
@@ -250,6 +322,7 @@ class MasterRelayClient(QObject):
     events_received = Signal(object)
     devices_received = Signal(object)
     status_received = Signal(object)
+    monitor_logs_received = Signal(object)
     acknowledge_result = Signal(int, bool, str)
     authentication_result = Signal(bool, str, object)
     pairing_code_received = Signal(bool, str, object)
@@ -263,6 +336,7 @@ class MasterRelayClient(QObject):
         self._pending_kinds: set[str] = set()
         self._poll_errors: list[str] = []
         self._event_buffer: list[dict[str, Any]] = []
+        self._logs_fetching = False
 
     @property
     def configured(self) -> bool:
@@ -302,6 +376,11 @@ class MasterRelayClient(QObject):
         reply.setProperty("relay_kind", "ack")
         reply.setProperty("server_event_id", server_event_id)
         self._watch(reply)
+
+    def fetch_monitor_logs(self, before_id: int = 0) -> None:
+        if self.configured and not self._logs_fetching:
+            self._logs_fetching = True
+            self._get(f"/api/v1/master/monitor-logs?limit=100&before_id={before_id}", "monitor_logs")
 
     def authenticate(self, username: str, password: str, *, register: bool = False) -> None:
         path = "/api/v1/auth/register" if register else "/api/v1/auth/login"
@@ -354,6 +433,8 @@ class MasterRelayClient(QObject):
         try:
             reply = self._manager.get(self._request(path))
         except Exception as exc:  # noqa: BLE001 - surface request setup errors to the UI
+            if kind == "monitor_logs":
+                self._logs_fetching = False
             self._finish_poll_kind(kind, f"无法发起 HTTPS 请求：{exc}")
             return
         reply.setProperty("relay_kind", kind)
@@ -382,6 +463,8 @@ class MasterRelayClient(QObject):
         reply.setProperty("relay_timed_out", True)
         message = "连接超时，请检查云端地址、网络或 HTTPS 证书"
         kind = str(reply.property("relay_kind"))
+        if kind == "monitor_logs":
+            self._logs_fetching = False
         if kind == "ack":
             self.acknowledge_result.emit(int(reply.property("server_event_id") or 0), False, message)
         elif kind == "auth":
@@ -422,6 +505,8 @@ class MasterRelayClient(QObject):
                 success = False
                 message = "云端返回的数据格式不正确"
         reply.deleteLater()
+        if kind == "monitor_logs":
+            self._logs_fetching = False
         if kind == "events" and success:
             events = data.get("events", [])
             self._event_buffer.extend(events)
@@ -435,6 +520,8 @@ class MasterRelayClient(QObject):
         elif kind == "status" and success:
             self.status_received.emit(data.get("devices", []))
             self.devices_received.emit(data.get("devices", []))
+        elif kind == "monitor_logs" and success:
+            self.monitor_logs_received.emit(data)
         elif kind == "ack":
             self.acknowledge_result.emit(event_id, success, message)
         elif kind == "auth":

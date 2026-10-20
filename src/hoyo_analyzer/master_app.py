@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, ClassVar
 
 from PySide6.QtCore import Qt, QTimer, Slot
@@ -37,6 +37,7 @@ from .app_identity import MASTER_APP_ID, application_icon, apply_application_ico
 from .auto_update import install_auto_update, mark_update_healthy
 from .desktop_theme import MUTED, DarkTitleBar, apply_desktop_theme, banner_style, pill_style
 from .master_settings import MasterSettings, load_master_settings, save_master_settings
+from .panel_types import panel_event_name
 from .relay_client import MasterRelayClient
 
 EVENT_NAMES: dict[str, str] = {
@@ -47,6 +48,7 @@ EVENT_NAMES: dict[str, str] = {
     "window_minimized": "游戏窗口最小化",
     "window_occluded": "游戏窗口被遮挡",
 }
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class MasterSettingsDialog(QDialog):
@@ -158,6 +160,8 @@ class MasterWindow(QMainWindow):
         self.events: dict[int, dict[str, Any]] = {}
         self.devices: list[dict[str, Any]] = []
         self.window_status: list[dict[str, Any]] = []
+        self._monitor_logs_before_id = 0
+        self._monitor_logs_next_id = 0
         self.alert: QMessageBox | None = None
         self.account_dialog: AccountDialog | None = None
         self._build_ui()
@@ -166,6 +170,7 @@ class MasterWindow(QMainWindow):
         self.client.events_received.connect(self._on_events_received)
         self.client.devices_received.connect(self._on_devices_received)
         self.client.status_received.connect(self._on_status_received)
+        self.client.monitor_logs_received.connect(self._on_monitor_logs_received)
         self.client.acknowledge_result.connect(self._on_acknowledge_result)
         self.client.authentication_result.connect(self._on_authentication_result)
         self.client.pairing_code_received.connect(self._on_pairing_code_received)
@@ -309,6 +314,72 @@ class MasterWindow(QMainWindow):
         device_layout.addWidget(device_note)
         self.tabs.addTab(device_page, "从机管理")
 
+        log_page = QWidget()
+        log_layout = QVBoxLayout(log_page)
+        toolbar = QHBoxLayout()
+        self.monitor_log_summary = QLabel("监控日志 · 等待同步")
+        toolbar.addWidget(self.monitor_log_summary, 1)
+        latest_button = QPushButton("最新记录")
+        latest_button.clicked.connect(lambda: self._load_monitor_logs(0))
+        toolbar.addWidget(latest_button)
+        self.older_logs_button = QPushButton("更早记录")
+        self.older_logs_button.setEnabled(False)
+        self.older_logs_button.clicked.connect(lambda: self._load_monitor_logs(self._monitor_logs_next_id))
+        toolbar.addWidget(self.older_logs_button)
+        log_layout.addLayout(toolbar)
+        self.monitor_log_table = QTableWidget(0, 7)
+        self.monitor_log_table.setHorizontalHeaderLabels(("发生时间", "从机", "区服 / 角色", "类型", "遮挡", "最小化", "原因"))
+        self.monitor_log_table.verticalHeader().setVisible(False)
+        self.monitor_log_table.setAlternatingRowColors(True)
+        self.monitor_log_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.monitor_log_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        for column, width in enumerate((185, 90, 140, 145, 55, 50, 80)):
+            self.monitor_log_table.setColumnWidth(column, width)
+        self.monitor_log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        log_layout.addWidget(self.monitor_log_table)
+        log_layout.addWidget(QLabel("每次上报的遮挡、最小化状态均保留；开始和暂停按操作记录。"))
+        self.tabs.addTab(log_page, "监控日志")
+
+    def _load_monitor_logs(self, before_id: int = 0) -> None:
+        self._monitor_logs_before_id = before_id
+        self.client.fetch_monitor_logs(before_id)
+
+    @Slot(object)
+    def _on_monitor_logs_received(self, data: dict[str, Any]) -> None:
+        logs = data.get("logs", [])
+        self.monitor_log_table.setRowCount(len(logs))
+        labels = {"window_occluded": "遮挡", "window_minimized": "最小化",
+                  "monitoring_started": "开始监控", "monitoring_paused": "暂停监控"}
+        reasons = {"startup": "启动程序", "resume": "点击开始", "pause": "点击暂停", "close": "关闭程序", "recognition": "面板识别"}
+        for row, item in enumerate(logs):
+            percentage = item.get("occlusion_percent")
+            percent_text = "—" if percentage is None else (
+                "<0.1%" if 0 < float(percentage) < 0.1 else f"{float(percentage):.1f}%"
+            )
+            try:
+                occurred = datetime.fromisoformat(str(item.get("occurred_at")))
+                log_time = occurred.astimezone(BEIJING_TZ).strftime("%Y年%m月%d日%H:%M:%S")
+            except (ValueError, TypeError):
+                log_time = "—"
+            event_label = labels.get(item["event_type"], item["event_type"])
+            if item["event_type"] in {"panel_opened", "panel_closed", "game_default"}:
+                event_label = item.get("message") or panel_event_name(item["event_type"], item.get("panel_type"))
+            values = (
+                log_time,
+                str(item.get("display_name") or item.get("hostname") or item["device_id"]),
+                " / ".join(filter(None, (item.get("server_name"), item.get("role_name")))) or "整台从机",
+                event_label, percent_text,
+                "—" if item.get("minimized") is None else "是" if item["minimized"] else "否",
+                reasons.get(item.get("reason"), "状态上报"),
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(f"{value}\n从机：{item.get('device_id') or ''}")
+                self.monitor_log_table.setItem(row, column, cell)
+        self._monitor_logs_next_id = int(logs[-1]["id"]) if logs else 0
+        self.older_logs_button.setEnabled(bool(data.get("has_more")))
+        self.monitor_log_summary.setText(f"监控日志 · {'最新' if not self._monitor_logs_before_id else '历史'} {len(logs)} 条")
+
     def _configure_client(self) -> None:
         try:
             self.client.configure(self.settings.access_token or self.settings.master_token)
@@ -355,6 +426,9 @@ class MasterWindow(QMainWindow):
             self.account_dialog.set_busy(False, f"登录成功，但无法保存登录状态：{exc}")
             return
         self.account_button.setText(self.settings.username)
+        self._monitor_logs_before_id = 0
+        self.monitor_log_table.setRowCount(0)
+        self.older_logs_button.setEnabled(False)
         self._configure_client()
         self.account_dialog.accept()
         self.client.poll()
@@ -542,6 +616,7 @@ class MasterWindow(QMainWindow):
 
     @Slot(object)
     def _on_status_received(self, devices: list[dict[str, Any]]) -> None:
+        self.client.fetch_monitor_logs(self._monitor_logs_before_id)
         rows: list[dict[str, Any]] = []
         now = datetime.now(UTC)
         for device in devices:

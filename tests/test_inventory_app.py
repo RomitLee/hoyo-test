@@ -60,7 +60,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
     try:
         assert window.windowTitle() == APP_NAME
         assert not window.windowIcon().isNull()
-        assert (window.width(), window.height()) == (800, 632)
+        assert (window.width(), window.height()) == (600, 560)
         assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert window.title_bar.height() == 32
         assert window.add_window_button.text() == "＋ 增加窗口"
@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V1.3.0"
+        assert __version__ == "V1.6.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -130,7 +130,7 @@ def test_mini_mode_preserves_runtime_and_restores_geometry(monkeypatch) -> None:
         app.processEvents()
 
         assert not window._mini_mode
-        assert (window.width(), window.height()) == (800, 632)
+        assert (window.width(), window.height()) == (600, 560)
         assert window.pos() == original_position
         assert window.full_content.isVisible()
         assert window.mini_content.isHidden()
@@ -477,10 +477,10 @@ def test_output_panel_count_matches_monitored_window_count(monkeypatch) -> None:
 
         assert window.outputs_group.title() == "窗口输出（8）"
         assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[0]))[:2] == (0, 0)
-        assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[3]))[:2] == (0, 3)
-        assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[4]))[:2] == (1, 0)
-        assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[7]))[:2] == (1, 3)
-        assert window.output_scroll.verticalScrollBar().maximum() == 0
+        assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[3]))[:2] == (1, 0)
+        assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[4]))[:2] == (1, 1)
+        assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[7]))[:2] == (2, 1)
+        assert window.output_scroll.verticalScrollBar().maximum() > 0
         assert window.output_scroll.horizontalScrollBar().maximum() == 0
     finally:
         window.sessions.clear()

@@ -18,8 +18,9 @@ import cv2
 from .capture import make_source
 from .config import AppConfig, load_config
 from .event_machine import EventMachine
-from .inventory_fullness import InventoryAnalysis, InventoryFullnessDetector
+from .inventory_fullness import InventoryAnalysis, InventoryFullnessDetector, InventoryStatus
 from .models import Event, Observation
+from .panels import PanelDetector, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
 from .storage import JsonlEventSink
@@ -169,6 +170,9 @@ class InventoryMonitorWorker(QObject):
             )
             template_path = resolve_application_path(self.config.inventory_monitor.template_path)
             detector = InventoryFullnessDetector(template_path)
+            panel_detector = PanelDetector()
+            panel_tracker = PanelTracker()
+            last_panel_frame_ms: int | None = None
             sampler = AdaptiveSampler(
                 SamplingProfile(
                     self.config.sampling.normal_fps,
@@ -193,6 +197,7 @@ class InventoryMonitorWorker(QObject):
                     was_paused = True
                     continue
                 if was_paused:
+                    panel_tracker.reset_pending()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
                     sampler = AdaptiveSampler(
@@ -210,6 +215,7 @@ class InventoryMonitorWorker(QObject):
                 # driver keeps sending cached frames, never treat them as a live
                 # inventory result.
                 if is_window_minimized(self.hwnd):
+                    panel_tracker.reset_pending()
                     continue
                 now = monotonic()
                 if now - last_preview >= self.PREVIEW_INTERVAL_SECONDS:
@@ -219,8 +225,17 @@ class InventoryMonitorWorker(QObject):
                     self.preview_for_window.emit(self.hwnd, preview)
                 if sampler.accept(packet):
                     analyzed += 1
-                    analysis = detector.analyze(packet.image)
+                    panel = panel_detector.analyze(packet.image)
+                    if last_panel_frame_ms is not None and packet.timestamp_ms - last_panel_frame_ms > 1500:
+                        panel_tracker.reset_pending()
+                    last_panel_frame_ms = packet.timestamp_ms
+                    panel_events = panel_tracker.update(panel, packet.timestamp_ms, packet.frame_index)
+                    if panel.panel_type not in {"inventory", "unknown"}:
+                        analysis = InventoryAnalysis(InventoryStatus.CLOSED, panel.confidence, "another panel is foreground")
+                    else:
+                        analysis = detector.analyze(packet.image)
                     signal = _analysis_signal(analysis)
+                    signal["panel_type"] = panel.panel_type
                     self.analysis_ready.emit(signal)
                     self.analysis_for_window.emit(self.hwnd, signal)
                     observation = Observation(
@@ -230,7 +245,7 @@ class InventoryMonitorWorker(QObject):
                         analysis.confidence,
                         "inventory-monitor",
                     )
-                    for event in machine.update(observation):
+                    for event in panel_events + machine.update(observation):
                         account = parse_account_info(self.window_title)
                         event.payload.setdefault("window_hwnd", self.hwnd)
                         event.payload.setdefault("window_title", self.window_title)
@@ -238,6 +253,11 @@ class InventoryMonitorWorker(QObject):
                         event.payload.setdefault("role_name", account.role_name)
                         event.payload.setdefault("role_id", account.role_id)
                         sink.write(event)
+                        if event.type in {"panel_opened", "panel_closed", "game_default"}:
+                            text_path = event_log_path.with_name("panel_events.log")
+                            with text_path.open("a", encoding="utf-8") as handle:
+                                handle.write(f"{event.display_time}{event.display_name}  "
+                                             f"[{account.secondary_region}/{account.role_name}]\n")
                         self.event_ready.emit(event)
                         self.event_for_window.emit(self.hwnd, event)
                 if now - last_stats >= 1.0:

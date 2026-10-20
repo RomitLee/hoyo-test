@@ -42,7 +42,7 @@ def test_acknowledged_row_remains_and_button_disappears(window):
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert window.title_bar.height() == 32
-    assert __version__ == "V1.3.0"
+    assert __version__ == "V1.6.0"
     assert __version__ in window.subtitle_label.text()
     window._on_events_received([event()])
     assert window.table.cellWidget(0, 6) is not None
@@ -123,7 +123,7 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
             "disabled": True,
         },
     ])
-    assert window.tabs.count() == 2
+    assert window.tabs.count() == 3
     assert window.device_table.rowCount() == 2
     assert window.device_table.item(0, 0).text() == "工作室电脑"
     assert window.device_table.item(0, 2).text() == "在线"
@@ -153,3 +153,39 @@ def test_device_management_warns_when_slave_version_differs(window):
     assert window.device_table.item(0, 4).text() == "V0.9.0"
     assert window.device_table.item(0, 6).text() == "版本不匹配"
     assert f"主机版本：{__version__}" in window.device_table.item(0, 6).toolTip()
+
+
+def test_monitor_log_page_renders_history_without_alarms(window, monkeypatch):
+    alarms = []
+    monkeypatch.setattr(window, "_show_alarm", alarms.append)
+    requested = []
+    monkeypatch.setattr(window.client, "fetch_monitor_logs", requested.append)
+    window._on_monitor_logs_received({"logs": [{
+        "id": 9, "device_id": "slave-01", "display_name": "一号电脑",
+        "event_type": "window_occluded", "occlusion_percent": 0.021, "minimized": False,
+        "server_name": "秦淮风光", "role_name": "角色一",
+        "occurred_at": datetime.now(UTC).isoformat(),
+    }], "has_more": True})
+    assert window.tabs.tabText(2) == "监控日志"
+    assert window.monitor_log_table.item(0, 1).text() == "一号电脑"
+    assert window.monitor_log_table.item(0, 3).text() == "遮挡"
+    assert window.monitor_log_table.item(0, 4).text() == "<0.1%"
+    assert window.monitor_log_table.item(0, 5).text() == "否"
+    assert window.older_logs_button.isEnabled()
+    window.older_logs_button.click()
+    assert requested == [9]
+    window._on_monitor_logs_received({"logs": [], "has_more": False})
+    assert window.monitor_log_table.rowCount() == 0
+    assert not window.older_logs_button.isEnabled()
+    assert alarms == []
+
+
+def test_panel_monitor_log_renders_exact_chinese_timestamp(window):
+    window._on_monitor_logs_received({"logs": [{
+        "id": 10, "device_id": "slave-01", "event_type": "panel_opened",
+        "panel_type": "trade", "reason": "recognition",
+        "occurred_at": "2026-10-20T02:31:38+00:00", "confidence": 0.99,
+    }], "has_more": False})
+    assert window.monitor_log_table.item(0, 0).text() == "2026年10月20日10:31:38"
+    assert window.monitor_log_table.item(0, 3).text() == "打开交易面板"
+    assert window.monitor_log_table.item(0, 6).text() == "面板识别"

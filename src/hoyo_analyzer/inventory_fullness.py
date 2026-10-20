@@ -162,7 +162,9 @@ class InventoryFullnessDetector:
         best_scale = 1.0
         # The supplied 800 x 600 samples render the 672 px asset at 80%.
         estimated_scale = min(gray.shape[1] / 1000.0, gray.shape[0] / 750.0)
-        scales = np.linspace(estimated_scale * 0.90, estimated_scale * 1.10, 7)
+        # 640x480 and 800x600 clients can render the very same 538px panel.
+        # Window resolution does not necessarily scale the game's UI.
+        scales = sorted(set(np.linspace(estimated_scale * 0.90, estimated_scale * 1.10, 7).tolist() + [0.8]))
         for scale in scales:
             width = max(16, round(template.shape[1] * float(scale)))
             height = max(8, round(template.shape[0] * float(scale)))

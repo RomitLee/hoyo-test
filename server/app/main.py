@@ -25,7 +25,7 @@ from .bark import BarkPushError, event_message, send_bark_notification
 from .config import Settings
 from .database import RelayDatabase
 
-VERSION = "2.1.0"
+VERSION = "2.3.0"
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
@@ -117,6 +117,21 @@ class WindowStatusSnapshotIn(BaseModel):
 class AckIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     note: str | None = Field(default=None, max_length=500)
+
+
+class MonitorLogIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    event_type: Literal["monitoring_started", "monitoring_paused", "panel_opened", "panel_closed", "game_default"]
+    occurred_at: datetime
+    reason: Literal["startup", "resume", "pause", "close", "recognition"]
+    window_id: str | None = Field(default=None, max_length=128)
+    server_name: str | None = Field(default=None, max_length=128)
+    role_name: str | None = Field(default=None, max_length=128)
+    character_id: str | None = Field(default=None, max_length=64)
+    panel_type: Literal["inventory", "give", "trade", "attributes", "stall", "stall_records"] | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    message: str | None = Field(default=None, max_length=128)
 
 
 class BarkSettingsIn(BaseModel):
@@ -425,9 +440,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.upsert_device(device_id, hostname=None, app_version=None,
                                ip_address=request.client.host if request.client else None)
         received_at = database.replace_window_status(
-            device_id, [window.model_dump(mode="json") for window in payload.windows]
+            device_id, [window.model_dump(mode="json") for window in payload.windows],
+            payload.reported_at.isoformat(timespec="milliseconds"),
         )
         return {"accepted": True, "device_id": device_id, "window_count": len(payload.windows), "received_at": received_at}
+
+    @app.post("/api/v1/slave/monitor-logs", status_code=status.HTTP_202_ACCEPTED)
+    def create_monitor_log(
+        payload: MonitorLogIn,
+        identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
+    ) -> dict[str, bool]:
+        if payload.event_type in {"panel_opened", "panel_closed"} and not payload.panel_type:
+            raise HTTPException(status_code=422, detail="面板日志缺少面板类型")
+        database.insert_monitor_log(identity.account_id, identity.device_id, payload.model_dump(mode="json"))
+        return {"accepted": True}
+
+    @app.get("/api/v1/master/monitor-logs")
+    def list_monitor_logs(
+        before_id: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        account_id: int = Depends(authenticate_master),
+    ) -> dict[str, Any]:
+        rows = database.list_monitor_logs(account_id, before_id=before_id, limit=limit + 1)
+        return {"logs": rows[:limit], "has_more": len(rows) > limit}
 
     @app.post("/api/v1/slave/events", status_code=status.HTTP_202_ACCEPTED)
     def create_event(

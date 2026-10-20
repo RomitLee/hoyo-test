@@ -30,6 +30,87 @@ def master_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MASTER_TOKEN}"}
 
 
+def test_monitor_logs_archive_abnormal_snapshots_and_deduplicate_retries(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        window = {
+            "window_id": "hwnd:123", "server_name": "秦淮风光", "role_name": "角色一",
+            "occlusion_percent": 0.021, "minimized": False,
+            "updated_at": "2026-10-19T10:00:00+08:00",
+        }
+        snapshot = {"reported_at": window["updated_at"], "windows": [window]}
+        for _ in range(2):
+            assert client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot).status_code == 202
+        url = "/api/v1/master/monitor-logs"
+        logs = client.get(url, headers=master_headers()).json()["logs"]
+        assert len(logs) == 1
+        assert logs[0]["occlusion_percent"] == 0.021
+        assert logs[0]["event_type"] == "window_occluded"
+        # A later report of the same abnormal state is a new observation.
+        snapshot["reported_at"] = window["updated_at"] = "2026-10-19T10:00:05+08:00"
+        window["occlusion_percent"] = 0
+        window["minimized"] = True
+        assert client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot).status_code == 202
+        assert len(client.get(url, headers=master_headers()).json()["logs"]) == 2
+        snapshot["reported_at"] = window["updated_at"] = "2026-10-19T10:00:10+08:00"
+        client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot)
+        assert len(client.get(url, headers=master_headers()).json()["logs"]) == 3
+        window["minimized"] = False
+        snapshot["reported_at"] = window["updated_at"] = "2026-10-19T10:00:15+08:00"
+        client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot)
+        assert len(client.get(url, headers=master_headers()).json()["logs"]) == 3
+        assert client.get("/api/v1/master/events", headers=master_headers()).json()["count"] == 0
+
+
+def test_panel_logs_store_window_identity_and_time_without_creating_alarm(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        for kind in ["inventory", "give", "trade", "attributes", "stall", "stall_records"]:
+            payload = {"event_id": f"panel:{kind}", "event_type": "panel_opened", "reason": "recognition",
+                       "panel_type": kind, "occurred_at": "2026-10-20T10:31:20+08:00",
+                       "window_id": "hwnd:123", "server_name": "区服", "role_name": "角色", "confidence": 0.98}
+            for _ in range(2):
+                assert client.post("/api/v1/slave/monitor-logs", headers=device_headers(), json=payload).status_code == 202
+        logs = client.get("/api/v1/master/monitor-logs", headers=master_headers()).json()["logs"]
+        assert len(logs) == 6
+        assert {log["panel_type"] for log in logs} == {"inventory", "give", "trade", "attributes", "stall", "stall_records"}
+        assert all(log["window_id"] == "hwnd:123" and log["role_name"] == "角色" for log in logs)
+        assert logs[0]["confidence"] == 0.98
+        assert client.get("/api/v1/master/events", headers=master_headers()).json()["count"] == 0
+        payload.pop("panel_type")
+        assert client.post("/api/v1/slave/monitor-logs", headers=device_headers(), json=payload).status_code == 422
+        payload.update(event_type="game_default", event_id="default-scene")
+        assert client.post("/api/v1/slave/monitor-logs", headers=device_headers(), json=payload).status_code == 202
+
+
+def test_monitor_lifecycle_logs_pagination_isolation_and_persistence(tmp_path: Path) -> None:
+    url = "/api/v1/master/monitor-logs"
+    with make_client(tmp_path) as client:
+        assert client.get(url).status_code == 401
+        assert client.post("/api/v1/slave/monitor-logs", json={}).status_code == 401
+        for index, (kind, reason) in enumerate([
+            ("monitoring_started", "startup"), ("monitoring_paused", "pause"),
+            ("monitoring_started", "resume"), ("monitoring_paused", "close"),
+        ]):
+            payload = {"event_id": f"lifecycle:{index}", "event_type": kind, "reason": reason,
+                       "occurred_at": f"2026-10-19T10:00:0{index}+08:00"}
+            for _ in range(2):
+                assert client.post("/api/v1/slave/monitor-logs", headers=device_headers(), json=payload).status_code == 202
+        page = client.get(url + "?limit=2", headers=master_headers()).json()
+        assert page["has_more"]
+        assert [row["reason"] for row in page["logs"]] == ["close", "resume"]
+        before = page["logs"][-1]["id"]
+        older = client.get(f"{url}?limit=2&before_id={before}", headers=master_headers()).json()
+        assert not older["has_more"]
+        assert [row["reason"] for row in older["logs"]] == ["pause", "startup"]
+        assert client.get(url + "?limit=501", headers=master_headers()).status_code == 422
+        # Claim the legacy account, then create an independent second account.
+        client.post("/api/v1/auth/register", json={"username": "first-user", "password": "test-pass-123"})
+        second = client.post("/api/v1/auth/register", json={"username": "second-user", "password": "test-pass-123"}).json()
+        assert client.get(url, headers={"Authorization": f"Bearer {second['access_token']}"}).json()["logs"] == []
+        assert client.get("/api/v1/master/events", headers=master_headers()).json()["count"] == 0
+    with make_client(tmp_path) as client:
+        assert len(client.get(url, headers=master_headers()).json()["logs"]) == 4
+
+
 def test_public_update_manifest_and_download(tmp_path: Path) -> None:
     releases = tmp_path / "releases"
     releases.mkdir()
