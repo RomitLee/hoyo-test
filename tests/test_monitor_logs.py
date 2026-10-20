@@ -24,6 +24,29 @@ def log_reply(event_id, success):
     )
 
 
+def test_cash_outbox_persists_routes_and_retries_without_duplicate(monkeypatch, tmp_path):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr("hoyo_analyzer.relay_client.application_root", lambda: tmp_path)
+    requests = []
+    monkeypatch.setattr(SlaveRelayClient, "_post", lambda self, path, payload, kind: requests.append((path, payload)))
+    first = SlaveRelayClient(app)
+    first.configure("device-cash", "token")
+    payload = {"event_id": "cash-1", "character_id": "123", "cash": 1000}
+    first.send_cash_observation(payload)
+    assert requests[-1][0] == "/api/v1/slave/cash-observations"
+    first._on_finished(log_reply("cash-1", False))
+    first._log_timer.stop()
+    first._heartbeat_timer.stop()
+    second = SlaveRelayClient(app)
+    second.configure("device-cash", "token")
+    second._send_next_log()
+    assert requests[-1] == ("/api/v1/slave/cash-observations", payload)
+    second._on_finished(log_reply("cash-1", True))
+    assert json.loads(second._log_path.read_text(encoding="utf-8")) == []
+    second._log_timer.stop()
+    second._heartbeat_timer.stop()
+
+
 def test_lifecycle_outbox_survives_failure_restart_and_keeps_device_ownership(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr("hoyo_analyzer.relay_client.application_root", lambda: tmp_path)

@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import cash_ledger
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
@@ -106,6 +108,7 @@ class RelayDatabase:
             for name, kind in (("cash", "INTEGER"), ("bank_money", "INTEGER"), ("money_confirmed_at", "TEXT"), ("money_readable", "INTEGER NOT NULL DEFAULT 0")):
                 self._ensure_column(connection, "device_window_status", name, kind)
             now = utc_now()
+            cash_ledger.initialize(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO accounts(id, username, display_name, password_hash, created_at, disabled) VALUES (1, NULL, '原有主机', NULL, ?, 0)",
                 (now,),
@@ -117,6 +120,15 @@ class RelayDatabase:
         columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def record_cash(self, account_id: int, device_id: str, payload: dict[str, Any]) -> str:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return cash_ledger.record(connection, account_id, device_id, payload)
+
+    def cash_statistics(self, account_id: int, day: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            return cash_ledger.statistics(connection, account_id, day)
 
     def create_account(self, username: str, display_name: str, password_hash: str) -> dict[str, Any]:
         now = utc_now()

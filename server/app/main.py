@@ -11,7 +11,7 @@ import re
 import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Annotated, Any, Literal
@@ -19,13 +19,14 @@ from typing import Annotated, Any, Literal
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .bark import BarkPushError, event_message, send_bark_notification
+from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
@@ -88,6 +89,29 @@ class HeartbeatIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hostname: str | None = Field(default=None, max_length=255)
     app_version: str | None = Field(default=None, max_length=64)
+
+
+class CashObservationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str = Field(min_length=1, max_length=128)
+    character_id: str = Field(min_length=1, max_length=64, pattern=r"^\d+$")
+    stream_id: str = Field(min_length=1, max_length=128)
+    sequence: int = Field(ge=1, le=9223372036854775807, strict=True)
+    occurred_at: datetime
+    cash: int | None = Field(default=None, ge=0, le=999999999999, strict=True)
+    active: bool = True
+    server_name: str | None = Field(default=None, max_length=128)
+    role_name: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> CashObservationIn:
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("金额观测必须包含时区")
+        if self.active and self.cash is None:
+            raise ValueError("有效观测必须包含现金金额")
+        if self.occurred_at > datetime.now(UTC) + timedelta(minutes=2):
+            raise ValueError("金额观测时间超前，请校准从机时间")
+        return self
 
 
 class WindowStatusIn(BaseModel):
@@ -434,6 +458,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ip_address=request.client.host if request.client else None,
         )
         return {"device_id": device_id, "server_time": seen_at}
+
+    @app.post("/api/v1/slave/cash-observations", status_code=status.HTTP_202_ACCEPTED)
+    def cash_observation(
+        payload: CashObservationIn,
+        identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
+    ) -> dict[str, Any]:
+        result = database.record_cash(identity.account_id, identity.device_id, payload.model_dump(mode="json"))
+        return {"accepted": True, "disposition": result}
+
+    @app.get("/api/v1/master/cash-statistics")
+    def cash_statistics(
+        day: date | None = None, account_id: int = Depends(authenticate_master),
+    ) -> dict[str, Any]:
+        return database.cash_statistics(account_id, (day or datetime.now(BEIJING).date()).isoformat())
 
     @app.post("/api/v1/slave/status", status_code=status.HTTP_202_ACCEPTED)
     def update_status(

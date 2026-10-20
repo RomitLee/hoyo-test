@@ -175,7 +175,7 @@ class InventoryMonitorWorker(QObject):
             panel_tracker = PanelTracker()
             money_detector = MoneyDetector()
             money_tracker = MoneyTracker()
-            money_window_title = self.window_title
+            money_character_id = parse_account_info(self.window_title).role_id
             last_panel_frame_ms: int | None = None
             sampler = AdaptiveSampler(
                 SamplingProfile(
@@ -242,14 +242,17 @@ class InventoryMonitorWorker(QObject):
                         analysis = detector.analyze(packet.image)
                     signal = _analysis_signal(analysis)
                     signal["panel_type"] = panel.panel_type
-                    if money_window_title != self.window_title:
+                    current_character_id = parse_account_info(self.window_title).role_id
+                    signal["character_id"] = current_character_id
+                    if money_character_id != current_character_id:
                         money_tracker = MoneyTracker()
-                        money_window_title = self.window_title
+                        money_character_id = current_character_id
                     money = money_detector.read_fields(
                         packet.image, panel.bbox if panel.panel_type == "inventory" else None,
                         analysis.grid_bbox if panel.panel_type in {"inventory", "unknown"} else None,
                     )
                     signal["money_reason"] = money_detector.reason
+                    signal["cash_detected"] = money[0] is not None
                     signal.update(money_tracker.update(money, packet.timestamp_ms))
                     self.analysis_ready.emit(signal)
                     self.analysis_for_window.emit(self.hwnd, signal)

@@ -30,6 +30,24 @@ def master_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MASTER_TOKEN}"}
 
 
+def test_cash_observations_and_statistics_api(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        payload = {"event_id": "balance-1", "character_id": "123456", "stream_id": "run1",
+                   "sequence": 1, "occurred_at": "2026-10-19T12:00:00+08:00", "cash": 1000, "active": True}
+        assert client.post("/api/v1/slave/cash-observations", headers=device_headers(), json=payload).status_code == 202
+        payload.update(event_id="balance-2", sequence=2, occurred_at="2026-10-19T12:00:05+08:00", cash=800)
+        for _ in range(2):
+            assert client.post("/api/v1/slave/cash-observations", headers=device_headers(), json=payload).status_code == 202
+        result = client.get("/api/v1/master/cash-statistics?day=2026-10-19", headers=master_headers())
+        assert result.status_code == 200
+        assert result.json()["daily"][0]["purchases"] == 200
+        assert len(result.json()["hourly"]) == 1
+        assert client.get("/api/v1/master/cash-statistics?day=invalid", headers=master_headers()).status_code == 422
+        assert client.get("/api/v1/master/cash-statistics?day=2026-10-19").status_code == 401
+        payload["character_id"] = ""
+        assert client.post("/api/v1/slave/cash-observations", headers=device_headers(), json=payload).status_code == 422
+
+
 def test_money_snapshot_roundtrip_and_legacy_compatibility(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         window = {"window_id": "hwnd:money", "updated_at": "2026-10-20T22:00:00+08:00",

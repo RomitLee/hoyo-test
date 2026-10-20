@@ -139,5 +139,7 @@ class MoneyTracker:
                 if self.count[index] >= 3:
                     self.confirmed[key] = amount
                     self.confirmed["money_confirmed_at"] = datetime.now(UTC).isoformat(timespec="milliseconds")
+                    if key == "cash":
+                        self.confirmed["cash_confirmed_at"] = self.confirmed["money_confirmed_at"]
             readable.append(amount is not None and self.count[index] >= 3)
-        return {**self.confirmed, "money_readable": all(readable)}
+        return {**self.confirmed, "money_readable": all(readable), "cash_readable": readable[0]}

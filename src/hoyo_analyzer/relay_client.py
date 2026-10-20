@@ -151,6 +151,11 @@ class SlaveRelayClient(QObject):
         self._save_log_outbox()
         self._send_next_log()
 
+    def send_cash_observation(self, payload: dict[str, Any]) -> None:
+        self._log_outbox.append({"device_id": self._device_id, "payload": payload, "route": "cash"})
+        self._save_log_outbox()
+        self._send_next_log()
+
     def _save_log_outbox(self) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._log_path.with_suffix(".tmp")
@@ -166,7 +171,8 @@ class SlaveRelayClient(QObject):
                 self._save_log_outbox()
             if item["device_id"] == self._device_id:
                 self._log_inflight = True
-                self._post("/api/v1/slave/monitor-logs", item["payload"], "monitor_log")
+                path = "/api/v1/slave/cash-observations" if item.get("route") == "cash" else "/api/v1/slave/monitor-logs"
+                self._post(path, item["payload"], "monitor_log")
                 return
 
     def flush_monitor_logs(self, timeout_ms: int = 2000) -> None:
@@ -323,6 +329,7 @@ class MasterRelayClient(QObject):
     devices_received = Signal(object)
     status_received = Signal(object)
     monitor_logs_received = Signal(object)
+    cash_statistics_received = Signal(object)
     acknowledge_result = Signal(int, bool, str)
     authentication_result = Signal(bool, str, object)
     pairing_code_received = Signal(bool, str, object)
@@ -337,6 +344,8 @@ class MasterRelayClient(QObject):
         self._poll_errors: list[str] = []
         self._event_buffer: list[dict[str, Any]] = []
         self._logs_fetching = False
+        self._cash_fetching = False
+        self._configuration_generation = 0
 
     @property
     def configured(self) -> bool:
@@ -347,6 +356,7 @@ class MasterRelayClient(QObject):
 
         self._base_url = CLOUD_RELAY_URL
         self._master_token = (legacy_token if legacy_token is not None else token_or_url).strip()
+        self._configuration_generation += 1
 
     def poll(self) -> None:
         if not self.configured:
@@ -381,6 +391,11 @@ class MasterRelayClient(QObject):
         if self.configured and not self._logs_fetching:
             self._logs_fetching = True
             self._get(f"/api/v1/master/monitor-logs?limit=100&before_id={before_id}", "monitor_logs")
+
+    def fetch_cash_statistics(self, day: str) -> None:
+        if self.configured and not self._cash_fetching:
+            self._cash_fetching = True
+            self._get(f"/api/v1/master/cash-statistics?day={day}", "cash_statistics")
 
     def authenticate(self, username: str, password: str, *, register: bool = False) -> None:
         path = "/api/v1/auth/register" if register else "/api/v1/auth/login"
@@ -435,9 +450,13 @@ class MasterRelayClient(QObject):
         except Exception as exc:  # noqa: BLE001 - surface request setup errors to the UI
             if kind == "monitor_logs":
                 self._logs_fetching = False
+            if kind == "cash_statistics":
+                self._cash_fetching = False
             self._finish_poll_kind(kind, f"无法发起 HTTPS 请求：{exc}")
             return
         reply.setProperty("relay_kind", kind)
+        if kind == "cash_statistics":
+            reply.setProperty("cash_generation", self._configuration_generation)
         self._watch(reply)
 
     def _watch(self, reply: QNetworkReply) -> None:
@@ -465,6 +484,8 @@ class MasterRelayClient(QObject):
         kind = str(reply.property("relay_kind"))
         if kind == "monitor_logs":
             self._logs_fetching = False
+        if kind == "cash_statistics":
+            self._cash_fetching = False
         if kind == "ack":
             self.acknowledge_result.emit(int(reply.property("server_event_id") or 0), False, message)
         elif kind == "auth":
@@ -507,6 +528,10 @@ class MasterRelayClient(QObject):
         reply.deleteLater()
         if kind == "monitor_logs":
             self._logs_fetching = False
+        if kind == "cash_statistics":
+            self._cash_fetching = False
+            if reply.property("cash_generation") != self._configuration_generation:
+                return
         if kind == "events" and success:
             events = data.get("events", [])
             self._event_buffer.extend(events)
@@ -522,6 +547,8 @@ class MasterRelayClient(QObject):
             self.devices_received.emit(data.get("devices", []))
         elif kind == "monitor_logs" and success:
             self.monitor_logs_received.emit(data)
+        elif kind == "cash_statistics" and success:
+            self.cash_statistics_received.emit(data)
         elif kind == "ack":
             self.acknowledge_result.emit(event_id, success, message)
         elif kind == "auth":

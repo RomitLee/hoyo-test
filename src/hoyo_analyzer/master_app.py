@@ -6,11 +6,13 @@ import sys
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, ClassVar
 
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import QDate, Qt, QTimer, Slot
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -160,6 +162,8 @@ class MasterWindow(QMainWindow):
         self.events: dict[int, dict[str, Any]] = {}
         self.devices: list[dict[str, Any]] = []
         self.window_status: list[dict[str, Any]] = []
+        self.cash_statistics: dict[str, Any] = {}
+        self._cash_follow_today = True
         self._monitor_logs_before_id = 0
         self._monitor_logs_next_id = 0
         self.alert: QMessageBox | None = None
@@ -171,13 +175,14 @@ class MasterWindow(QMainWindow):
         self.client.devices_received.connect(self._on_devices_received)
         self.client.status_received.connect(self._on_status_received)
         self.client.monitor_logs_received.connect(self._on_monitor_logs_received)
+        self.client.cash_statistics_received.connect(self._on_cash_statistics_received)
         self.client.acknowledge_result.connect(self._on_acknowledge_result)
         self.client.authentication_result.connect(self._on_authentication_result)
         self.client.pairing_code_received.connect(self._on_pairing_code_received)
         self.client.device_action_result.connect(self._on_device_action_result)
         self._configure_client()
         self.poll_timer = QTimer(self)
-        self.poll_timer.timeout.connect(self.client.poll)
+        self.poll_timer.timeout.connect(self._poll_master)
         self.poll_timer.start(self.settings.poll_seconds * 1000)
         if self.settings.access_token or self.settings.master_token:
             QTimer.singleShot(250, self.client.poll)
@@ -339,6 +344,122 @@ class MasterWindow(QMainWindow):
         log_layout.addWidget(self.monitor_log_table)
         log_layout.addWidget(QLabel("每次上报的遮挡、最小化状态均保留；开始和暂停按操作记录。"))
         self.tabs.addTab(log_page, "监控日志")
+        self._build_cash_page()
+
+    def _build_cash_page(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        controls = QHBoxLayout()
+        today = datetime.now(BEIJING_TZ).date()
+        self.cash_date = QDateEdit(QDate(today.year, today.month, today.day))
+        self.cash_date.setCalendarPopup(True)
+        self.cash_date.setDisplayFormat("yyyy-MM-dd")
+        controls.addWidget(QLabel("北京时间"))
+        controls.addWidget(self.cash_date)
+        today_button = QPushButton("今天")
+        today_button.clicked.connect(self._cash_today)
+        controls.addWidget(today_button)
+        self.cash_role = QComboBox()
+        self.cash_role.addItem("全部角色", "")
+        controls.addWidget(self.cash_role, 1)
+        refresh = QPushButton("刷新")
+        refresh.clicked.connect(self._load_cash_statistics)
+        controls.addWidget(refresh)
+        layout.addLayout(controls)
+        self.cash_summary = QLabel("尚无金额统计；账号 ID 缺失、未监控的时段不会记账。")
+        self.cash_summary.setWordWrap(True)
+        layout.addWidget(self.cash_summary)
+        layout.addWidget(QLabel("每日汇总（游戏币）"))
+        self.cash_daily_table = QTableWidget(0, 8)
+        self.cash_daily_table.setHorizontalHeaderLabels(("角色 / ID", "起始金额", "补入金额", "收购支出", "结束金额", "未监控净变动", "监控时长", "重建基线"))
+        layout.addWidget(self.cash_daily_table, 1)
+        layout.addWidget(QLabel("自然小时记录：仅显示有金额观测的时段"))
+        self.cash_hourly_table = QTableWidget(0, 8)
+        self.cash_hourly_table.setHorizontalHeaderLabels(("角色 / ID", "北京时间段", "起始金额", "补入金额", "收购支出", "结束金额", "未监控净变动", "监控时长"))
+        layout.addWidget(self.cash_hourly_table, 2)
+        for table in (self.cash_daily_table, self.cash_hourly_table):
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.verticalHeader().setVisible(False)
+            table.setAlternatingRowColors(True)
+            for column in range(table.columnCount()):
+                table.setColumnWidth(column, 82 if column else 145)
+            table.horizontalHeader().setStretchLastSection(True)
+        note = QLabel("增加计补入、减少计收购；按确认时间归属小时。中断不跨段计算；两次识别之间同时发生的收支只能看到净变化。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.cash_tab_index = self.tabs.addTab(page, "游戏币统计")
+        self.cash_date.dateChanged.connect(self._cash_date_changed)
+        self.cash_role.currentIndexChanged.connect(lambda _index: self._render_cash_statistics())
+        self.tabs.currentChanged.connect(lambda index: self._load_cash_statistics() if index == self.cash_tab_index else None)
+
+    def _poll_master(self) -> None:
+        self.client.poll()
+        if self._cash_follow_today:
+            today = datetime.now(BEIJING_TZ).date()
+            self.cash_date.setDate(QDate(today.year, today.month, today.day))
+        if self.tabs.currentIndex() == self.cash_tab_index:
+            self._load_cash_statistics()
+
+    def _load_cash_statistics(self) -> None:
+        if hasattr(self, "client"):
+            self.client.fetch_cash_statistics(self.cash_date.date().toString("yyyy-MM-dd"))
+
+    def _cash_date_changed(self, _date: QDate) -> None:
+        self._cash_follow_today = _date.toString("yyyy-MM-dd") == datetime.now(BEIJING_TZ).date().isoformat()
+        self.cash_statistics = {}
+        self._render_cash_statistics()
+        self._load_cash_statistics()
+
+    def _cash_today(self) -> None:
+        self._cash_follow_today = True
+        today = datetime.now(BEIJING_TZ).date()
+        self.cash_date.setDate(QDate(today.year, today.month, today.day))
+        self._load_cash_statistics()
+
+    @Slot(object)
+    def _on_cash_statistics_received(self, data: dict[str, Any]) -> None:
+        if data.get("day") != self.cash_date.date().toString("yyyy-MM-dd"):
+            self._load_cash_statistics()
+            return
+        self.cash_statistics = data
+        selected = self.cash_role.currentData()
+        self.cash_role.blockSignals(True)
+        self.cash_role.clear()
+        self.cash_role.addItem("全部角色", "")
+        for row in data.get("daily", []):
+            self.cash_role.addItem(f"{row.get('role_name') or '-'} / {row['character_id']}", row["character_id"])
+        self.cash_role.setCurrentIndex(max(0, self.cash_role.findData(selected)))
+        self.cash_role.blockSignals(False)
+        self._render_cash_statistics()
+
+    def _render_cash_statistics(self) -> None:
+        character_id = self.cash_role.currentData()
+        daily = [row for row in self.cash_statistics.get("daily", []) if not character_id or row["character_id"] == character_id]
+        hourly = [row for row in self.cash_statistics.get("hourly", []) if not character_id or row["character_id"] == character_id]
+        self.cash_summary.setText(
+            f"收购支出 {sum(row['purchases'] for row in daily):,} · 补入 {sum(row['topups'] for row in daily):,} · {len(daily)} 个角色"
+            f" · 末次观测 {self._format_time(max(row['last_at'] for row in daily))}"
+            if daily else "所选日期暂无金额观测记录；未监控时段不补记为零。"
+        )
+        for table, rows, is_hourly in ((self.cash_daily_table, daily, False), (self.cash_hourly_table, hourly, True)):
+            table.setRowCount(len(rows))
+            for index, row in enumerate(rows):
+                role = f"{row.get('role_name') or '-'} / {row['character_id']}"
+                seconds = int(row["monitored_seconds"])
+                duration = f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+                values = [role]
+                if is_hourly:
+                    hour = int(row["hour"])
+                    values.append(f"{hour:02d}:00–{hour + 1:02d}:00")
+                values.extend(f"{int(row[key]):,}" for key in ("opening_cash", "topups", "purchases", "closing_cash", "unobserved_change"))
+                values.append(duration)
+                if not is_hourly:
+                    values.append(str(row["restarts"]))
+                for column, value in enumerate(values):
+                    cell = QTableWidgetItem(value)
+                    cell.setToolTip(f"{value}\n首次观测：{self._format_time(row['first_at'])}\n末次观测：{self._format_time(row['last_at'])}")
+                    table.setItem(index, column, cell)
 
     def _load_monitor_logs(self, before_id: int = 0) -> None:
         self._monitor_logs_before_id = before_id
@@ -381,6 +502,12 @@ class MasterWindow(QMainWindow):
         self.monitor_log_summary.setText(f"监控日志 · {'最新' if not self._monitor_logs_before_id else '历史'} {len(logs)} 条")
 
     def _configure_client(self) -> None:
+        self.cash_statistics = {}
+        self.cash_role.blockSignals(True)
+        self.cash_role.clear()
+        self.cash_role.addItem("全部角色", "")
+        self.cash_role.blockSignals(False)
+        self._render_cash_statistics()
         try:
             self.client.configure(self.settings.access_token or self.settings.master_token)
         except ValueError as exc:

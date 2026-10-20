@@ -62,10 +62,13 @@ def _ui_self_test() -> int:
             "window_size": [window.width(), window.height()],
             "monitor_log_tab": any(window.tabs.tabText(index) == "监控日志" for index in range(window.tabs.count())),
             "monitor_log_columns": window.monitor_log_table.columnCount(),
+            "cash_statistics_tab": window.tabs.tabText(window.cash_tab_index) == "游戏币统计",
+            "cash_statistics_columns": [window.cash_daily_table.columnCount(), window.cash_hourly_table.columnCount()],
             "client_version": __version__,
         }
         result.update(ok=checks["window_visible"] and checks["window_size"] == [800, 632]
-                      and checks["monitor_log_tab"] and checks["monitor_log_columns"] == 7, checks=checks)
+                      and checks["monitor_log_tab"] and checks["monitor_log_columns"] == 7
+                      and checks["cash_statistics_tab"] and checks["cash_statistics_columns"] == [8, 8], checks=checks)
     except Exception as exc:  # noqa: BLE001 - persist frozen UI startup failures
         result.update(error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
     finally:
