@@ -62,14 +62,13 @@ def _ui_self_test() -> int:
             "window_size": [window.width(), window.height()],
             "monitor_log_tab": any(window.tabs.tabText(index) == "监控日志" for index in range(window.tabs.count())),
             "monitor_log_columns": window.monitor_log_table.columnCount(),
-            "cash_only": "现金" in window.STATUS_COLUMNS and "存银" not in window.STATUS_COLUMNS,
-            "four_sections": [window.tabs.tabText(index) for index in range(window.tabs.count())]
-            == ["监控", "告警", "从机管理", "监控日志"],
+            "cash_only": "现金" in window.STATUS_COLUMNS and "存银" not in window.STATUS_COLUMNS and window.tabs.count() == 4,
+            "separate_pages": [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["监控", "告警", "从机管理", "监控日志"],
             "client_version": __version__,
         }
         result.update(ok=checks["window_visible"] and checks["window_size"] == [800, 632]
                       and checks["monitor_log_tab"] and checks["monitor_log_columns"] == 7
-                      and checks["cash_only"] and checks["four_sections"], checks=checks)
+                      and checks["cash_only"] and checks["separate_pages"], checks=checks)
     except Exception as exc:  # noqa: BLE001 - persist frozen UI startup failures
         result.update(error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
     finally:
