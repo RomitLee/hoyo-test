@@ -26,7 +26,7 @@ from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
