@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -22,6 +23,60 @@ def log_reply(event_id, success):
         error=lambda: QNetworkReply.NetworkError.NoError if success else QNetworkReply.NetworkError.ConnectionRefusedError,
         errorString=lambda: "unavailable", readAll=lambda: b'{"accepted":true}', deleteLater=lambda: None,
     )
+
+
+def test_locked_outbox_keeps_uploading_and_retries_latest_queue(monkeypatch, tmp_path):
+    client = SlaveRelayClient(QApplication.instance())
+    client.configure("device", "token")
+    requests = []
+    monkeypatch.setattr(client, "_post", lambda path, payload, kind: requests.append(payload))
+    client.send_cash_observation({"event_id": "first", "cash": 100})
+    original_replace = Path.replace
+
+    def locked(source, destination):
+        raise PermissionError(5, "access denied")
+
+    monkeypatch.setattr(Path, "replace", locked)
+    # Both a new observation and an acknowledgement can hit the same locked file.
+    client.send_cash_observation({"event_id": "second", "cash": 80})
+    client._on_finished(log_reply("first", True))
+    assert requests[-1]["event_id"] == "second"
+    client._on_finished(log_reply("second", True))
+    assert client._log_dirty
+    assert not client._log_outbox
+    assert json.loads(client._log_path.read_text())[0]["payload"]["event_id"] == "first"
+    # Retry even when there is nothing left to send or the device is unconfigured.
+    client.configure("", "")
+    monkeypatch.setattr(Path, "replace", original_replace)
+    client._retry_log_outbox()
+    assert not client._log_dirty
+    assert json.loads(client._log_path.read_text()) == []
+    assert not list(client._log_path.parent.glob("*.tmp"))
+    client._log_timer.stop()
+    client._heartbeat_timer.stop()
+
+
+def test_outbox_write_failure_preserves_pending_observations_for_restart(monkeypatch):
+    client = SlaveRelayClient(QApplication.instance())
+    original_write = Path.write_text
+
+    def locked(*args, **kwargs):
+        raise PermissionError(5, "access denied")
+
+    monkeypatch.setattr(Path, "write_text", locked)
+    client.send_cash_observation({"event_id": "cash", "cash": 100})
+    client.send_monitor_payload({"event_id": "pause", "event_type": "monitoring_paused"})
+    client._retry_log_outbox()
+    assert client._log_dirty
+    assert len(client._log_outbox) == 2
+    monkeypatch.setattr(Path, "write_text", original_write)
+    client.flush_monitor_logs()
+    restored = SlaveRelayClient(QApplication.instance())
+    assert [item["payload"]["event_id"] for item in restored._log_outbox] == ["cash", "pause"]
+    assert restored._log_outbox[0]["route"] == "cash"
+    for current in (client, restored):
+        current._log_timer.stop()
+        current._heartbeat_timer.stop()
 
 
 def test_cash_outbox_persists_routes_and_retries_without_duplicate(monkeypatch, tmp_path):

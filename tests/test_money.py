@@ -24,12 +24,12 @@ def test_six_actual_game_amounts_from_panel_location_through_confirmation() -> N
         assert panel.panel_type == "inventory"
         detector = MoneyDetector()
         observation = detector.read_fields(image, panel.bbox)
-        assert observation == (sample["cash"], sample["bank_money"])
+        assert observation == (sample["cash"], None)
         tracker = MoneyTracker()
         for timestamp in (0, 200, 400):
             result = tracker.update(observation, timestamp)
         assert result["cash"] == sample["cash"]
-        assert result["bank_money"] == 0
+        assert "bank_money" not in result
         assert result["money_readable"] is True
 
 
@@ -72,7 +72,7 @@ def test_money_tracker_requires_consecutive_frames_and_retains_last_confirmation
     assert tracker.update((1450000, 0), 100)["money_readable"] is False
     confirmed = tracker.update((1450000, 0), 200)
     assert confirmed["cash"] == 1450000
-    assert confirmed["bank_money"] == 0
+    assert "bank_money" not in confirmed
     assert confirmed["money_readable"] is True
     unknown = tracker.update(None, 300)
     assert unknown["cash"] == 1450000
@@ -90,10 +90,10 @@ def test_money_regions_follow_title_position_and_scale() -> None:
     x, y = 287, 75
     image[y + 273:y + 287, x + 74:x + 222] = field("1450000")
     image[y + 300:y + 314, x + 74:x + 222] = field("0")
-    assert detector.analyze(image, (x, y, x + 67, y + 20)) == (1450000, 0)
+    assert detector.analyze(image, (x, y, x + 67, y + 20)) == (1450000, None)
     canvas = np.zeros((600, 800, 3), dtype=np.uint8)
     canvas[60:540, 80:720] = image
-    assert detector.analyze(canvas, (x + 80, y + 60, x + 147, y + 80)) == (1450000, 0)
+    assert detector.analyze(canvas, (x + 80, y + 60, x + 147, y + 80)) == (1450000, None)
     assert detector.analyze(image, None) is None
     assert detector.analyze(image, (600, 450, 667, 470)) is None
 
@@ -104,7 +104,7 @@ def test_cash_confirmation_does_not_depend_on_bank_reading() -> None:
         result = tracker.update((12179964, None), timestamp)
     assert result["cash"] == 12179964
     assert "bank_money" not in result
-    assert not result["money_readable"]
+    assert result["money_readable"]
 
 
 def test_slow_analysis_can_confirm_but_pause_clears_pending_evidence() -> None:
@@ -122,7 +122,7 @@ def test_grid_location_is_usable_without_panel_title() -> None:
     image = np.zeros((480, 640, 3), dtype=np.uint8)
     image[348:362, 361:509] = field("1450000")
     image[375:389, 361:509] = field("0")
-    assert detector.read_fields(image, None, (305, 131, 560, 335)) == (1450000, 0)
+    assert detector.read_fields(image, None, (305, 131, 560, 335)) == (1450000, None)
 
 
 def test_reading_fields_independently_survives_bank_cursor() -> None:

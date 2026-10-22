@@ -101,20 +101,16 @@ class MoneyDetector:
             if scale <= 0:
                 continue
             cash = self._read_near(image, left, top, scale)
-            bank = self._read_near(image, left, top + 27 * scale, scale)
-        self.reason = ("现金、存银均可读" if cash is not None and bank is not None else
-                       "现金可读，存银不可读" if cash is not None else
-                       "存银可读，现金不可读" if bank is not None else
-                       "数字字形或金额背景不匹配" if anchors else self.reason)
+        self.reason = "现金可读" if cash is not None else ("数字字形或金额背景不匹配" if anchors else self.reason)
         return cash, bank
 
     def analyze(self, image: np.ndarray, title_bbox: tuple[int, int, int, int] | None) -> tuple[int, int] | None:
         cash, bank = self.read_fields(image, title_bbox)
-        return (cash, bank) if cash is not None and bank is not None else None
+        return (cash, bank) if cash is not None else None
 
 
 class MoneyTracker:
-    """Confirm cash and bank independently; retain each last confirmed value."""
+    """Confirm cash only; retain the last confirmed value."""
 
     def __init__(self) -> None:
         self.last_frame_ms: int | None = None
@@ -130,7 +126,7 @@ class MoneyTracker:
             self.reset_pending()
         self.last_frame_ms = timestamp_ms
         readable = []
-        for index, (key, amount) in enumerate(zip(("cash", "bank_money"), value or (None, None), strict=True)):
+        for index, (key, amount) in enumerate(zip(("cash",), (value or (None, None))[:1], strict=True)):
             if amount is None:
                 self.pending[index], self.count[index] = None, 0
             else:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 from datetime import UTC, datetime
 from typing import Any
@@ -78,9 +79,10 @@ class SlaveRelayClient(QObject):
         except (OSError, ValueError):
             self._log_outbox = []
         self._log_inflight = False
+        self._log_dirty = False
         self._log_timer = QTimer(self)
         self._log_timer.setInterval(5000)
-        self._log_timer.timeout.connect(self._send_next_log)
+        self._log_timer.timeout.connect(self._retry_log_outbox)
         self._log_timer.start()
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(30_000)
@@ -157,10 +159,33 @@ class SlaveRelayClient(QObject):
         self._send_next_log()
 
     def _save_log_outbox(self) -> None:
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._log_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self._log_outbox, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(self._log_path)
+        # Windows scanners can briefly hold the destination without delete sharing.
+        # Keep the current queue in memory and retry on the Qt timer, never sleep
+        # in an analysis/network callback or abandon the remaining uploads.
+        was_dirty = self._log_dirty
+        self._log_dirty = True
+        temporary = self._log_path.with_name(f"{self._log_path.stem}-{uuid4().hex}.tmp")
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(self._log_outbox, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self._log_path)
+        except OSError:
+            if not was_dirty:
+                logging.getLogger(__name__).warning(
+                    "待上报记录暂时无法保存，保留内存队列并每 5 秒重试", exc_info=True,
+                )
+        else:
+            self._log_dirty = False
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass  # A locked temporary file must not interrupt monitoring either.
+
+    def _retry_log_outbox(self) -> None:
+        if self._log_dirty:
+            self._save_log_outbox()
+        self._send_next_log()
 
     def _send_next_log(self) -> None:
         if not self.configured or self._log_inflight:
@@ -177,7 +202,7 @@ class SlaveRelayClient(QObject):
 
     def flush_monitor_logs(self, timeout_ms: int = 2000) -> None:
         """Give normal shutdown a bounded chance to deliver; retain failures on disk."""
-        self._send_next_log()
+        self._retry_log_outbox()
         if not self.configured or not self._log_inflight:
             return
         loop = QEventLoop()

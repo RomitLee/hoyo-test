@@ -42,7 +42,7 @@ def test_acknowledged_row_remains_and_button_disappears(window):
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert window.title_bar.height() == 32
-    assert __version__ == "V1.8.0"
+    assert __version__ == "V1.8.1"
     assert __version__ in window.subtitle_label.text()
     window._on_events_received([event()])
     assert window.table.cellWidget(0, 6) is not None
@@ -97,12 +97,12 @@ def test_status_renders_every_window_and_empty_offline_device(window):
         {"device_id": "slave-02", "last_seen_at": (now - timedelta(seconds=100)).isoformat(), "windows": []},
     ])
     assert window.status_table.rowCount() == 3
-    assert window.status_table.item(0, 5).text() == "0"
-    assert window.status_table.item(0, 6).text() == "96%"
-    assert window.status_table.item(0, 7).text() == "30.0%"
-    assert window.status_table.item(1, 8).text() == "是"
-    assert window.status_table.item(2, 10).text() == "离线"
-    assert window.status_table.item(2, 8).text() == "-"
+    assert window.status_table.item(0, 4).text() == "0"
+    assert window.status_table.item(0, 5).text() == "96%"
+    assert window.status_table.item(0, 6).text() == "30.0%"
+    assert window.status_table.item(1, 7).text() == "是"
+    assert window.status_table.item(2, 9).text() == "离线"
+    assert window.status_table.item(2, 7).text() == "-"
 
 
 def test_money_is_visible_per_role_and_marks_last_confirmation(window):
@@ -116,32 +116,17 @@ def test_money_is_visible_per_role_and_marks_last_confirmation(window):
     ]
     window._on_status_received([{"device_id": "slave-01", "last_seen_at": now, "windows": rows}])
     assert window.status_table.item(0, 2).text() == "1,450,000"
-    assert window.status_table.item(0, 3).text() == "0"
     assert window.status_table.item(1, 2).text() == "4,995,810（上次确认）"
     assert window.status_table.item(2, 2).text() == "未识别"
-    assert window.status_table.item(0, 11).text() != "-"
+    assert window.status_table.item(0, 10).text() != "-"
     assert MasterWindow._format_money(rows[0], "cash", False).endswith("（上次确认）")
 
 
-def test_cash_statistics_shows_daily_and_observed_hours_only(window):
-    day = window.cash_date.date().toString("yyyy-MM-dd")
-    row = {"character_id": "123456", "role_name": "角色一", "opening_cash": 10000000,
-           "closing_cash": 3000000, "topups": 10000000, "purchases": 17000000,
-           "unobserved_change": 0, "monitored_seconds": 529, "restarts": 0,
-           "first_at": day + "T18:00:00+08:00", "last_at": day + "T18:08:49+08:00"}
-    second = {**row, "character_id": "999", "role_name": "角色二"}
-    window._on_cash_statistics_received({"day": day, "daily": [row, second],
-                                        "hourly": [{**row, "hour": 18}, {**second, "hour": 18}]})
-    assert window.tabs.tabText(window.cash_tab_index) == "游戏币统计"
-    assert window.cash_daily_table.rowCount() == 2
-    assert window.cash_daily_table.item(0, 3).text() == "17,000,000"
-    assert window.cash_hourly_table.item(0, 1).text() == "18:00–19:00"
-    assert window.cash_hourly_table.item(0, 7).text() == "00:08:49"
-    window.cash_role.setCurrentIndex(window.cash_role.findData("123456"))
-    assert window.cash_hourly_table.rowCount() == 1
-    assert "123456" in window.cash_hourly_table.item(0, 0).text()
-    window.cash_date.setDate(window.cash_date.date().addDays(-1))
-    assert window.cash_daily_table.rowCount() == 0
+def test_statistics_and_bank_are_removed(window):
+    assert window.tabs.count() == 3
+    assert all(window.tabs.tabText(i) != "游戏币统计" for i in range(window.tabs.count()))
+    assert "现金" in window.STATUS_COLUMNS
+    assert "存银" not in window.STATUS_COLUMNS
 
 
 def test_device_management_page_renders_devices_and_pairing_code(window):
@@ -162,7 +147,7 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
             "disabled": True,
         },
     ])
-    assert window.tabs.count() == 4
+    assert window.tabs.count() == 3
     assert window.device_table.rowCount() == 2
     assert window.device_table.item(0, 0).text() == "工作室电脑"
     assert window.device_table.item(0, 2).text() == "在线"

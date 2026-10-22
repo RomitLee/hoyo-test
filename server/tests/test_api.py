@@ -30,7 +30,7 @@ def master_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MASTER_TOKEN}"}
 
 
-def test_cash_observations_and_statistics_api(tmp_path: Path) -> None:
+def test_legacy_cash_observations_are_acknowledged_without_statistics(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         payload = {"event_id": "balance-1", "character_id": "123456", "stream_id": "run1",
                    "sequence": 1, "occurred_at": "2026-10-19T12:00:00+08:00", "cash": 1000, "active": True}
@@ -40,8 +40,8 @@ def test_cash_observations_and_statistics_api(tmp_path: Path) -> None:
             assert client.post("/api/v1/slave/cash-observations", headers=device_headers(), json=payload).status_code == 202
         result = client.get("/api/v1/master/cash-statistics?day=2026-10-19", headers=master_headers())
         assert result.status_code == 200
-        assert result.json()["daily"][0]["purchases"] == 200
-        assert len(result.json()["hourly"]) == 1
+        assert result.json()["daily"] == []
+        assert result.json()["hourly"] == []
         assert client.get("/api/v1/master/cash-statistics?day=invalid", headers=master_headers()).status_code == 422
         assert client.get("/api/v1/master/cash-statistics?day=2026-10-19").status_code == 401
         payload["character_id"] = ""
@@ -57,7 +57,7 @@ def test_money_snapshot_roundtrip_and_legacy_compatibility(tmp_path: Path) -> No
         assert client.post("/api/v1/slave/status", headers=device_headers(), json=snapshot).status_code == 202
         row = client.get("/api/v1/master/status", headers=master_headers()).json()["devices"][0]["windows"][0]
         assert row["cash"] == 1450000
-        assert row["bank_money"] == 0
+        assert row["bank_money"] is None
         assert row["money_readable"] == 1
         assert row["money_confirmed_at"]
         window["cash"] = -1

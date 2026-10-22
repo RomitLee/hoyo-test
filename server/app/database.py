@@ -366,7 +366,7 @@ class RelayDatabase:
                     w.get("status_text"), w.get("empty_slots"), w.get("occupied_slots"), w.get("confidence"),
                     w.get("occlusion_percent"), int(bool(w.get("minimized"))), int(bool(w.get("monitoring", True))),
                     str(w.get("updated_at") or received_at), received_at,
-                    w.get("cash"), w.get("bank_money"), w.get("money_confirmed_at"), int(bool(w.get("money_readable"))),
+                    w.get("cash"), None, w.get("money_confirmed_at"), int(bool(w.get("money_readable"))),
                 ) for w in windows if str(w.get("window_id", ""))],
             )
         return received_at

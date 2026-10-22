@@ -34,7 +34,6 @@ from . import __version__
 from .alarm_sound import play_alarm_loop, stop_alarm_loop
 from .app_identity import SLAVE_APP_ID, application_icon, apply_application_icon, configure_windows_app_id
 from .auto_update import install_auto_update, mark_update_healthy
-from .cash_monitor import CashMonitor
 from .cloud_config import CLOUD_RELAY_URL
 from .config import load_config
 from .desktop_theme import (
@@ -96,7 +95,6 @@ class MonitorSession:
     occlusion_alert_active: bool = False
     occlusion_candidate_since: float | None = None
     removing: bool = False
-    cash_monitor: CashMonitor | None = None
 
 
 class InventoryMonitorWindow(QMainWindow):
@@ -363,9 +361,6 @@ class InventoryMonitorWindow(QMainWindow):
         if self.monitoring_paused == paused:
             return
         self.monitoring_paused = paused
-        if paused:
-            for session in self.sessions.values():
-                self._stop_cash(session)
         self.relay_client.send_monitor_log(
             "monitoring_paused" if paused else "monitoring_started", "pause" if paused else "resume",
         )
@@ -550,9 +545,6 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(bool, str)
     def _on_relay_connection_changed(self, online: bool, message: str) -> None:
-        if not online:
-            for session in self.sessions.values():
-                self._stop_cash(session)
         self.host_status_label.setText("云端：已连接" if online else "云端：未连接")
         self.host_status_label.setStyleSheet(
             pill_style("#C7FBE8", "#0A3B31", "#176A58") if online else pill_style("#FFD8DF", "#351824", "#6E2941")
@@ -738,11 +730,6 @@ class InventoryMonitorWindow(QMainWindow):
 
     def _update_session_identity(self, session: MonitorSession, title: str) -> None:
         account = parse_account_info(title)
-        if account.role_id != session.account.role_id:
-            self._stop_cash(session)
-            session.cash_monitor = None
-        elif getattr(session, "cash_monitor", None) is not None:
-            session.cash_monitor.identity.update(server_name=account.secondary_region, role_name=account.role_name)
         session.last_signal = None
         session.title = title
         session.account = account
@@ -767,7 +754,6 @@ class InventoryMonitorWindow(QMainWindow):
         if session is None or session.removing:
             return
         session.removing = True
-        self._stop_cash(session)
         session.output_status.setText("正在移除…")
         session.worker.stop()
         if reason:
@@ -802,42 +788,14 @@ class InventoryMonitorWindow(QMainWindow):
         if "character_id" in signal and signal["character_id"] != session.account.role_id:
             return
         session.last_signal = signal
-        self._publish_cash(session, signal)
         reason = str(signal.get("money_reason") or "等待金额识别")
         cash = signal.get("cash")
-        bank = signal.get("bank_money")
         session.output_detail.setToolTip(
             f"现金：{cash if cash is not None else '未识别'}\n"
-            f"存银：{bank if bank is not None else '未识别'}\n{reason}"
+            f"{reason}"
         )
         self._apply_signal(session, signal)
         self._update_capacity_alert(session, signal)
-
-    def _stop_cash(self, session: MonitorSession) -> None:
-        monitor = getattr(session, "cash_monitor", None)
-        if monitor is not None:
-            for payload in monitor.stop(datetime.now(UTC)):
-                self.relay_client.send_cash_observation(payload)
-
-    def _publish_cash(self, session: MonitorSession, signal: dict[str, Any]) -> None:
-        character_id = str(getattr(session.account, "role_id", "") or "")
-        if not character_id.isdigit():
-            return
-        if getattr(session, "cash_monitor", None) is None:
-            session.cash_monitor = CashMonitor({"character_id": character_id,
-                                               "server_name": session.account.secondary_region,
-                                               "role_name": session.account.role_name})
-        now = datetime.now(UTC)
-        when = now
-        try:
-            if signal.get("cash_readable"):
-                when = datetime.fromisoformat(str(signal["cash_confirmed_at"]))
-        except (KeyError, ValueError, TypeError):
-            return
-        enabled = (self.relay_client.online and not self.monitoring_paused and not session.minimized
-                   and not session.removing and 0 <= (now - when).total_seconds() <= 15)
-        for payload in session.cash_monitor.update(signal, enabled, when):
-            self.relay_client.send_cash_observation(payload)
 
     def _apply_signal(self, session: MonitorSession, signal: dict[str, Any]) -> None:
         status = str(signal.get("status", "invalid"))
@@ -1022,7 +980,6 @@ class InventoryMonitorWindow(QMainWindow):
             account_label = f"{session.account.secondary_region} / {session.account.role_name}"
             if minimized and not session.minimized:
                 session.minimized = True
-                self._stop_cash(session)
                 session.minimized_since = now
                 session.minimized_alert_active = False
                 self.log.appendPlainText(f"游戏窗口已最小化，检测暂停：{account_label}")
@@ -1132,10 +1089,7 @@ class InventoryMonitorWindow(QMainWindow):
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         for session in tuple(self.sessions.values()):
             signal = session.last_signal or {}
-            monitor = getattr(session, "cash_monitor", None)
-            if monitor is not None and monitor.last_time is not None and (datetime.now(UTC) - monitor.last_time).total_seconds() > 15:
-                self._stop_cash(session)
-            money = {key: signal.get(key) for key in ("cash", "bank_money", "money_confirmed_at")}
+            money = {key: signal.get(key) for key in ("cash", "money_confirmed_at")}
             money_current = bool(signal.get("money_readable"))
             try:
                 money_current = money_current and (datetime.now(UTC) - datetime.fromisoformat(str(money["money_confirmed_at"]))).total_seconds() <= 5
@@ -1191,8 +1145,6 @@ class InventoryMonitorWindow(QMainWindow):
             event.accept()
             return
         self._closing = True
-        for session in self.sessions.values():
-            self._stop_cash(session)
         self.relay_client.send_monitor_log("monitoring_paused", "close")
         self.scan_timer.stop()
         self.window_state_timer.stop()

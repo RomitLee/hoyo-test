@@ -464,14 +464,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         payload: CashObservationIn,
         identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
     ) -> dict[str, Any]:
-        result = database.record_cash(identity.account_id, identity.device_id, payload.model_dump(mode="json"))
-        return {"accepted": True, "disposition": result}
+        # Acknowledge legacy clients' durable queues without creating any more
+        # inferred purchase/top-up statistics. Current cash uses window status.
+        return {"accepted": True, "disposition": "statistics_disabled"}
 
     @app.get("/api/v1/master/cash-statistics")
     def cash_statistics(
         day: date | None = None, account_id: int = Depends(authenticate_master),
     ) -> dict[str, Any]:
-        return database.cash_statistics(account_id, (day or datetime.now(BEIJING).date()).isoformat())
+        return {"day": (day or datetime.now(BEIJING).date()).isoformat(),
+                "timezone": "Asia/Shanghai", "daily": [], "hourly": []}
 
     @app.post("/api/v1/slave/status", status_code=status.HTTP_202_ACCEPTED)
     def update_status(
