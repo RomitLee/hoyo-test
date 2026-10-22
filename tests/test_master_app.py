@@ -42,7 +42,7 @@ def test_acknowledged_row_remains_and_button_disappears(window):
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert window.title_bar.height() == 32
-    assert __version__ == "V1.8.1"
+    assert __version__ == "V1.8.2"
     assert __version__ in window.subtitle_label.text()
     window._on_events_received([event()])
     assert window.table.cellWidget(0, 6) is not None
@@ -101,7 +101,7 @@ def test_status_renders_every_window_and_empty_offline_device(window):
     assert window.status_table.item(0, 5).text() == "96%"
     assert window.status_table.item(0, 6).text() == "30.0%"
     assert window.status_table.item(1, 7).text() == "是"
-    assert window.status_table.item(2, 9).text() == "离线"
+    assert window.status_table.item(2, 8).text() == "离线"
     assert window.status_table.item(2, 7).text() == "-"
 
 
@@ -115,15 +115,19 @@ def test_money_is_visible_per_role_and_marks_last_confirmation(window):
         {"role_name": "角色丙"},
     ]
     window._on_status_received([{"device_id": "slave-01", "last_seen_at": now, "windows": rows}])
-    assert window.status_table.item(0, 2).text() == "1,450,000"
-    assert window.status_table.item(1, 2).text() == "4,995,810（上次确认）"
-    assert window.status_table.item(2, 2).text() == "未识别"
-    assert window.status_table.item(0, 10).text() != "-"
+    assert "1,450,000" in window.status_table.cellWidget(0, 2).text()
+    assert "4,995,810（上次确认）" in window.status_table.cellWidget(1, 2).text()
+    assert "未识别" in window.status_table.cellWidget(2, 2).text()
+    cash_cell = window.status_table.cellWidget(0, 2)
+    assert "1,450,000" in cash_cell.text()
+    assert "确认：" in cash_cell.text()
+    assert "font-size:10px" in cash_cell.text()
+    assert "金额确认时间" in cash_cell.toolTip()
     assert MasterWindow._format_money(rows[0], "cash", False).endswith("（上次确认）")
 
 
 def test_statistics_and_bank_are_removed(window):
-    assert window.tabs.count() == 3
+    assert window.tabs.count() == 4
     assert all(window.tabs.tabText(i) != "游戏币统计" for i in range(window.tabs.count()))
     assert "现金" in window.STATUS_COLUMNS
     assert "存银" not in window.STATUS_COLUMNS
@@ -147,7 +151,7 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
             "disabled": True,
         },
     ])
-    assert window.tabs.count() == 3
+    assert window.tabs.count() == 4
     assert window.device_table.rowCount() == 2
     assert window.device_table.item(0, 0).text() == "工作室电脑"
     assert window.device_table.item(0, 2).text() == "在线"
@@ -160,7 +164,7 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
         True, "", {"pairing_code": "123456", "target_device_id": None}
     )
     assert "123456" in window.pairing_code_label.text()
-    assert window.tabs.currentIndex() == 1
+    assert window.tabs.currentIndex() == 2
 
 
 def test_device_management_warns_when_slave_version_differs(window):
@@ -190,7 +194,7 @@ def test_monitor_log_page_renders_history_without_alarms(window, monkeypatch):
         "server_name": "秦淮风光", "role_name": "角色一",
         "occurred_at": datetime.now(UTC).isoformat(),
     }], "has_more": True})
-    assert window.tabs.tabText(2) == "监控日志"
+    assert window.tabs.tabText(3) == "监控日志"
     assert window.monitor_log_table.item(0, 1).text() == "一号电脑"
     assert window.monitor_log_table.item(0, 3).text() == "遮挡"
     assert window.monitor_log_table.item(0, 4).text() == "<0.1%"
@@ -213,3 +217,19 @@ def test_panel_monitor_log_renders_exact_chinese_timestamp(window):
     assert window.monitor_log_table.item(0, 0).text() == "2026年10月20日10:31:38"
     assert window.monitor_log_table.item(0, 3).text() == "打开交易面板"
     assert window.monitor_log_table.item(0, 6).text() == "面板识别"
+
+
+def test_monitor_and_alarm_are_separate_and_refresh_time_is_shared(window):
+    assert [window.tabs.tabText(i) for i in range(4)] == ["监控", "告警", "从机管理", "监控日志"]
+    assert window.status_table.parentWidget() is window.tabs.widget(0)
+    assert window.table.parentWidget() is window.tabs.widget(1)
+    assert "最后更新" not in window.STATUS_COLUMNS
+    assert "金额确认时间" not in window.STATUS_COLUMNS
+    assert window.status_table.columnCount() == 9
+    assert "尚未同步" in window.status_updated_label.text()
+    window._on_status_received([])
+    assert "尚未同步" not in window.status_updated_label.text()
+    assert "列表更新时间：" in window.status_updated_label.text()
+    stamp = window.status_updated_label.text()
+    window._on_connection_changed(False, "连接失败")
+    assert window.status_updated_label.text() == stamp
