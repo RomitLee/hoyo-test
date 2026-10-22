@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from datetime import UTC, datetime, timedelta, timezone
-from html import escape
 from typing import Any, ClassVar
 
 from PySide6.QtCore import Qt, QTimer, Slot
@@ -149,7 +148,9 @@ class MasterWindow(QMainWindow):
     """Receive pending alarms from all configured slave computers."""
 
     COLUMNS: ClassVar[tuple[str, ...]] = ("编号", "从机", "区服 / 角色", "告警", "发生时间", "状态", "操作")
-    STATUS_COLUMNS: ClassVar[tuple[str, ...]] = ("从机编号", "窗口 / 角色", "现金", "当前状态", "空格", "置信度", "遮挡", "最小化", "在线")
+    STATUS_COLUMNS: ClassVar[tuple[str, ...]] = (
+        "从机编号", "窗口 / 角色", "现金", "当前状态", "空格", "置信度", "遮挡", "最小化", "在线"
+    )
 
     def __init__(self) -> None:
         super().__init__()
@@ -240,15 +241,14 @@ class MasterWindow(QMainWindow):
         monitor_layout.setSpacing(7)
         self.tabs.addTab(monitor_page, "监控")
 
+        monitor_header = QHBoxLayout()
         self.window_summary = QLabel("从机状态 · 等待同步")
         self.window_summary.setStyleSheet(banner_style("#B9D8FF", "#122C4D", "#245284"))
-        monitor_toolbar = QHBoxLayout()
-        monitor_toolbar.addWidget(self.window_summary, 1)
-        self.status_updated_label = QLabel("列表更新时间：尚未同步")
-        self.status_updated_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
-        self.status_updated_label.setToolTip("主机成功获取监控列表的时间；从机是否在线请查看在线列。")
-        monitor_toolbar.addWidget(self.status_updated_label)
-        monitor_layout.addLayout(monitor_toolbar)
+        monitor_header.addWidget(self.window_summary, 1)
+        self.monitor_updated_label = QLabel("更新时间：--")
+        self.monitor_updated_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
+        monitor_header.addWidget(self.monitor_updated_label)
+        monitor_layout.addLayout(monitor_header)
         self.status_table = QTableWidget(0, len(self.STATUS_COLUMNS))
         self.status_table.setHorizontalHeaderLabels(self.STATUS_COLUMNS)
         self.status_table.verticalHeader().setVisible(False)
@@ -257,21 +257,21 @@ class MasterWindow(QMainWindow):
         self.status_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.status_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.status_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.status_table.verticalHeader().setDefaultSectionSize(48)
-        for column, width in enumerate((70, 130, 158, 90, 38, 50, 52, 50, 46)):
+        self.status_table.verticalHeader().setDefaultSectionSize(46)
+        for column, width in enumerate((70, 140, 132, 90, 38, 50, 52, 50, 46)):
             self.status_table.setColumnWidth(column, width)
         self.status_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         monitor_layout.addWidget(self.status_table, 1)
 
-        alarm_page = QWidget()
-        alarm_layout = QVBoxLayout(alarm_page)
-        alarm_layout.setContentsMargins(0, 6, 0, 0)
-        alarm_layout.setSpacing(7)
-        self.tabs.addTab(alarm_page, "告警")
+        alert_page = QWidget()
+        alert_layout = QVBoxLayout(alert_page)
+        alert_layout.setContentsMargins(0, 6, 0, 0)
+        alert_layout.setSpacing(7)
+        self.tabs.addTab(alert_page, "告警")
 
         self.summary = QLabel("告警记录 · 暂无未处理告警")
         self.summary.setStyleSheet(banner_style("#C7FBE8", "#0A3B31", "#176A58"))
-        alarm_layout.addWidget(self.summary)
+        alert_layout.addWidget(self.summary)
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
         self.table.verticalHeader().setVisible(False)
@@ -285,10 +285,10 @@ class MasterWindow(QMainWindow):
         for column, width in enumerate(widths):
             self.table.setColumnWidth(column, width)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        alarm_layout.addWidget(self.table, 1)
+        alert_layout.addWidget(self.table, 1)
         note = QLabel("确认后记录保留为“已处理”；从机 90 秒无上报显示离线。网络中断不影响从机本地检测。")
         note.setStyleSheet(f"color:{MUTED};font-size:11px;")
-        alarm_layout.addWidget(note)
+        alert_layout.addWidget(note)
 
         device_page = QWidget()
         device_layout = QVBoxLayout(device_page)
@@ -325,7 +325,7 @@ class MasterWindow(QMainWindow):
         )
         device_note.setStyleSheet(f"color:{MUTED};font-size:11px;")
         device_layout.addWidget(device_note)
-        self.device_tab_index = self.tabs.addTab(device_page, "从机管理")
+        self.tabs.addTab(device_page, "从机管理")
 
         log_page = QWidget()
         log_layout = QVBoxLayout(log_page)
@@ -621,7 +621,7 @@ class MasterWindow(QMainWindow):
         target = str(data.get("target_device_id") or "")
         prefix = f"{target} 重新配对码" if target else "新从机配对码"
         self.pairing_code_label.setText(f"{prefix}：{code}（5 分钟有效）")
-        self.tabs.setCurrentIndex(self.device_tab_index)
+        self.tabs.setCurrentIndex(2)
 
     @Slot(bool, str)
     def _on_device_action_result(self, success: bool, message: str) -> None:
@@ -632,7 +632,6 @@ class MasterWindow(QMainWindow):
 
     @Slot(object)
     def _on_status_received(self, devices: list[dict[str, Any]]) -> None:
-        self.status_updated_label.setText(f"列表更新时间：{datetime.now(UTC).astimezone().strftime('%m-%d %H:%M:%S')}")
         self.client.fetch_monitor_logs(self._monitor_logs_before_id)
         rows: list[dict[str, Any]] = []
         now = datetime.now(UTC)
@@ -667,6 +666,7 @@ class MasterWindow(QMainWindow):
         return f"{int(value):,}" + ("" if current else "（上次确认）")
 
     def _render_status(self) -> None:
+        self.status_table.clearContents()
         self.status_table.setRowCount(len(self.window_status))
         for row, item in enumerate(self.window_status):
             window = item.get("window") or {}
@@ -679,7 +679,6 @@ class MasterWindow(QMainWindow):
             values = (
                 str(item.get("device_id") or "-"),
                 f"{window.get('server_name') or '-'} / {window.get('role_name') or '未监控窗口'}" if window else "暂无游戏窗口",
-                self._format_money(window, "cash", bool(item.get("online"))),
                 status_text,
                 "-" if empty is None else str(empty),
                 "-" if confidence is None else f"{float(confidence):.0%}",
@@ -687,26 +686,37 @@ class MasterWindow(QMainWindow):
                 ("是" if window.get("minimized") else "否") if window else "-",
                 "在线" if item.get("online") else "离线",
             )
-            for column, value in enumerate(values):
-                cell = QTableWidgetItem("" if column == 2 else value)
-                if column == 2:
-                    cell.setData(Qt.ItemDataRole.UserRole, value)
+            for column, value in enumerate(values[:2]):
+                cell = QTableWidgetItem(value)
                 cell.setToolTip(value)
                 self.status_table.setItem(row, column, cell)
-            confirmed_time = self._format_time(window.get("money_confirmed_at"))
-            cash_label = QLabel(
-                f'<span style="font-size:12px;font-weight:700;">{escape(values[2])}</span><br>'
-                f'<span style="font-size:10px;color:{MUTED};">确认：{escape(confirmed_time)}</span>'
-            )
-            cash_label.setContentsMargins(5, 0, 0, 0)
-            cash_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            cash_label.setToolTip(f"现金：{values[2]}\n金额确认时间：{confirmed_time}")
-            self.status_table.setCellWidget(row, 2, cash_label)
+            cash_text = self._format_money(window, "cash", bool(item.get("online")))
+            confirmed_at = self._format_time(window.get("money_confirmed_at"))
+            cash_item = QTableWidgetItem(cash_text)
+            cash_item.setToolTip(f"{cash_text}\n确认时间：{confirmed_at}")
+            self.status_table.setItem(row, 2, cash_item)
+            cash_cell = QWidget()
+            cash_layout = QVBoxLayout(cash_cell)
+            cash_layout.setContentsMargins(4, 2, 4, 2)
+            cash_layout.setSpacing(0)
+            amount_label = QLabel(cash_text)
+            amount_label.setStyleSheet("font-weight:700;")
+            time_label = QLabel(f"确认 {confirmed_at}")
+            time_label.setStyleSheet(f"color:{MUTED};font-size:10px;")
+            cash_layout.addWidget(amount_label)
+            cash_layout.addWidget(time_label)
+            cash_cell.setToolTip(cash_item.toolTip())
+            self.status_table.setCellWidget(row, 2, cash_cell)
+            for column, value in enumerate(values[2:], start=3):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(value)
+                self.status_table.setItem(row, column, cell)
         count = sum(1 for item in self.window_status if item.get("window"))
         self.window_summary.setText(
             "从机状态 · 暂无从机上报" if not self.window_status
             else f"从机状态 · 已同步 {count} 个游戏窗口（每 {self.settings.poll_seconds} 秒刷新）"
         )
+        self.monitor_updated_label.setText(f"更新时间：{datetime.now().astimezone().strftime('%m-%d %H:%M:%S')}")
 
     def _render_events(self) -> None:
         items = sorted(self.events.values(), key=lambda item: int(item["server_event_id"]), reverse=True)
