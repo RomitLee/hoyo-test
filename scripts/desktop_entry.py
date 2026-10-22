@@ -115,7 +115,7 @@ def _run_package_ui_self_test() -> int:
                 "ok": all(
                     (
                         checks["window_visible"],
-                        checks["window_size"] == [560, 560],
+                        checks["window_size"] == [560, 1100],
                         checks["light_theme"],
                         checks["rename_button"],
                         checks["title_bar_height"] == 32,

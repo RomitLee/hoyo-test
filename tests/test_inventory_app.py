@@ -60,7 +60,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
     try:
         assert window.windowTitle() == APP_NAME
         assert not window.windowIcon().isNull()
-        assert (window.width(), window.height()) == (560, 560)
+        assert (window.width(), window.height()) == (560, 1100)
         assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert window.title_bar.height() == 32
         assert window.add_window_button.text() == "＋ 增加窗口"
@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V1.9.0"
+        assert __version__ == "V2.0.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -135,7 +135,7 @@ def test_six_cards_fit_560_width_without_horizontal_or_vertical_scrolling(monkey
         window._update_output_panels()
         window.show()
         app.processEvents()
-        assert (window.width(), window.height()) == (560, 560)
+        assert (window.width(), window.height()) == (560, 1100)
         assert window.output_scroll.horizontalScrollBar().maximum() == 0
         assert window.output_scroll.verticalScrollBar().maximum() == 0
     finally:
@@ -178,7 +178,7 @@ def test_mini_mode_preserves_runtime_and_restores_geometry(monkeypatch) -> None:
         app.processEvents()
 
         assert not window._mini_mode
-        assert (window.width(), window.height()) == (560, 560)
+        assert (window.width(), window.height()) == (560, 1100)
         assert window.pos() == original_position
         assert window.full_content.isVisible()
         assert window.mini_content.isHidden()
@@ -481,6 +481,8 @@ def test_non_capacity_inventory_states_do_not_create_alerts(monkeypatch) -> None
 
 
 def test_output_panel_core_information_does_not_overlap(monkeypatch) -> None:
+    import numpy as np
+
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
@@ -498,6 +500,9 @@ def test_output_panel_core_information_does_not_overlap(monkeypatch) -> None:
 
         assert "现金 未识别" in detail.text()
         assert "空格 6" in detail.text() and "置信度 96%" in detail.text()
+        assert (preview.width(), preview.height()) == (148, 111)
+        window._display_preview(preview, np.zeros((480, 640, 3), dtype=np.uint8))
+        assert (preview.pixmap().width(), preview.pixmap().height()) == (148, 111)
         widgets = (title, preview, status, detail, window_state)
         assert all(first.geometry().bottom() < second.geometry().top() for first, second in pairwise(widgets))
     finally:
@@ -529,7 +534,7 @@ def test_output_panel_count_matches_monitored_window_count(monkeypatch) -> None:
         assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[3]))[:2] == (1, 0)
         assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[4]))[:2] == (1, 1)
         assert window.output_grid.getItemPosition(window.output_grid.indexOf(panels[7]))[:2] == (2, 1)
-        assert window.output_scroll.verticalScrollBar().maximum() > 0
+        assert window.output_scroll.verticalScrollBar().maximum() == 0
         assert window.output_scroll.horizontalScrollBar().maximum() == 0
     finally:
         window.sessions.clear()

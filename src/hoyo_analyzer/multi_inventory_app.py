@@ -103,7 +103,7 @@ class InventoryMonitorWindow(QMainWindow):
     """Monitor up to eight game windows and show the selected live preview."""
 
     FULL_WIDTH = 560
-    FULL_HEIGHT = 560
+    FULL_HEIGHT = 1100
     OUTPUT_COLUMNS = 3
     MINI_WIDTH = 300
     MINI_HEIGHT = 90
@@ -725,13 +725,13 @@ class InventoryMonitorWindow(QMainWindow):
     ) -> tuple[QFrame, QLabel, QLabel, QLabel, QLabel, QLabel]:
         panel = QFrame()
         panel.setObjectName("outputCard")
-        panel.setFixedSize(156, 158)
+        panel.setFixedSize(156, 230)
         panel.setStyleSheet(
             "QFrame#outputCard{background:#FFFFFF;border:1px solid #E2E8F0;border-radius:10px;}"
             "QFrame#outputCard:hover{border-color:#AAC6FA;background:#F5F9FF;}"
         )
         panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(5, 5, 5, 5)
+        panel_layout.setContentsMargins(3, 5, 3, 5)
         panel_layout.setSpacing(4)
 
         header = QHBoxLayout()
@@ -756,7 +756,7 @@ class InventoryMonitorWindow(QMainWindow):
 
         preview = QLabel("等待游戏画面…")
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview.setFixedSize(144, 38)
+        preview.setFixedSize(148, 111)
         preview.setStyleSheet("background:#F1F5FB;color:#66768D;border:1px solid #E2E8F0;border-radius:7px;")
         panel_layout.addWidget(preview)
 
