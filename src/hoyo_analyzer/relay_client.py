@@ -64,6 +64,8 @@ class SlaveRelayClient(QObject):
     connection_changed = Signal(bool, str)
     event_result = Signal(bool, str)
     pairing_result = Signal(bool, str, object)
+    profile_received = Signal(object)
+    profile_result = Signal(bool, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -134,6 +136,13 @@ class SlaveRelayClient(QObject):
             },
             "status",
         )
+
+    def rename_device(self, name: str) -> None:
+        name = name.strip()
+        if not self.configured or not 1 <= len(name) <= 64:
+            self.profile_result.emit(False, "请先配对，并填写 1～64 字的从机名称")
+            return
+        self._post("/api/v1/slave/profile", {"display_name": name}, "profile")
 
     def send_event(self, payload: dict[str, Any]) -> None:
         if not self.configured:
@@ -254,6 +263,8 @@ class SlaveRelayClient(QObject):
             self._set_online(False, message)
             if kind == "event":
                 self.event_result.emit(False, f"云端告警发送失败：{message}")
+            elif kind == "profile":
+                self.profile_result.emit(False, message)
             return
 
         reply.setProperty("relay_kind", kind)
@@ -288,6 +299,8 @@ class SlaveRelayClient(QObject):
             self.event_result.emit(False, f"云端告警发送失败：{message}")
         elif str(reply.property("relay_kind")) == "pair":
             self.pairing_result.emit(False, message, {})
+        elif str(reply.property("relay_kind")) == "profile":
+            self.profile_result.emit(False, message)
         # Abort after publishing the timeout state. The finished callback will
         # clean up the reply without emitting a second result.
         reply.abort()
@@ -326,6 +339,10 @@ class SlaveRelayClient(QObject):
                 self._save_log_outbox()
                 self._send_next_log()
         if success:
+            if kind in {"heartbeat", "profile"} and data.get("display_name"):
+                self.profile_received.emit(data)
+            if kind == "profile":
+                self.profile_result.emit(True, "从机名称已保存")
             if kind == "pair":
                 self.pairing_result.emit(True, "从机配对成功", data)
                 return
@@ -338,6 +355,8 @@ class SlaveRelayClient(QObject):
             self.event_result.emit(False, f"云端告警发送失败：{message or '连接失败'}")
         elif kind == "pair":
             self.pairing_result.emit(False, message or "配对失败", {})
+        elif kind == "profile":
+            self.profile_result.emit(False, message or "名称保存失败")
 
     def _set_online(self, online: bool, message: str) -> None:
         self._online = online

@@ -124,7 +124,6 @@
       const header = append(card, "div", "device-header");
       const name = append(header, "div", "device-name");
       append(name, "h2", "", value(device.display_name, value(device.hostname, device.device_id)));
-      append(name, "div", "device-id", device.device_id);
       const meta = append(name, "div", "device-meta");
       append(meta, "span", "", `心跳 ${formatTime(device.last_seen_at)}`);
       append(meta, "span", "", `版本 ${value(device.app_version)}`);
@@ -146,7 +145,7 @@
       const head = append(card, "div", "alert-head");
       const identity = append(head, "div", "alert-identity");
       append(identity, "strong", "", eventLabels[item.event_type] || value(item.event_type, "未知告警"));
-      append(identity, "small", "", `${value(item.device_id)} · ${[item.server_name, item.role_name].filter(Boolean).join(" / ") || "未识别角色"}`);
+      append(identity, "small", "", `${item.display_name || item.hostname || item.device_id} · ${[item.server_name, item.role_name].filter(Boolean).join(" / ") || "未识别角色"}`);
       append(head, "span", `alert-state ${item.acked_at ? "handled" : "pending"}`, item.acked_at ? "已处理" : "未处理");
       const body = append(card, "div", "alert-body");
       append(body, "span", "", `发生 ${formatTime(item.occurred_at)}`);
@@ -188,7 +187,7 @@
           : ["panel_opened", "panel_closed"].includes(item.event_type) ? action + (panelNames[item.panel_type] || "未知面板")
           : labels[item.event_type] || item.event_type;
         append(identity, "strong", "", item.message || label);
-        append(identity, "small", "", `${item.display_name || item.hostname || item.device_id} · ${item.device_id}`);
+        append(identity, "small", "", item.display_name || item.hostname || item.device_id);
         append(card, "div", "alert-body", [item.server_name, item.role_name].filter(Boolean).join(" / ") || "整台从机");
         const body = append(card, "div", "alert-body");
         const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
@@ -225,10 +224,9 @@
       const head = append(card, "div", "managed-head");
       const identity = append(head, "div", "managed-identity");
       append(identity, "strong", "", value(device.display_name, value(device.hostname, device.device_id)));
-      append(identity, "small", "", device.device_id);
       append(head, "span", `status-badge ${device.disabled || isOffline(device.last_seen_at) ? "badge-offline" : "badge-online"}`, device.disabled ? "已禁用" : isOffline(device.last_seen_at) ? "离线" : "在线");
       const info = append(card, "div", "managed-info");
-      append(info, "span", "", `主机名 ${value(device.hostname)}`);
+      card.title = `设备标识 ${device.device_id}`;
       append(info, "span", "", `版本 ${value(device.app_version)}`);
       append(info, "span", "", `最后连接 ${formatTime(device.last_seen_at)}`);
       if (device.note) append(info, "span", "", `备注 ${device.note}`);

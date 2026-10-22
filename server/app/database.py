@@ -512,6 +512,14 @@ class RelayDatabase:
                 (utc_now(), event_id),
             )
 
+    def device_profile(self, account_id: int, device_id: str) -> dict[str, str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT display_name,hostname FROM devices WHERE account_id=? AND device_id=? AND removed_at IS NULL",
+                (account_id, device_id),
+            ).fetchone()
+        return {"display_name": str(row["display_name"] or row["hostname"] or device_id)} if row else {}
+
     def list_devices(self, account_id: int) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(

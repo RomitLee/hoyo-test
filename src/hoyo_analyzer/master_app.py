@@ -63,7 +63,7 @@ class MasterSettingsDialog(QDialog):
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
         title = QLabel("主机控制中心")
-        title.setStyleSheet("font-size:20px;font-weight:800;color:#F3F7FD;")
+        title.setStyleSheet("font-size:20px;font-weight:800;color:#243247;")
         subtitle = QLabel("配置数据刷新频率和主机提醒")
         subtitle.setStyleSheet(f"color:{MUTED};font-size:11px;")
         root.addWidget(title)
@@ -109,7 +109,7 @@ class AccountDialog(QDialog):
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(12)
         title = QLabel("登录主机账号")
-        title.setStyleSheet("font-size:20px;font-weight:800;color:#F3F7FD;")
+        title.setStyleSheet("font-size:20px;font-weight:800;color:#243247;")
         root.addWidget(title)
         note = QLabel("登录后只显示当前账号绑定的从机和告警记录。")
         note.setStyleSheet(f"color:{MUTED};")
@@ -125,7 +125,7 @@ class AccountDialog(QDialog):
         root.addLayout(form)
         self.message_label = QLabel("")
         self.message_label.setWordWrap(True)
-        self.message_label.setStyleSheet("color:#FFB7C5;")
+        self.message_label.setStyleSheet("color:#B42335;")
         root.addWidget(self.message_label)
         buttons = QHBoxLayout()
         self.register_button = QPushButton("注册新账号")
@@ -148,8 +148,8 @@ class AccountDialog(QDialog):
 class MasterWindow(QMainWindow):
     """Receive pending alarms from all configured slave computers."""
 
-    COLUMNS: ClassVar[tuple[str, ...]] = ("编号", "从机", "区服 / 角色", "告警", "发生时间", "状态", "操作")
-    STATUS_COLUMNS: ClassVar[tuple[str, ...]] = ("从机编号", "窗口 / 角色", "现金", "当前状态", "空格", "置信度", "遮挡", "最小化", "在线")
+    COLUMNS: ClassVar[tuple[str, ...]] = ("编号", "从机名称", "区服 / 角色", "告警", "发生时间", "状态", "操作")
+    STATUS_COLUMNS: ClassVar[tuple[str, ...]] = ("从机名称", "窗口 / 角色", "现金", "当前状态", "空格", "置信度", "遮挡", "最小化", "在线")
 
     def __init__(self) -> None:
         super().__init__()
@@ -163,6 +163,7 @@ class MasterWindow(QMainWindow):
         self.window_status: list[dict[str, Any]] = []
         self._monitor_logs_before_id = 0
         self._monitor_logs_next_id = 0
+        self._monitor_logs_data: dict[str, Any] = {}
         self.alert: QMessageBox | None = None
         self.account_dialog: AccountDialog | None = None
         self._build_ui()
@@ -206,8 +207,8 @@ class MasterWindow(QMainWindow):
         layout.setSpacing(7)
         header = QHBoxLayout()
         header_text = QVBoxLayout()
-        title = QLabel("主机告警中心")
-        title.setStyleSheet("font-size:22px;font-weight:800;color:#F3F7FD;")
+        title = QLabel("主机监控中心")
+        title.setStyleSheet("font-size:22px;font-weight:800;color:#243247;")
         self.subtitle_label = QLabel(f"多从机状态汇总 · 实时告警处置 · 客户端 {__version__}")
         self.subtitle_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
         header_text.addWidget(title)
@@ -215,10 +216,10 @@ class MasterWindow(QMainWindow):
         header.addLayout(header_text)
         header.addStretch(1)
         self.device_label = QLabel("从机：0 台")
-        self.device_label.setStyleSheet(pill_style("#C9D6E8", "#17233A", "#30415D"))
+        self.device_label.setStyleSheet(pill_style("#52647D", "#F1F5FB", "#D6DFEC"))
         header.addWidget(self.device_label)
         self.status_label = QLabel("云端：未连接")
-        self.status_label.setStyleSheet(pill_style("#FFD8DF", "#351824", "#6E2941"))
+        self.status_label.setStyleSheet(pill_style("#B42335", "#FFF0F2", "#F2BCC4"))
         header.addWidget(self.status_label)
         connect_button = QPushButton("连接")
         connect_button.setProperty("role", "primary")
@@ -241,7 +242,7 @@ class MasterWindow(QMainWindow):
         self.tabs.addTab(monitor_page, "监控")
 
         self.window_summary = QLabel("从机状态 · 等待同步")
-        self.window_summary.setStyleSheet(banner_style("#B9D8FF", "#122C4D", "#245284"))
+        self.window_summary.setStyleSheet(banner_style("#2563DB", "#EEF4FF", "#BBD2FA"))
         monitor_toolbar = QHBoxLayout()
         monitor_toolbar.addWidget(self.window_summary, 1)
         self.status_updated_label = QLabel("列表更新时间：尚未同步")
@@ -270,7 +271,7 @@ class MasterWindow(QMainWindow):
         self.tabs.addTab(alarm_page, "告警")
 
         self.summary = QLabel("告警记录 · 暂无未处理告警")
-        self.summary.setStyleSheet(banner_style("#C7FBE8", "#0A3B31", "#176A58"))
+        self.summary.setStyleSheet(banner_style("#18734D", "#E8F7EF", "#B6E1CA"))
         alarm_layout.addWidget(self.summary)
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
@@ -307,18 +308,18 @@ class MasterWindow(QMainWindow):
         refresh_button.clicked.connect(lambda: self.client.poll())
         device_toolbar.addWidget(refresh_button)
         device_layout.addLayout(device_toolbar)
-        self.device_table = QTableWidget(0, 8)
+        self.device_table = QTableWidget(0, 7)
         self.device_table.setHorizontalHeaderLabels(
-            ("从机名称", "设备编号", "在线", "最后连接", "版本", "备注", "状态", "操作")
+            ("从机名称", "在线", "最后连接", "版本", "备注", "状态", "操作")
         )
         self.device_table.verticalHeader().setVisible(False)
         self.device_table.setAlternatingRowColors(True)
         self.device_table.setShowGrid(False)
         self.device_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.device_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        for column, width in enumerate((95, 90, 45, 110, 72, 80, 98, 190)):
+        for column, width in enumerate((130, 45, 110, 72, 80, 98, 190)):
             self.device_table.setColumnWidth(column, width)
-        self.device_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.device_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         device_layout.addWidget(self.device_table, 1)
         device_note = QLabel(
             "配对码 5 分钟内有效且只能使用一次；重新配对会立即让旧凭据失效。"
@@ -341,7 +342,7 @@ class MasterWindow(QMainWindow):
         toolbar.addWidget(self.older_logs_button)
         log_layout.addLayout(toolbar)
         self.monitor_log_table = QTableWidget(0, 7)
-        self.monitor_log_table.setHorizontalHeaderLabels(("发生时间", "从机", "区服 / 角色", "类型", "遮挡", "最小化", "原因"))
+        self.monitor_log_table.setHorizontalHeaderLabels(("发生时间", "从机名称", "区服 / 角色", "类型", "遮挡", "最小化", "原因"))
         self.monitor_log_table.verticalHeader().setVisible(False)
         self.monitor_log_table.setAlternatingRowColors(True)
         self.monitor_log_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -362,6 +363,7 @@ class MasterWindow(QMainWindow):
 
     @Slot(object)
     def _on_monitor_logs_received(self, data: dict[str, Any]) -> None:
+        self._monitor_logs_data = data
         logs = data.get("logs", [])
         self.monitor_log_table.setRowCount(len(logs))
         labels = {"window_occluded": "遮挡", "window_minimized": "最小化",
@@ -382,7 +384,7 @@ class MasterWindow(QMainWindow):
                 event_label = item.get("message") or panel_event_name(item["event_type"], item.get("panel_type"))
             values = (
                 log_time,
-                str(item.get("display_name") or item.get("hostname") or item["device_id"]),
+                self._device_name(item),
                 " / ".join(filter(None, (item.get("server_name"), item.get("role_name")))) or "整台从机",
                 event_label, percent_text,
                 "—" if item.get("minimized") is None else "是" if item["minimized"] else "否",
@@ -452,7 +454,7 @@ class MasterWindow(QMainWindow):
     @Slot()
     def _connect_now(self) -> None:
         self.status_label.setText("云端：连接中…")
-        self.status_label.setStyleSheet(pill_style("#FFE9A8", "#3C2B10", "#6E5018"))
+        self.status_label.setStyleSheet(pill_style("#986300", "#FFF7E3", "#EFD49A"))
         self.client.poll()
 
     @Slot()
@@ -476,9 +478,9 @@ class MasterWindow(QMainWindow):
     def _on_connection_changed(self, online: bool, message: str) -> None:
         self.status_label.setText("云端：已连接" if online else "云端：未连接")
         self.status_label.setStyleSheet(
-            pill_style("#C7FBE8", "#0A3B31", "#176A58")
+            pill_style("#18734D", "#E8F7EF", "#B6E1CA")
             if online
-            else pill_style("#FFD8DF", "#351824", "#6E2941")
+            else pill_style("#B42335", "#FFF0F2", "#F2BCC4")
         )
         self.status_label.setToolTip(message)
 
@@ -510,11 +512,22 @@ class MasterWindow(QMainWindow):
                 pass
         self.device_label.setText(f"从机：{online}/{len(devices)} 台在线")
         self.device_label.setStyleSheet(
-            pill_style("#C7FBE8", "#0A3B31", "#176A58")
+            pill_style("#18734D", "#E8F7EF", "#B6E1CA")
             if online
-            else pill_style("#C9D6E8", "#17233A", "#30415D")
+            else pill_style("#52647D", "#F1F5FB", "#D6DFEC")
         )
         self._render_devices()
+        self._render_status()
+        self._render_events()
+        if self._monitor_logs_data:
+            self._on_monitor_logs_received(self._monitor_logs_data)
+
+    def _device_name(self, item: dict[str, Any] | str) -> str:
+        data = item if isinstance(item, dict) else {"device_id": item}
+        device_id = str(data.get("device_id") or "")
+        current = next((device for device in self.devices if device.get("device_id") == device_id), data)
+        return str(current.get("display_name") or current.get("hostname")
+                   or data.get("display_name") or data.get("hostname") or device_id or "未命名从机")
 
     def _render_devices(self) -> None:
         now = datetime.now(UTC)
@@ -533,8 +546,7 @@ class MasterWindow(QMainWindow):
             if not states:
                 states.append("正常")
             values = (
-                str(device.get("display_name") or device.get("hostname") or device_id),
-                device_id,
+                self._device_name(device),
                 "在线" if online else "离线",
                 self._format_time(device.get("last_seen_at")),
                 reported_version,
@@ -545,11 +557,11 @@ class MasterWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setToolTip(
                     f"主机版本：{__version__}\n从机版本：{reported_version}"
-                    if column in {4, 6} and version_mismatch
-                    else value
+                    if column in {3, 5} and version_mismatch
+                    else f"{value}\n设备标识：{device_id}" if column == 0 else value
                 )
-                if version_mismatch and column in {4, 6}:
-                    item.setForeground(QColor("#FBBF24"))
+                if version_mismatch and column in {3, 5}:
+                    item.setForeground(QColor("#986300"))
                 self.device_table.setItem(row, column, item)
             actions = QWidget()
             action_layout = QHBoxLayout(actions)
@@ -573,7 +585,7 @@ class MasterWindow(QMainWindow):
             )
             for button in (edit_button, toggle_button, reissue_button, remove_button):
                 action_layout.addWidget(button)
-            self.device_table.setCellWidget(row, 7, actions)
+            self.device_table.setCellWidget(row, 6, actions)
 
     def _edit_device(self, device: dict[str, Any]) -> None:
         device_id = str(device.get("device_id") or "")
@@ -581,6 +593,9 @@ class MasterWindow(QMainWindow):
             self, "编辑从机", "从机名称：", text=str(device.get("display_name") or "")
         )
         if not accepted or not name.strip():
+            return
+        if len(name.strip()) > 64:
+            QMessageBox.warning(self, "名称过长", "从机名称最多 64 字")
             return
         note, accepted = QInputDialog.getText(
             self, "编辑从机", "备注：", text=str(device.get("note") or "")
@@ -598,7 +613,7 @@ class MasterWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "重新配对",
-            f"重新配对会立即使 {device_id} 的旧凭据失效。是否继续？",
+            f"重新配对会立即使 {self._device_name(device_id)} 的旧凭据失效。是否继续？",
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.client.reissue_device(device_id)
@@ -607,7 +622,7 @@ class MasterWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "移除从机",
-            f"确定移除 {device_id} 吗？该从机将无法继续上报，历史告警仍会保留。",
+            f"确定移除 {self._device_name(device_id)} 吗？该从机将无法继续上报，历史告警仍会保留。",
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.client.remove_device(device_id)
@@ -619,7 +634,7 @@ class MasterWindow(QMainWindow):
             return
         code = str(data.get("pairing_code") or "")
         target = str(data.get("target_device_id") or "")
-        prefix = f"{target} 重新配对码" if target else "新从机配对码"
+        prefix = f"{self._device_name(target)} 重新配对码" if target else "新从机配对码"
         self.pairing_code_label.setText(f"{prefix}：{code}（5 分钟有效）")
         self.tabs.setCurrentIndex(self.device_tab_index)
 
@@ -641,9 +656,9 @@ class MasterWindow(QMainWindow):
             online = self._is_device_online(device, now)
             windows = device.get("windows") or []
             if not windows:
-                rows.append({"device_id": device_id, "online": online, "window": None})
+                rows.append({"device_id": device_id, "display_name": self._device_name(device), "online": online, "window": None})
             else:
-                rows.extend({"device_id": device_id, "online": online, "window": window} for window in windows)
+                rows.extend({"device_id": device_id, "display_name": self._device_name(device), "online": online, "window": window} for window in windows)
         self.window_status = rows
         self._render_status()
 
@@ -677,7 +692,7 @@ class MasterWindow(QMainWindow):
             empty = window.get("empty_slots")
             confidence = window.get("confidence")
             values = (
-                str(item.get("device_id") or "-"),
+                self._device_name(item),
                 f"{window.get('server_name') or '-'} / {window.get('role_name') or '未监控窗口'}" if window else "暂无游戏窗口",
                 self._format_money(window, "cash", bool(item.get("online"))),
                 status_text,
@@ -716,7 +731,7 @@ class MasterWindow(QMainWindow):
             event_id = int(item["server_event_id"])
             values = (
                 str(event_id),
-                str(item.get("device_id") or "-"),
+                self._device_name(item),
                 f"{item.get('server_name') or '未识别'} / {item.get('role_name') or '未识别'}",
                 EVENT_NAMES.get(str(item.get("event_type")), str(item.get("event_type") or "未知")),
                 self._format_time(item.get("occurred_at")),
@@ -734,9 +749,9 @@ class MasterWindow(QMainWindow):
         count = sum(not item.get("acked_at") for item in items)
         self.summary.setText(f"告警记录 · 共 {len(items)} 条 · 未处理 {count} 条 · 已处理 {len(items) - count} 条")
         self.summary.setStyleSheet(
-            banner_style("#C7FBE8", "#0A3B31", "#176A58")
+            banner_style("#18734D", "#E8F7EF", "#B6E1CA")
             if count == 0
-            else banner_style("#FFD8DF", "#351824", "#6E2941")
+            else banner_style("#B42335", "#FFF0F2", "#F2BCC4")
         )
         if count == 0:
             self._close_alarm()
@@ -772,7 +787,7 @@ class MasterWindow(QMainWindow):
         self.alert.setIcon(QMessageBox.Icon.Warning)
         self.alert.setText(name)
         self.alert.setInformativeText(
-            f"{event.get('device_id')}｜{event.get('server_name') or '未识别'} / {event.get('role_name') or '未识别'}\n"
+            f"{self._device_name(event)}｜{event.get('server_name') or '未识别'} / {event.get('role_name') or '未识别'}\n"
             "请在主机告警列表中确认处理。"
         )
         button = self.alert.button(QMessageBox.StandardButton.Close)

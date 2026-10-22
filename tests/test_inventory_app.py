@@ -60,7 +60,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
     try:
         assert window.windowTitle() == APP_NAME
         assert not window.windowIcon().isNull()
-        assert (window.width(), window.height()) == (600, 560)
+        assert (window.width(), window.height()) == (560, 560)
         assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert window.title_bar.height() == 32
         assert window.add_window_button.text() == "＋ 增加窗口"
@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V1.8.3"
+        assert __version__ == "V1.9.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -92,6 +92,54 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert not hasattr(window, "equipment_button")
         assert not hasattr(window, "navigation")
     finally:
+        window.close()
+        app.processEvents()
+
+
+def test_slave_name_edits_wait_for_server_confirmation_and_cache_new_name(monkeypatch):
+    monkeypatch.setattr("hoyo_analyzer.relay_client.SlaveRelayClient._post", lambda *args: None)
+    monkeypatch.setattr("hoyo_analyzer.relay_client.SlaveRelayClient.flush_monitor_logs", lambda *args: None)
+    settings = SlaveSettings(device_id="device", device_token="token", display_name="旧名称")
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.load_slave_settings", lambda: settings)
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    saved, requested = [], []
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.save_slave_settings", lambda value: saved.append(value.display_name))
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.QInputDialog.getText", lambda *args, **kwargs: (" 收购电脑02 ", True))
+    window = InventoryMonitorWindow()
+    try:
+        monkeypatch.setattr(window.relay_client, "rename_device", requested.append)
+        window._edit_device_name()
+        assert requested == ["收购电脑02"]
+        assert settings.display_name == "旧名称"
+        window._on_device_profile({"display_name": "收购电脑02"})
+        window._on_profile_result(True, "已保存")
+        assert settings.display_name == "收购电脑02"
+        assert saved == ["收购电脑02"]
+        assert window.device_name_label.text() == "收购电脑02"
+        assert window.rename_button.isEnabled()
+        window._on_device_profile({"display_name": "主机改名"})
+        assert window.device_name_label.text() == "主机改名"
+    finally:
+        window.close()
+
+
+def test_six_cards_fit_560_width_without_horizontal_or_vertical_scrolling(monkeypatch):
+    app = QApplication.instance()
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    try:
+        for index in range(6):
+            account = parse_account_info(f"[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 角色{index}[5458823{index}])]")
+            panel = window._make_output_panel(index + 1, account)[0]
+            window.sessions[index + 1] = SimpleNamespace(output_panel=panel)
+        window._update_output_panels()
+        window.show()
+        app.processEvents()
+        assert (window.width(), window.height()) == (560, 560)
+        assert window.output_scroll.horizontalScrollBar().maximum() == 0
+        assert window.output_scroll.verticalScrollBar().maximum() == 0
+    finally:
+        window.sessions.clear()
         window.close()
         app.processEvents()
 
@@ -130,7 +178,7 @@ def test_mini_mode_preserves_runtime_and_restores_geometry(monkeypatch) -> None:
         app.processEvents()
 
         assert not window._mini_mode
-        assert (window.width(), window.height()) == (600, 560)
+        assert (window.width(), window.height()) == (560, 560)
         assert window.pos() == original_position
         assert window.full_content.isVisible()
         assert window.mini_content.isHidden()
@@ -448,7 +496,8 @@ def test_output_panel_core_information_does_not_overlap(monkeypatch) -> None:
             {"status": "not_full", "empty_count": 6, "occupied_count": 14, "confidence": 0.96},
         )
 
-        assert detail.text() == "空格 6｜已拥有 14｜置信度 96%"
+        assert "现金 未识别" in detail.text()
+        assert "空格 6" in detail.text() and "置信度 96%" in detail.text()
         widgets = (title, preview, status, detail, window_state)
         assert all(first.geometry().bottom() < second.geometry().top() for first, second in pairwise(widgets))
     finally:

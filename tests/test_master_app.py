@@ -36,13 +36,13 @@ def event(event_id=1, acked_at=None):
 
 
 def test_acknowledged_row_remains_and_button_disappears(window):
-    assert "#070B14" in window.styleSheet()
+    assert "#F5F7FB" in window.styleSheet()
     assert "QTabWidget::pane" in window.styleSheet()
     assert "QTabBar::tab:selected" in window.styleSheet()
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert window.title_bar.height() == 32
-    assert __version__ == "V1.8.3"
+    assert __version__ == "V1.9.0"
     assert __version__ in window.subtitle_label.text()
     window._on_events_received([event()])
     assert window.table.cellWidget(0, 6) is not None
@@ -154,11 +154,11 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
     assert window.tabs.count() == 4
     assert window.device_table.rowCount() == 2
     assert window.device_table.item(0, 0).text() == "工作室电脑"
-    assert window.device_table.item(0, 2).text() == "在线"
-    assert window.device_table.item(0, 4).text() == __version__
-    assert window.device_table.item(0, 6).text() == "正常"
-    assert window.device_table.item(1, 6).text() == "已禁用 · 版本不匹配"
-    assert window.device_table.cellWidget(0, 7) is not None
+    assert window.device_table.item(0, 1).text() == "在线"
+    assert window.device_table.item(0, 3).text() == __version__
+    assert window.device_table.item(0, 5).text() == "正常"
+    assert window.device_table.item(1, 5).text() == "已禁用 · 版本不匹配"
+    assert window.device_table.cellWidget(0, 6) is not None
 
     window._on_pairing_code_received(
         True, "", {"pairing_code": "123456", "target_device_id": None}
@@ -178,9 +178,9 @@ def test_device_management_warns_when_slave_version_differs(window):
         }
     ])
 
-    assert window.device_table.item(0, 4).text() == "V0.9.0"
-    assert window.device_table.item(0, 6).text() == "版本不匹配"
-    assert f"主机版本：{__version__}" in window.device_table.item(0, 6).toolTip()
+    assert window.device_table.item(0, 3).text() == "V0.9.0"
+    assert window.device_table.item(0, 5).text() == "版本不匹配"
+    assert f"主机版本：{__version__}" in window.device_table.item(0, 5).toolTip()
 
 
 def test_monitor_log_page_renders_history_without_alarms(window, monkeypatch):
@@ -233,3 +233,19 @@ def test_monitor_and_alarm_are_separate_and_refresh_time_is_shared(window):
     stamp = window.status_updated_label.text()
     window._on_connection_changed(False, "连接失败")
     assert window.status_updated_label.text() == stamp
+
+
+def test_device_name_is_shared_across_status_alarms_and_history(window):
+    now = datetime.now(UTC).isoformat()
+    window._on_status_received([{"device_id": "slave-01", "display_name": "旧名称", "last_seen_at": now,
+                                 "windows": [{"role_name": "角色"}]}])
+    window._on_events_received([{**event(), "display_name": "旧名称"}])
+    window._on_monitor_logs_received({"logs": [{"id": 1, "device_id": "slave-01", "display_name": "旧名称",
+                                                "event_type": "monitoring_started", "occurred_at": now}]})
+    window._on_devices_received([{"device_id": "slave-01", "display_name": "收购电脑01",
+                                  "app_version": __version__, "last_seen_at": now}])
+    assert window.device_table.columnCount() == 7
+    assert window.status_table.item(0, 0).text() == "收购电脑01"
+    assert window.table.item(0, 1).text() == "收购电脑01"
+    assert window.monitor_log_table.item(0, 1).text() == "收购电脑01"
+    assert "设备标识：slave-01" in window.device_table.item(0, 0).toolTip()

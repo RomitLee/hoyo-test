@@ -23,6 +23,7 @@ def test_slave_settings_are_saved_and_loaded(tmp_path) -> None:
         inventory_capacity_threshold=3,
         relay_url="https://relay.example.com",
         device_id="slave-01",
+        display_name="收购电脑01",
         device_token="device-secret-token",
         installation_id="installation-1234567890",
     )
@@ -35,6 +36,7 @@ def test_slave_settings_are_saved_and_loaded(tmp_path) -> None:
         "inventory_capacity_threshold",
         "relay_url",
         "device_id",
+        "display_name",
         "device_token",
         "installation_id",
         "pairing_code",

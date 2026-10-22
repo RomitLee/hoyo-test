@@ -111,3 +111,38 @@ def test_event_payload_matches_server_contract() -> None:
     assert datetime.fromisoformat(payload["occurred_at"]).tzinfo is not None
     assert payload["server_name"] == "秦淮风光"
     assert payload["empty_slots"] == 0
+
+
+def test_slave_name_roundtrip_and_legacy_heartbeat_compatibility(monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from PySide6.QtNetwork import QNetworkReply
+    from PySide6.QtWidgets import QApplication
+
+    from hoyo_analyzer.relay_client import SlaveRelayClient
+
+    client = SlaveRelayClient(QApplication.instance())
+    requests, profiles, results = [], [], []
+    client.configure("device", "token")
+    monkeypatch.setattr(client, "_post", lambda path, data, kind: requests.append((path, data, kind)))
+    client.profile_received.connect(profiles.append)
+    client.profile_result.connect(lambda ok, message: results.append(ok))
+    client.rename_device(" 收购电脑01 ")
+    assert requests == [("/api/v1/slave/profile", {"display_name": "收购电脑01"}, "profile")]
+
+    def reply(kind, data, success=True):
+        return SimpleNamespace(property=lambda key: kind if key == "relay_kind" else None,
+                               attribute=lambda key: 200 if success else 400,
+                               error=lambda: QNetworkReply.NetworkError.NoError,
+                               errorString=lambda: "bad request", readAll=lambda: json.dumps(data).encode(),
+                               deleteLater=lambda: None)
+
+    client._on_finished(reply("profile", {"display_name": "收购电脑01"}))
+    client._on_finished(reply("heartbeat", {"display_name": "主机修改名称"}))
+    client._on_finished(reply("heartbeat", {"server_time": "legacy"}))
+    client._on_finished(reply("profile", {"detail": "保存失败"}, False))
+    assert [row["display_name"] for row in profiles] == ["收购电脑01", "主机修改名称"]
+    assert results == [True, False]
+    client._log_timer.stop()
+    client._heartbeat_timer.stop()

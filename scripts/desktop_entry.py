@@ -107,13 +107,17 @@ def _run_package_ui_self_test() -> int:
             "title_bar_height": window.title_bar.height(),
             "icon_loaded": not icon.isNull() and not window.windowIcon().isNull(),
             "add_window_button": window.add_window_button.text(),
+            "light_theme": "#F5F7FB" in window.styleSheet(),
+            "rename_button": hasattr(window, "rename_button"),
         }
         result.update(
             {
                 "ok": all(
                     (
                         checks["window_visible"],
-                        checks["window_size"] == [600, 560],
+                        checks["window_size"] == [560, 560],
+                        checks["light_theme"],
+                        checks["rename_button"],
                         checks["title_bar_height"] == 32,
                         checks["icon_loaded"],
                         checks["add_window_button"] == "＋ 增加窗口",

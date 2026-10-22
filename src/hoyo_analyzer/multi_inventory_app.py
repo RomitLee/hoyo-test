@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -100,18 +102,18 @@ class MonitorSession:
 class InventoryMonitorWindow(QMainWindow):
     """Monitor up to eight game windows and show the selected live preview."""
 
-    FULL_WIDTH = 600
+    FULL_WIDTH = 560
     FULL_HEIGHT = 560
     OUTPUT_COLUMNS = 3
     MINI_WIDTH = 300
     MINI_HEIGHT = 90
 
     STATUS_PRESENTATION: ClassVar[dict[str, tuple[str, str, str]]] = {
-        "full": ("背包已满", "#FFD8DF", "#521D31"),
-        "almost_full": ("背包接近满", "#FFE9A8", "#4B3511"),
-        "not_full": ("背包未满", "#C7FBE8", "#0A4639"),
-        "inventory_closed": ("背包未打开", "#FFE9A8", "#4B3511"),
-        "invalid": ("背包被遮挡", "#FFD8DF", "#521D31"),
+        "full": ("背包已满", "#B42335", "#FFF0F2"),
+        "almost_full": ("背包接近满", "#986300", "#FFF7E3"),
+        "not_full": ("背包未满", "#18734D", "#E8F7EF"),
+        "inventory_closed": ("背包未打开", "#986300", "#FFF7E3"),
+        "invalid": ("背包被遮挡", "#B42335", "#FFF0F2"),
     }
 
     def __init__(self, config_path: Path | None = None) -> None:
@@ -138,6 +140,8 @@ class InventoryMonitorWindow(QMainWindow):
         self.relay_client.connection_changed.connect(self._on_relay_connection_changed)
         self.relay_client.event_result.connect(self._on_relay_event_result)
         self.relay_client.pairing_result.connect(self._on_pairing_result)
+        self.relay_client.profile_received.connect(self._on_device_profile)
+        self.relay_client.profile_result.connect(self._on_profile_result)
         self._configure_relay()
         self.relay_client.send_monitor_log("monitoring_started", "startup")
 
@@ -181,11 +185,20 @@ class InventoryMonitorWindow(QMainWindow):
 
         heading = QVBoxLayout()
         heading_text = QVBoxLayout()
-        title = QLabel("梦幻西游背包监控")
-        title.setStyleSheet("font-size:16px;font-weight:800;color:#F3F7FD;")
+        title = QLabel(self.slave_settings.display_name or "未命名从机")
+        self.device_name_label = title
+        self.device_name_label.setTextFormat(Qt.TextFormat.PlainText)
+        title.setStyleSheet("font-size:16px;font-weight:800;color:#243247;")
         self.subtitle_label = QLabel(f"最多监控 8 个窗口 · 客户端 {__version__}")
         self.subtitle_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
-        heading_text.addWidget(title)
+        name_row = QHBoxLayout()
+        name_row.addWidget(title)
+        self.rename_button = QPushButton("编辑名称")
+        self.rename_button.setFixedWidth(76)
+        self.rename_button.clicked.connect(self._edit_device_name)
+        name_row.addWidget(self.rename_button)
+        name_row.addStretch(1)
+        heading_text.addLayout(name_row)
         heading_text.addWidget(self.subtitle_label)
         title.setToolTip(self.subtitle_label.text())
         self.subtitle_label.hide()
@@ -216,7 +229,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.settings_button.clicked.connect(self._open_settings)
         heading_controls.addWidget(self.settings_button, 0, 3)
         self.host_status_label = QLabel("云端：未连接")
-        self.host_status_label.setStyleSheet(pill_style("#FFD8DF", "#351824", "#6E2941"))
+        self.host_status_label.setStyleSheet(pill_style("#B42335", "#FFF0F2", "#F2BCC4"))
         heading_controls.addWidget(self.host_status_label, 1, 1, Qt.AlignmentFlag.AlignRight)
         self.host_connect_button = QPushButton("连接")
         self.host_connect_button.setProperty("role", "primary")
@@ -241,7 +254,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.output_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.output_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.output_container = QWidget()
-        self.output_container.setMinimumWidth(524)
+        self.output_container.setMinimumWidth(488)
         self.output_grid = QGridLayout(self.output_container)
         self.output_grid.setContentsMargins(5, 5, 5, 5)
         self.output_grid.setHorizontalSpacing(5)
@@ -250,7 +263,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.output_placeholder = QLabel("尚未监控窗口，请点击上方“增加窗口”")
         self.output_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.output_placeholder.setStyleSheet(
-            f"color:{MUTED};background:#0A111E;border:1px dashed #30415D;border-radius:10px;padding:40px;"
+            f"color:{MUTED};background:#F8FAFD;border:1px dashed #D6DFEC;border-radius:10px;padding:40px;"
         )
         self.output_grid.addWidget(self.output_placeholder, 0, 0, 1, self.OUTPUT_COLUMNS)
         self.output_scroll.setWidget(self.output_container)
@@ -314,10 +327,10 @@ class InventoryMonitorWindow(QMainWindow):
         paused = self.monitoring_paused
         self.mini_status_label.setText("已暂停" if paused else "监控中")
         self.mini_status_label.setStyleSheet(
-            pill_style("#FFE9A8", "#4B3511", "#76571B") if paused else pill_style("#C7FBE8", "#0A3B31", "#176A58")
+            pill_style("#986300", "#FFF7E3", "#EFD49A") if paused else pill_style("#18734D", "#E8F7EF", "#B6E1CA")
         )
         self.mini_count_label.setText(f"监控窗口 {len(self.sessions)}")
-        self.mini_count_label.setStyleSheet(pill_style("#B9D8FF", "#16345A", "#285A91"))
+        self.mini_count_label.setStyleSheet(pill_style("#2563DB", "#EEF4FF", "#BBD2FA"))
 
     @Slot()
     def refresh_windows(self) -> None:
@@ -369,8 +382,8 @@ class InventoryMonitorWindow(QMainWindow):
             self.monitoring_button.setText("开始监控")
             self.monitoring_button.setToolTip("恢复所有窗口的背包分析和告警")
             self.monitoring_button.setStyleSheet(
-                "QPushButton{background:#0A4B3C;color:#D4FFEF;border:1px solid #13745E;"
-                "border-radius:7px;font-weight:700;padding:0 12px;}QPushButton:hover{background:#0D604D;}"
+                "QPushButton{background:#E8F7EF;color:#18734D;border:1px solid #B6E1CA;"
+                "border-radius:7px;font-weight:700;padding:0 12px;}QPushButton:hover{background:#DAF0E4;}"
             )
             sounding = bool(self._sounding_alerts)
             self._sounding_alerts.clear()
@@ -408,7 +421,7 @@ class InventoryMonitorWindow(QMainWindow):
                 session.minimized_alert_active = False
                 session.output_status.setText("监控已恢复，正在重新检测…")
                 session.output_status.setStyleSheet(
-                    "background:#16345A;color:#B9D8FF;border:1px solid #285A91;border-radius:6px;font-weight:800;"
+                    "background:#EEF4FF;color:#2563DB;border:1px solid #BBD2FA;border-radius:6px;font-weight:800;"
                 )
                 session.output_detail.setText("空格 -｜已拥有 -｜置信度 -")
                 session.output_preview.clear()
@@ -472,7 +485,7 @@ class InventoryMonitorWindow(QMainWindow):
     def _show_manual_pause_status(session: MonitorSession) -> None:
         session.output_status.setText("监控已手动暂停")
         session.output_status.setStyleSheet(
-            "background:#4B3511;color:#FFE9A8;border:1px solid #76571B;border-radius:6px;font-weight:800;"
+            "background:#FFF7E3;color:#986300;border:1px solid #EFD49A;border-radius:6px;font-weight:800;"
         )
         session.output_detail.setText("空格 -｜已拥有 -｜置信度 -")
         session.output_preview.clear()
@@ -513,7 +526,7 @@ class InventoryMonitorWindow(QMainWindow):
         online = hasattr(self, "relay_client") and self.relay_client.online
         self.host_status_label.setText("云端：已连接" if online else "云端：未连接")
         self.host_status_label.setStyleSheet(
-            pill_style("#C7FBE8", "#0A3B31", "#176A58") if online else pill_style("#FFD8DF", "#351824", "#6E2941")
+            pill_style("#18734D", "#E8F7EF", "#B6E1CA") if online else pill_style("#B42335", "#FFF0F2", "#F2BCC4")
         )
         configured = bool(self.slave_settings.device_id and self.slave_settings.device_token)
         self.host_status_label.setToolTip(
@@ -521,6 +534,40 @@ class InventoryMonitorWindow(QMainWindow):
         )
         self.host_connect_button.setVisible(True)
         self.host_connect_button.setEnabled(configured)
+        name = self.slave_settings.display_name or "未命名从机"
+        self.device_name_label.setText(self.device_name_label.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, 300))
+        self.device_name_label.setToolTip(name)
+        self.rename_button.setEnabled(configured)
+
+    @Slot()
+    def _edit_device_name(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self, "编辑从机名称", "从机名称（最多 64 字）：", text=self.slave_settings.display_name,
+        )
+        if not accepted:
+            return
+        name = name.strip()
+        if not 1 <= len(name) <= 64:
+            QMessageBox.warning(self, "名称无效", "请填写 1～64 字的从机名称")
+            return
+        self.rename_button.setEnabled(False)
+        self.relay_client.rename_device(name)
+
+    @Slot(object)
+    def _on_device_profile(self, data: dict[str, Any]) -> None:
+        name = str(data.get("display_name") or "").strip()
+        if name and name != self.slave_settings.display_name:
+            self.slave_settings.display_name = name
+            try:
+                save_slave_settings(self.slave_settings)
+            except OSError as exc:
+                self.log.appendPlainText(f"名称已同步，但本地缓存保存失败：{exc}")
+        self._refresh_host_status()
+
+    @Slot(bool, str)
+    def _on_profile_result(self, _success: bool, message: str) -> None:
+        self.rename_button.setEnabled(self.relay_client.configured)
+        self.log.appendPlainText(message)
 
     def _configure_relay(self) -> None:
         try:
@@ -540,14 +587,14 @@ class InventoryMonitorWindow(QMainWindow):
     def _connect_relay(self) -> None:
         self.host_connect_button.setEnabled(False)
         self.host_status_label.setText("云端：连接中…")
-        self.host_status_label.setStyleSheet(pill_style("#FFE9A8", "#3C2B10", "#6E5018"))
+        self.host_status_label.setStyleSheet(pill_style("#986300", "#FFF7E3", "#EFD49A"))
         self.relay_client.connect_now()
 
     @Slot(bool, str)
     def _on_relay_connection_changed(self, online: bool, message: str) -> None:
         self.host_status_label.setText("云端：已连接" if online else "云端：未连接")
         self.host_status_label.setStyleSheet(
-            pill_style("#C7FBE8", "#0A3B31", "#176A58") if online else pill_style("#FFD8DF", "#351824", "#6E2941")
+            pill_style("#18734D", "#E8F7EF", "#B6E1CA") if online else pill_style("#B42335", "#FFF0F2", "#F2BCC4")
         )
         self.host_status_label.setToolTip(message)
         self.host_connect_button.setEnabled(self.relay_client.configured)
@@ -567,6 +614,7 @@ class InventoryMonitorWindow(QMainWindow):
             return
         self.slave_settings.device_id = str(data.get("device_id") or "")
         self.slave_settings.device_token = str(data.get("device_token") or "")
+        self.slave_settings.display_name = str(data.get("display_name") or "")
         self.slave_settings.pairing_code = ""
         try:
             save_slave_settings(self.slave_settings)
@@ -574,7 +622,7 @@ class InventoryMonitorWindow(QMainWindow):
             QMessageBox.critical(self, "配对保存失败", f"无法保存设备身份：{exc}")
             return
         self._configure_relay()
-        self.log.appendPlainText(f"从机配对成功，设备编号：{self.slave_settings.device_id}")
+        self.log.appendPlainText(f"从机配对成功：{self.slave_settings.display_name or '未命名从机'}")
         self.relay_client.connect_now()
 
     def _send_host_alert(
@@ -677,10 +725,10 @@ class InventoryMonitorWindow(QMainWindow):
     ) -> tuple[QFrame, QLabel, QLabel, QLabel, QLabel, QLabel]:
         panel = QFrame()
         panel.setObjectName("outputCard")
-        panel.setFixedSize(168, 160)
+        panel.setFixedSize(156, 158)
         panel.setStyleSheet(
-            "QFrame#outputCard{background:#111B2E;border:1px solid #293A55;border-radius:10px;}"
-            "QFrame#outputCard:hover{border-color:#43638C;background:#142138;}"
+            "QFrame#outputCard{background:#FFFFFF;border:1px solid #E2E8F0;border-radius:10px;}"
+            "QFrame#outputCard:hover{border-color:#AAC6FA;background:#F5F9FF;}"
         )
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(5, 5, 5, 5)
@@ -689,7 +737,8 @@ class InventoryMonitorWindow(QMainWindow):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         title = QLabel(f"{account.secondary_region} / {account.role_name}")
-        title.setStyleSheet("font-size:11px;font-weight:800;color:#EAF1FB;")
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title.setStyleSheet("font-size:11px;font-weight:800;color:#243247;")
         title.setToolTip(
             f"二级区名：{account.secondary_region}\n角色：{account.role_name}"
             + (f"\n角色 ID：{account.role_id}" if account.role_id else "")
@@ -697,8 +746,8 @@ class InventoryMonitorWindow(QMainWindow):
         remove_button = QPushButton("移除")
         remove_button.setFixedSize(34, 20)
         remove_button.setStyleSheet(
-            "QPushButton{min-height:18px;padding:0;border:0;color:#778AA4;background:transparent;font-size:10px;}"
-            "QPushButton:hover{color:#FFD8DF;background:#4A1C2D;border-radius:5px;}"
+            "QPushButton{min-height:18px;padding:0;border:0;color:#66768D;background:transparent;font-size:10px;}"
+            "QPushButton:hover{color:#B42335;background:#FFE2E7;border-radius:5px;}"
         )
         remove_button.clicked.connect(lambda _checked=False, target=hwnd: self._request_remove_window(target))
         header.addWidget(title, 1)
@@ -707,22 +756,24 @@ class InventoryMonitorWindow(QMainWindow):
 
         preview = QLabel("等待游戏画面…")
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview.setFixedSize(156, 44)
-        preview.setStyleSheet("background:#050912;color:#7F91A9;border:1px solid #202D42;border-radius:7px;")
+        preview.setFixedSize(144, 38)
+        preview.setStyleSheet("background:#F1F5FB;color:#66768D;border:1px solid #E2E8F0;border-radius:7px;")
         panel_layout.addWidget(preview)
 
         status = QLabel("正在等待背包画面…")
         status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status.setFixedHeight(23)
+        status.setFixedHeight(20)
         status.setStyleSheet(
-            "background:#19263A;color:#AFC0D6;border:1px solid #2B3A51;border-radius:6px;font-weight:800;"
+            "background:#F1F5FB;color:#52647D;border:1px solid #D6DFEC;border-radius:6px;font-weight:800;"
         )
         detail = QLabel("空格 -｜已拥有 -｜置信度 -")
         occlusion = QLabel("遮挡 检测中｜最小化 否")
         for label in (detail, occlusion):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setFixedHeight(19)
-            label.setStyleSheet("font-size:11px;color:#9FB0C7;")
+            label.setStyleSheet("font-size:11px;color:#66768D;")
+        detail.setFixedHeight(34)
+        occlusion.setFixedHeight(17)
         panel_layout.addWidget(status)
         panel_layout.addWidget(detail)
         panel_layout.addWidget(occlusion)
@@ -799,18 +850,22 @@ class InventoryMonitorWindow(QMainWindow):
 
     def _apply_signal(self, session: MonitorSession, signal: dict[str, Any]) -> None:
         status = str(signal.get("status", "invalid"))
-        text, foreground, background = self.STATUS_PRESENTATION.get(status, ("未知状态", "#AFC0D6", "#19263A"))
+        text, foreground, background = self.STATUS_PRESENTATION.get(status, ("未知状态", "#52647D", "#F1F5FB"))
         panel_type = signal.get("panel_type")
         if panel_type in PANEL_NAMES and panel_type != "inventory":
-            text, foreground, background = PANEL_NAMES[panel_type], "#B9D8FF", "#16345A"
+            text, foreground, background = PANEL_NAMES[panel_type], "#2563DB", "#EEF4FF"
         session.output_status.setText(text)
         session.output_status.setStyleSheet(
             f"background:{background};color:{foreground};border:1px solid {foreground};"
             "border-radius:6px;font-weight:800;"
         )
+        cash = signal.get("cash")
+        cash_text = "未识别" if cash is None else f"{int(cash):,}"
+        qualifier = "上次 · " if cash is not None and not signal.get("cash_readable", signal.get("money_readable")) else ""
         session.output_detail.setText(
-            f"空格 {signal.get('empty_count', 0)}｜已拥有 {signal.get('occupied_count', 0)}｜"
-            f"置信度 {float(signal.get('confidence', 0.0)):.0%}"
+            f'<b style="color:#243247;">现金 {cash_text}</b><br>'
+            f'<span style="font-size:10px;">{qualifier}空格 {signal.get("empty_count", 0)} · '
+            f'置信度 {float(signal.get("confidence", 0.0)):.0%}</span>'
         )
 
     def _update_capacity_alert(
@@ -999,7 +1054,7 @@ class InventoryMonitorWindow(QMainWindow):
     def _show_minimized_status(self, session: MonitorSession) -> None:
         session.output_status.setText("检测已暂停")
         session.output_status.setStyleSheet(
-            "background:#4B3511;color:#FFE9A8;border:1px solid #76571B;border-radius:6px;font-weight:800;"
+            "background:#FFF7E3;color:#986300;border:1px solid #EFD49A;border-radius:6px;font-weight:800;"
         )
         session.output_detail.setText("空格 -｜已拥有 -｜置信度 -")
         session.output_preview.clear()
@@ -1053,7 +1108,7 @@ class InventoryMonitorWindow(QMainWindow):
         summary = message.strip().splitlines()[0] if message.strip() else "未知错误"
         session.output_status.setText("监控失败")
         session.output_status.setStyleSheet(
-            "background:#521D31;color:#FFD8DF;border:1px solid #87405A;border-radius:6px;font-weight:800;"
+            "background:#FFF0F2;color:#B42335;border:1px solid #F2BCC4;border-radius:6px;font-weight:800;"
         )
         account_label = f"{session.account.secondary_region} / {session.account.role_name}"
         self.log.appendPlainText(f"监控失败：{account_label}：{summary}")

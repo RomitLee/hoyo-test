@@ -45,7 +45,7 @@ class SlaveSettingsDialog(QDialog):
         root.setSpacing(12)
 
         title = QLabel("从机控制中心")
-        title.setStyleSheet("font-size:20px;font-weight:800;color:#F3F7FD;")
+        title.setStyleSheet("font-size:20px;font-weight:800;color:#243247;")
         subtitle = QLabel("设置背包容量提醒与从机配对")
         subtitle.setStyleSheet(f"color:{MUTED};font-size:11px;")
         root.addWidget(title)
@@ -118,7 +118,7 @@ class SlaveSettingsDialog(QDialog):
         self.capacity_threshold_spin.setValue(settings.inventory_capacity_threshold)
         self._refresh_capacity_controls()
         self.binding_status_label.setText(
-            f"已绑定 · {settings.device_id}" if settings.device_id and settings.device_token else "尚未绑定"
+            f"已绑定 · {settings.display_name or '未命名从机'}" if settings.device_id and settings.device_token else "尚未绑定"
         )
         self.pairing_code_edit.setText(settings.pairing_code)
 
@@ -132,6 +132,7 @@ class SlaveSettingsDialog(QDialog):
             inventory_capacity_alert_level=self.capacity_alert_group.checkedId(),
             inventory_capacity_threshold=self.capacity_threshold_spin.value(),
             device_id=self._source_settings.device_id,
+            display_name=self._source_settings.display_name,
             device_token=self._source_settings.device_token,
             installation_id=self._source_settings.installation_id,
             pairing_code=self.pairing_code_edit.text().strip().upper(),

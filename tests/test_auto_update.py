@@ -63,7 +63,7 @@ def test_mark_update_healthy_is_confined_to_runtime(monkeypatch, tmp_path: Path)
     health = tmp_path / "runtime" / "updates" / "health.ok"
     monkeypatch.setenv("HOYO_UPDATE_HEALTH_FILE", str(health))
     auto_update.mark_update_healthy()
-    assert health.read_text(encoding="utf-8") == "V1.8.3"
+    assert health.read_text(encoding="utf-8") == "V1.9.0"
 
     escaped = tmp_path / "outside.ok"
     monkeypatch.setenv("HOYO_UPDATE_HEALTH_FILE", str(escaped))

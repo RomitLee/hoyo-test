@@ -26,7 +26,7 @@ from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
 
-VERSION = "2.5.1"
+VERSION = "2.6.0"
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
@@ -64,10 +64,15 @@ class PairDeviceIn(BaseModel):
 
 
 class DeviceUpdateIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     display_name: str | None = Field(default=None, min_length=1, max_length=64)
     note: str | None = Field(default=None, max_length=200)
     disabled: bool | None = None
+
+
+class DeviceNameIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    display_name: str = Field(min_length=1, max_length=64)
 
 
 class EventIn(BaseModel):
@@ -445,7 +450,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if result is None:
             raise HTTPException(status_code=400, detail="配对码无效、已使用或已过期")
         device_id, _account_id = result
-        return {"device_id": device_id, "device_token": device_token}
+        profile = database.device_profile(_account_id, device_id)
+        return {"device_id": device_id, "device_token": device_token, **profile}
+
+    @app.post("/api/v1/slave/profile")
+    def rename_self(
+        payload: DeviceNameIn,
+        identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
+    ) -> dict[str, str]:
+        if not database.update_device(identity.account_id, identity.device_id, payload.model_dump()):
+            raise HTTPException(status_code=404, detail="从机不存在")
+        return database.device_profile(identity.account_id, identity.device_id)
 
     @app.post("/api/v1/slave/heartbeat")
     def heartbeat(
@@ -457,7 +472,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             device_id, hostname=payload.hostname, app_version=payload.app_version,
             ip_address=request.client.host if request.client else None,
         )
-        return {"device_id": device_id, "server_time": seen_at}
+        return {"device_id": device_id, "server_time": seen_at,
+                **database.device_profile(identity.account_id, device_id)}
 
     @app.post("/api/v1/slave/cash-observations", status_code=status.HTTP_202_ACCEPTED)
     def cash_observation(

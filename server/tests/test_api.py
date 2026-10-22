@@ -447,6 +447,32 @@ def _pair(client: TestClient, master_token: str, installation_id: str) -> tuple[
     return str(paired.json()["device_id"]), str(paired.json()["device_token"])
 
 
+def test_slave_can_rename_only_itself_and_heartbeat_tracks_master_rename(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        owner = _register(client, "rename-owner")
+        other = _register(client, "rename-other")
+        first_id, first_token = _pair(client, owner, "rename-installation-001")
+        other_id, other_token = _pair(client, other, "rename-installation-002")
+        first = {"X-Device-ID": first_id, "Authorization": f"Bearer {first_token}"}
+        foreign = {"X-Device-ID": other_id, "Authorization": f"Bearer {other_token}"}
+        owner_headers = {"Authorization": f"Bearer {owner}"}
+        renamed = client.post("/api/v1/slave/profile", headers=first, json={"display_name": " 收购电脑01 "})
+        assert renamed.status_code == 200
+        assert renamed.json()["display_name"] == "收购电脑01"
+        devices = client.get("/api/v1/master/devices", headers=owner_headers).json()["devices"]
+        assert devices[0]["device_id"] == first_id
+        assert devices[0]["display_name"] == "收购电脑01"
+        for invalid in ({"display_name": "   "}, {"display_name": "x" * 65},
+                        {"display_name": "越权", "device_id": first_id}, {"display_name": "越权", "disabled": False}):
+            assert client.post("/api/v1/slave/profile", headers=foreign, json=invalid).status_code == 422
+        assert client.post("/api/v1/slave/profile", json={"display_name": "未授权"}).status_code == 401
+        assert client.patch(f"/api/v1/master/devices/{first_id}", headers=owner_headers,
+                            json={"display_name": "主机修改名称"}).status_code == 200
+        heartbeat = client.post("/api/v1/slave/heartbeat", headers=first, json={"hostname": "旧电脑主机名"})
+        assert heartbeat.json()["display_name"] == "主机修改名称"
+        assert client.post("/api/v1/slave/heartbeat", headers=foreign, json={}).json()["display_name"] != "主机修改名称"
+
+
 def test_accounts_pairing_and_data_are_tenant_isolated(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         alice_token = _register(client, "alice")
