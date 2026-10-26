@@ -66,6 +66,22 @@ class RelayDatabase:
                     PRIMARY KEY(device_id,window_id),
                     FOREIGN KEY(device_id) REFERENCES devices(device_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS live_snapshot_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    device_id TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+                    window_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL,
+                    server_name TEXT,
+                    role_name TEXT,
+                    object_key TEXT NOT NULL UNIQUE,
+                    captured_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_live_history_character
+                    ON live_snapshot_history(account_id,character_id,id DESC);
+                CREATE INDEX IF NOT EXISTS idx_live_history_captured
+                    ON live_snapshot_history(captured_at);
                 CREATE TABLE IF NOT EXISTS live_snapshot_requests (
                     request_id TEXT PRIMARY KEY, account_id INTEGER NOT NULL,
                     device_id TEXT NOT NULL, window_id TEXT NOT NULL,
@@ -800,9 +816,21 @@ class RelayDatabase:
             row = connection.execute("SELECT * FROM live_snapshot_requests WHERE account_id=? AND request_id=?", (account_id, request_id)).fetchone()
         return dict(row) if row else None
 
-    def save_live_snapshot(self, device_id: str, window_id: str, key: str, captured_at: str, request_id: str | None) -> None:
+    def save_live_snapshot(self, device_id: str, window_id: str, key: str, captured_at: str,
+                           request_id: str | None, *, keep_history: bool = False) -> None:
         now = utc_now()
         with self._connect() as connection:
+            if keep_history:
+                window = connection.execute("""SELECT d.account_id,s.character_id,s.server_name,s.role_name
+                    FROM device_window_status s JOIN devices d ON d.device_id=s.device_id
+                    WHERE s.device_id=? AND s.window_id=? AND d.removed_at IS NULL""",
+                    (device_id, window_id)).fetchone()
+                if window and window["character_id"]:
+                    connection.execute("""INSERT OR IGNORE INTO live_snapshot_history
+                        (account_id,device_id,window_id,character_id,server_name,role_name,object_key,captured_at,received_at)
+                        VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (window["account_id"], device_id, window_id, window["character_id"], window["server_name"],
+                         window["role_name"], key, captured_at, now))
             connection.execute("""INSERT INTO live_snapshots(device_id,window_id,object_key,captured_at,received_at,request_id)
                 VALUES (?,?,?,?,?,?) ON CONFLICT(device_id,window_id) DO UPDATE SET
                 object_key=excluded.object_key,captured_at=excluded.captured_at,
@@ -820,6 +848,29 @@ class RelayDatabase:
                 WHERE d.account_id=? AND d.removed_at IS NULL AND l.device_id=? AND l.window_id=?""",
                 (account_id, device_id, window_id)).fetchone()
         return dict(row) if row else None
+
+    def live_snapshot_history(self, account_id: int, character_id: str, *, before: int | None,
+                              limit: int) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT id,device_id,window_id,server_name,role_name,captured_at
+                FROM live_snapshot_history WHERE account_id=? AND character_id=? AND captured_at>=?
+                AND (? IS NULL OR id<?) ORDER BY id DESC LIMIT ?""",
+                (account_id, character_id, cutoff, before, before, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def historical_snapshot(self, account_id: int, snapshot_id: int) -> dict[str, Any] | None:
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        with self._connect() as connection:
+            row = connection.execute("""SELECT object_key,captured_at FROM live_snapshot_history
+                WHERE account_id=? AND id=? AND captured_at>=?""", (account_id, snapshot_id, cutoff)).fetchone()
+        return dict(row) if row else None
+
+    def purge_live_snapshot_history(self) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        with self._connect() as connection:
+            result = connection.execute("DELETE FROM live_snapshot_history WHERE captured_at<?", (cutoff,))
+        return max(0, result.rowcount)
 
     def purge_acknowledged_events(self, retention_days: int) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat(timespec="milliseconds")

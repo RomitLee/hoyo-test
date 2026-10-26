@@ -47,6 +47,12 @@ const barkKey = ref('')
 const preview = ref('')
 const previewError = ref('')
 const previewTime = ref('')
+type HistoricalShot = { id: number; device_id: string; window_id: string; captured_at: string; server_name?: string; role_name?: string }
+const history = ref<HistoricalShot[]>([])
+const historyIndex = ref(0)
+const historyCharacter = ref('')
+const historyHasMore = ref(false)
+const historyBusy = ref(false)
 const snapshotInterval = ref(5)
 const thumbnails = reactive<Record<string, string>>({})
 const thumbnailDates = reactive<Record<string, string>>({})
@@ -80,11 +86,58 @@ async function refreshThumbnails() {
 }
 
 async function viewSnapshot(deviceId: string, windowId: string) {
+  history.value = []; historyCharacter.value = ''; historyHasMore.value = false
   preview.value = ''; previewError.value = ''
   const shot = await snapshotUrl(deviceId, windowId)
   if (new URL(shot.url).protocol !== 'https:') throw new Error('截图地址无效')
   previewTime.value = time(shot.captured_at)
   preview.value = shot.url
+}
+
+async function openHistory(item: WindowStatus & { device: Device }) {
+  if (!item.character_id) { await viewSnapshot(item.device.device_id, item.window_id); return }
+  preview.value = ''; previewError.value = ''
+  historyCharacter.value = item.character_id
+  const result = await api<{ items: HistoricalShot[]; has_more: boolean }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(item.character_id)}&limit=30`)
+  history.value = result.items
+  historyHasMore.value = result.has_more
+  historyIndex.value = 0
+  if (history.value.length) await showHistorical(0)
+  else await viewSnapshot(item.device.device_id, item.window_id)
+}
+
+async function showHistorical(index: number) {
+  const entry = history.value[index]
+  if (!entry) return
+  historyBusy.value = true
+  try {
+    const shot = await api<{ url: string; captured_at: string }>(`/api/v1/master/live-screenshots/history/${entry.id}/view`)
+    if (new URL(shot.url).protocol !== 'https:') throw new Error('截图地址无效')
+    historyIndex.value = index
+    previewTime.value = time(shot.captured_at)
+    preview.value = shot.url
+    previewError.value = ''
+  } finally { historyBusy.value = false }
+}
+
+async function navigateHistory(direction: number) {
+  if (historyBusy.value || !historyCharacter.value) return
+  const next = historyIndex.value + direction
+  if (next < 0) return
+  if (next >= history.value.length && historyHasMore.value) {
+    const before = history.value.at(-1)?.id
+    const result = await api<{ items: HistoricalShot[]; has_more: boolean }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(historyCharacter.value)}&before=${before}&limit=30`)
+    history.value.push(...result.items)
+    historyHasMore.value = result.has_more
+  }
+  if (next < history.value.length) await showHistorical(next)
+}
+
+function previewKey(event: KeyboardEvent) {
+  if (!preview.value) return
+  if (event.key === 'Escape') preview.value = ''
+  if (event.key === 'ArrowLeft') void navigateHistory(1).catch(fail)
+  if (event.key === 'ArrowRight') void navigateHistory(-1).catch(fail)
 }
 
 async function requestSnapshot(item: WindowStatus & { device: Device }) {
@@ -96,7 +149,7 @@ async function requestSnapshot(item: WindowStatus & { device: Device }) {
       await new Promise(resolve => window.setTimeout(resolve, 2000))
       const state = await api<{ state: string; error?: string }>(`/api/v1/master/live-screenshots/requests/${encodeURIComponent(result.request_id)}`)
       if (state.state === 'complete') {
-        await viewSnapshot(item.device.device_id, item.window_id)
+        await openHistory(item)
         await refresh()
         return
       }
@@ -342,8 +395,8 @@ async function testBark() {
 }
 
 watch([() => filter.event_type, () => filter.panel_type], () => { if (page.value === 'logs') void fetchLogs(0) })
-onMounted(() => { if (token.value) start() })
-onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void audio?.close() })
+onMounted(() => { window.addEventListener('keydown', previewKey); if (token.value) start() })
+onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer) window.clearInterval(timer); stopSound(); void audio?.close() })
 </script>
 
 <template>
@@ -378,7 +431,26 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void au
 
         <template v-if="page === 'monitor'">
           <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
-          <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 每 ${snapshotInterval} 分钟自动截图`"><div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div><div v-else class="snapshot-grid"><article v-for="item in windows" :key="snapshotKey(item.device.device_id, item.window_id)" class="snapshot-card"><div class="snapshot-heading"><div><strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong><small>{{ item.device.display_name || item.device.hostname || item.device.device_id }} · {{ online(item.device.last_seen_at) ? '在线' : '离线' }}</small></div><span :class="['badge', item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span></div><button class="snapshot-image" :disabled="!item.screenshot_at" @click="viewSnapshot(item.device.device_id, item.window_id).catch(fail)"><img v-if="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" :src="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" alt="游戏窗口最近截图" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button><div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div><div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div><div class="snapshot-actions"><span>遮挡 {{ Number(item.occlusion_percent || 0).toFixed(1) }}%</span><button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] || item.minimized || !online(item.device.last_seen_at)" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] ? '正在获取…' : '获取实时截图' }}</button></div></article></div></Panel>
+          <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 每 ${snapshotInterval} 分钟自动截图`">
+            <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
+            <div v-else class="snapshot-grid">
+              <article v-for="item in windows" :key="snapshotKey(item.device.device_id, item.window_id)" class="snapshot-card">
+                <div class="snapshot-identity" :title="`${item.server_name || '未知区服'} / ${item.role_name || '未知角色'} · ${item.device.display_name || item.device.hostname || item.device.device_id}`">
+                  <strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong>
+                  <span>· {{ item.device.display_name || item.device.hostname || item.device.device_id }}</span>
+                  <span :class="online(item.device.last_seen_at) ? 'online' : 'offline'">· {{ online(item.device.last_seen_at) ? '在线' : '离线' }}</span>
+                </div>
+                <div class="snapshot-toolbar">
+                  <span :class="['badge', item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span>
+                  <span class="snapshot-occlusion">遮挡 {{ Number(item.occlusion_percent || 0).toFixed(1) }}%</span>
+                  <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] || item.minimized || !online(item.device.last_seen_at)" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] ? '获取中…' : '获取实时截图' }}</button>
+                </div>
+                <button class="snapshot-image" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" :src="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
+                <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
+                <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
+              </article>
+            </div>
+          </Panel>
         </template>
 
         <template v-else-if="page === 'alerts'"><Panel title="告警记录" :meta="`待处理 ${pending} 条`"><div v-if="!alerts.length" class="empty">暂无告警记录</div><div v-else class="table-wrap"><table><thead><tr><th>状态</th><th>从机 / 角色</th><th>告警</th><th>发生时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.server_event_id"><td><span :class="['badge', item.acked_at ? 'good' : 'danger']">{{ item.acked_at ? '已处理' : '未处理' }}</span></td><td>{{ item.display_name || item.hostname || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ alertLabels[item.event_type] || item.event_type }}</td><td>{{ time(item.occurred_at) }}</td><td><button v-if="!item.acked_at" class="primary small" @click="ack(item)">确认处理</button><span v-else>—</span></td></tr></tbody></table></div></Panel></template>
@@ -392,5 +464,5 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void au
       <footer>数据每 5 秒刷新 · 手机告警由服务端 Bark 推送</footer>
     </div>
   </div>
-  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
+  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><div class="preview-bar"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><span v-if="historyCharacter" class="preview-time">账号 ID：{{ historyCharacter }}</span></div><div class="preview-image-row"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || (!historyHasMore && historyIndex >= history.length - 1)" aria-label="上一张历史截图" @click="navigateHistory(1).catch(fail)">‹</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || historyIndex === 0" aria-label="下一张历史截图" @click="navigateHistory(-1).catch(fail)">›</button></div><p v-if="historyCharacter" class="preview-counter">第 {{ historyIndex + 1 }} 张 · 左右方向键可翻看 · 保留最近 30 天</p><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
 </template>

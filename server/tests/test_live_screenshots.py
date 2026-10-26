@@ -36,7 +36,7 @@ def test_live_screenshot_settings_direct_upload_and_force_request(tmp_path):
                               json={"interval_minutes": invalid}).status_code == 422
         assert client.put("/api/v1/master/live-screenshot-settings", headers=MASTER,
                           json={"interval_minutes": 12}).json() == {"interval_minutes": 12}
-        window = {"window_id": "hwnd:42", "updated_at": datetime.now(UTC).isoformat(), "monitoring": True}
+        window = {"window_id": "hwnd:42", "character_id": "123456", "updated_at": datetime.now(UTC).isoformat(), "monitoring": True}
         assert client.post("/api/v1/slave/status", headers=SLAVE,
                            json={"reported_at": window["updated_at"], "windows": [window]}).status_code == 202
         assert client.get("/api/v1/slave/live-screenshots/control", headers=SLAVE).json()["interval_minutes"] == 12
@@ -65,3 +65,22 @@ def test_live_screenshot_settings_direct_upload_and_force_request(tmp_path):
         assert view.json()["url"].startswith("https://screenshots.example.com/screenshots/live/1/")
         assert view.headers["cache-control"] == "no-store"
         assert client.get("/api/v1/master/live-screenshots/slave/view?window_id=hwnd:42").status_code == 401
+
+        for capture_id in ("a" * 32, "b" * 32):
+            permit = client.post("/api/v1/slave/live-screenshots/permission", headers=SLAVE,
+                                 json={"window_id": "hwnd:42", "capture_id": capture_id})
+            assert permit.status_code == 200
+            unique_key = permit.json()["url"].split("cos.example.com/", 1)[1].split("?", 1)[0]
+            assert capture_id in unique_key
+            store.uploaded.add(unique_key)
+            assert client.post("/api/v1/slave/live-screenshots/complete", headers=SLAVE,
+                               json={"window_id": "hwnd:42", "capture_id": capture_id,
+                                     "captured_at": datetime.now(UTC).isoformat()}).status_code == 200
+        history = client.get("/api/v1/master/live-screenshots/history?character_id=123456&limit=1", headers=MASTER)
+        assert history.status_code == 200
+        assert history.json()["has_more"] is True
+        newest = history.json()["items"][0]
+        assert "b" * 32 in client.get(f"/api/v1/master/live-screenshots/history/{newest['id']}/view", headers=MASTER).json()["url"]
+        older = client.get(f"/api/v1/master/live-screenshots/history?character_id=123456&before={newest['id']}", headers=MASTER)
+        assert len(older.json()["items"]) == 1
+        assert client.get(f"/api/v1/master/live-screenshots/history/{newest['id']}/view").status_code == 401

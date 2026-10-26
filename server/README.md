@@ -1,6 +1,6 @@
 # 梦幻西游背包告警中转服务
 
-当前版本 **2.12.0**，配套从机 V2.4.0；历史 Windows 主机包保持 V2.3.0，通信协议 1。当前发布与下载见 [项目说明](../README.md)。
+当前版本 **2.13.0**，配套从机 V2.5.0；历史 Windows 主机包保持 V2.3.0，通信协议 1。当前发布与下载见 [项目说明](../README.md)。
 
 首页 `/` 是 Vue 网页管理界面，源码位于 `../web-admin/`，构建文件位于 `app/web-admin/` 并随服务端镜像提供。旧 H5 保留 `/legacy` 与 `/static/`。网页与桌面主机共用现有账号、设备和 API；静态资源不含凭据。修改前端后需在 `web-admin/` 执行 `npm ci`、`npm run build`，再构建服务端镜像。
 
@@ -47,7 +47,7 @@
 - `GET /api/v1/master/status`：读取当前账号的从机和全部游戏窗口状态。
 - `GET/PUT /api/v1/master/live-screenshot-settings`：读取或设置账号自动截图周期，1～60 分钟。
 - `GET /api/v1/slave/live-screenshots/control`：从机获取周期与待执行的即时截图请求。
-- `POST /api/v1/slave/live-screenshots/permission`：取得仅针对单个窗口对象的 24 小时 COS 上传链接。
+- `POST /api/v1/slave/live-screenshots/permission`：取得仅针对单张截图对象的 COS 上传链接；新版从机每张截图携带独立 `capture_id`，旧版从机仍可使用原固定对象链接。
 - `POST /api/v1/slave/live-screenshots/complete`：直传后登记截图时间和窗口关联，服务端检查对象存在。
 - `POST /api/v1/master/live-screenshots/{device_id}/request`：请求指定窗口的下一帧新截图。
 - `GET /api/v1/master/live-screenshots/requests/{request_id}`：查询即时截图完成状态。

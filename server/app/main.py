@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.12.0"
+VERSION = "2.13.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -175,11 +175,16 @@ class LiveSnapshotUploadIn(BaseModel):
     window_id: str = Field(min_length=1, max_length=128)
     captured_at: datetime
     request_id: str | None = Field(default=None, max_length=64)
+    capture_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class LiveSnapshotWindowIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     window_id: str = Field(min_length=1, max_length=128)
+
+
+class LiveSnapshotPermissionIn(LiveSnapshotWindowIn):
+    capture_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class AckIn(BaseModel):
@@ -274,17 +279,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for notification in database.due_bark_notifications():
                 await asyncio.to_thread(deliver_bark, notification)
 
+    async def history_cleanup_loop() -> None:
+        while True:
+            await asyncio.sleep(24 * 3600)
+            await asyncio.to_thread(database.purge_live_snapshot_history)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         database.initialize()
         database.purge_acknowledged_events(app_settings.retention_days)
+        database.purge_live_snapshot_history()
         reminder_task = asyncio.create_task(bark_reminder_loop())
+        cleanup_task = asyncio.create_task(history_cleanup_loop())
         try:
             yield
         finally:
             reminder_task.cancel()
+            cleanup_task.cancel()
             with suppress(asyncio.CancelledError):
                 await reminder_task
+            with suppress(asyncio.CancelledError):
+                await cleanup_task
 
     app = FastAPI(
         title="Hoyo Inventory Alarm Relay", version=VERSION, docs_url=None,
@@ -777,10 +792,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 window["screenshot_at"] = shot["captured_at"] if shot else None
         return {"devices": devices, "count": len(devices)}
 
-    def live_key(identity: DeviceIdentity, window_id: str) -> str:
+    def live_key(identity: DeviceIdentity, window_id: str, capture_id: str | None = None) -> str:
         device_hash = hashlib.sha256(identity.device_id.encode()).hexdigest()[:24]
         window_hash = hashlib.sha256(window_id.encode()).hexdigest()[:24]
-        return f"screenshots/live/{identity.account_id}/{device_hash}/{window_hash}.jpg"
+        base = f"screenshots/live/{identity.account_id}/{device_hash}/{window_hash}"
+        return f"{base}/{capture_id}.jpg" if capture_id else f"{base}.jpg"
 
     @app.get("/api/v1/master/live-screenshot-settings")
     def get_live_settings(account_id: int = Depends(authenticate_master)) -> dict[str, int]:
@@ -796,12 +812,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "requests": database.snapshot_requests(identity.device_id)}
 
     @app.post("/api/v1/slave/live-screenshots/permission")
-    def live_permission(payload: LiveSnapshotWindowIn, identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
+    def live_permission(payload: LiveSnapshotPermissionIn, identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
         if not database.snapshot_window(identity.account_id, identity.device_id, payload.window_id):
             raise HTTPException(status_code=404, detail="该窗口未在监控中")
         if not app.state.screenshots.configured:
             raise HTTPException(status_code=503, detail="截图存储未配置")
-        key = live_key(identity, payload.window_id)
+        key = live_key(identity, payload.window_id, payload.capture_id)
         try:
             url = app.state.screenshots.signed_put_url(key)
         except Exception:  # noqa: BLE001 - do not expose signing credentials
@@ -819,12 +835,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request = database.snapshot_request(identity.account_id, payload.request_id)
             if not request or request["device_id"] != identity.device_id or request["window_id"] != payload.window_id or request["completed_at"]:
                 raise HTTPException(status_code=409, detail="实时截图请求已失效")
-        key = live_key(identity, payload.window_id)
+        key = live_key(identity, payload.window_id, payload.capture_id)
         try:
             app.state.screenshots.exists(key)
         except Exception:  # noqa: BLE001 - COS failure is an unavailable object
             raise HTTPException(status_code=409, detail="COS 中尚未找到上传的截图") from None
-        database.save_live_snapshot(identity.device_id, payload.window_id, key, payload.captured_at.isoformat(), payload.request_id)
+        database.save_live_snapshot(identity.device_id, payload.window_id, key, payload.captured_at.isoformat(), payload.request_id,
+                                    keep_history=bool(payload.capture_id))
         return {"accepted": True}
 
     @app.post("/api/v1/master/live-screenshots/{device_id}/request")
@@ -858,5 +875,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:  # noqa: BLE001 - do not expose signing credentials
             raise HTTPException(status_code=503, detail="暂时无法读取截图") from None
         return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": 300}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/master/live-screenshots/history")
+    def live_history(character_id: str = Query(pattern=r"^\d{1,64}$"), before: int | None = Query(default=None, ge=1),
+                     limit: int = Query(default=30, ge=1, le=100),
+                     account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        rows = database.live_snapshot_history(account_id, character_id, before=before, limit=limit + 1)
+        return {"items": rows[:limit], "has_more": len(rows) > limit}
+
+    @app.get("/api/v1/master/live-screenshots/history/{snapshot_id}/view")
+    def view_historical_snapshot(snapshot_id: int, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        row = database.historical_snapshot(account_id, snapshot_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="历史截图不存在或已过期")
+        try:
+            url = app.state.screenshots.signed_url(row["object_key"])
+        except Exception:  # noqa: BLE001 - do not expose COS signing details
+            raise HTTPException(status_code=503, detail="暂时无法读取截图") from None
+        return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": 300},
+                            headers={"Cache-Control": "no-store"})
 
     return app
