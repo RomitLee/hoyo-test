@@ -4,13 +4,15 @@
 
 ## 当前版本
 
-2026 年 10 月 26 日已发布，通信协议为 `1`。主机与从机独立更新，无须保持相同产品版本号。
+2026 年 10 月 26 日新增 Vue 网页管理界面，沿用 `jiankong.maipi.top`、现有账号和从机配对关系。通信协议为 `1`。主机与从机独立更新，无须保持相同产品版本号。
 
 | 组件 | 当前版本 | 获取方式 |
 | --- | --- | --- |
 | Windows 主机 | V2.3.0 | [下载主机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/master/V2.3.0) |
 | Windows 从机 | V2.2.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.2.0) |
-| 云端服务 | 2.9.0 | [手机 H5](https://jiankong.maipi.top/) |
+| 云端服务 | 2.10.0 | [网页管理界面](https://jiankong.maipi.top/) |
+
+网页管理界面覆盖监控、现金、告警、从机管理、监控日志、截图、遮挡日志规则和 Bark 设置，可在电脑与手机浏览器使用。旧版 H5 暂保留在 `/legacy` 作为回退入口。浏览器提示音需在每次打开网页时主动开启；关闭或休眠浏览器后，持续告警依靠服务端 Bark。Windows 主机程序的 V2.3.0 历史包继续保留，确认网页满足日常操作后再停止发布主机新版。
 
 本次正式安装包位于 `dist-master-v230-slave-v220/`。已验证两端安装包自检、发布签名、公网完整下载和线上截图上传查看。具体包大小、SHA-256 及部署验证见 [正式发布记录](docs/30-screenshot-production-release.md)。
 
@@ -127,6 +129,7 @@ assets/ocr/              对象昵称、等级 OCR 模型及许可
 configs/                 检测参数
 src/hoyo_analyzer/       桌面程序、捕获、识别、通信及更新
 server/                  API、数据库、H5、部署配置及测试
+web-admin/               Vue 网页管理界面源码与构建配置
 scripts/                 入口、评估和 Windows 构建脚本
 packaging/               打包支持与使用说明
 tests/                   桌面测试及固定样本

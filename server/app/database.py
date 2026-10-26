@@ -556,7 +556,8 @@ class RelayDatabase:
                 WHERE l.account_id=? AND l.id=? AND s.ready=1""", (account_id, log_id)).fetchone()
         return dict(row) if row else None
 
-    def list_events(self, account_id: int, *, pending_only: bool, after_id: int, limit: int) -> list[dict[str, Any]]:
+    def list_events(self, account_id: int, *, pending_only: bool, after_id: int, limit: int,
+                    latest: bool = False) -> list[dict[str, Any]]:
         predicates = ["account_id=?", "id>?"]
         parameters: list[Any] = [account_id, after_id]
         if pending_only:
@@ -566,7 +567,7 @@ class RelayDatabase:
             rows = connection.execute(
                 f"""SELECT id,device_id,client_event_id,event_type,server_name,role_name,character_id,
                    empty_slots,confidence,occlusion_percent,minimized,occurred_at,received_at,payload_json,acked_at
-                   FROM events WHERE {' AND '.join(predicates)} ORDER BY id ASC LIMIT ?""",
+                   FROM events WHERE {' AND '.join(predicates)} ORDER BY id {'DESC' if latest else 'ASC'} LIMIT ?""",
                 parameters,
             ).fetchall()
         return [self._event_row(row) for row in rows]

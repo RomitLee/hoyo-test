@@ -1,0 +1,345 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import Panel from './components/Panel.vue'
+import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from './api'
+
+type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
+type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string }
+type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
+type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
+type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
+type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; configured?: boolean; masked_key?: string }
+type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
+
+const pages: { key: Page; label: string; hint: string }[] = [
+  { key: 'monitor', label: '监控', hint: '角色状态与现金' },
+  { key: 'alerts', label: '告警', hint: '待处理事件' },
+  { key: 'devices', label: '从机管理', hint: '配对与设备' },
+  { key: 'logs', label: '监控日志', hint: '操作与截图' },
+  { key: 'settings', label: '设置', hint: '上报与通知' },
+]
+const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', waiting: '等待检测', unknown: '未知状态' }
+const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
+const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '摊位面板', stall_records: '摊位记录面板' }
+const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
+
+const page = ref<Page>('monitor')
+const token = ref(localStorage.getItem(TOKEN_KEY) || '')
+const username = ref(localStorage.getItem(USERNAME_KEY) || '')
+const password = ref('')
+const accountName = ref('')
+const loading = ref(false)
+const busy = ref(false)
+const error = ref('')
+const notice = ref('')
+const connected = ref(false)
+const updatedAt = ref('')
+const devices = ref<Device[]>([])
+const alerts = ref<Alert[]>([])
+const logs = ref<Log[]>([])
+const logHasMore = ref(false)
+const logCursor = ref(0)
+const logNext = ref(0)
+const filter = reactive({ event_type: '', panel_type: '' })
+const policy = reactive<Policy>({ occlusion_enabled: true, occlusion_percent: 60, occlusion_seconds: 5 })
+const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10 })
+const barkKey = ref('')
+const pairing = ref('')
+const preview = ref('')
+const previewError = ref('')
+const webSound = ref(false)
+const ringing = ref(false)
+let knownAlerts: Set<number> | undefined
+let audio: AudioContext | undefined
+let soundTimer: number | undefined
+let timer: number | undefined
+let session = 0
+
+const windows = computed(() => devices.value.flatMap(device => (device.windows || []).map(window => ({ ...window, device }))))
+const pending = computed(() => alerts.value.filter(item => !item.acked_at).length)
+const activeDevices = computed(() => devices.value.filter(item => !item.disabled && online(item.last_seen_at)).length)
+const eventTypes = [
+  ['', '全部类型'], ['window_occluded', '遮挡'], ['window_minimized', '最小化'],
+  ['monitoring_started', '开始监控'], ['monitoring_paused', '暂停监控'],
+  ['panel_opened', '打开面板'], ['panel_closed', '关闭面板'],
+  ['panel_target_changed', '对象变化'], ['game_default', '默认界面'],
+]
+
+function fail(cause: unknown) {
+  if (cause instanceof Unauthorized) { logout('登录已失效，请重新登录'); return }
+  error.value = cause instanceof Error ? cause.message : String(cause)
+  connected.value = false
+}
+
+function logout(message = '') {
+  ++session
+  localStorage.removeItem(TOKEN_KEY)
+  token.value = ''
+  password.value = ''
+  devices.value = []
+  alerts.value = []
+  logs.value = []
+  preview.value = ''
+  pairing.value = ''
+  error.value = message
+  connected.value = false
+  stopSound()
+  knownAlerts = undefined
+  if (timer) window.clearInterval(timer)
+  timer = undefined
+}
+
+function beep() {
+  if (!audio) return
+  const oscillator = audio.createOscillator()
+  const gain = audio.createGain()
+  oscillator.type = 'sine'
+  oscillator.frequency.value = 760
+  gain.gain.setValueAtTime(0.0001, audio.currentTime)
+  gain.gain.exponentialRampToValueAtTime(0.12, audio.currentTime + 0.02)
+  gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.35)
+  oscillator.connect(gain).connect(audio.destination)
+  oscillator.start()
+  oscillator.stop(audio.currentTime + 0.36)
+}
+
+function stopSound() {
+  ringing.value = false
+  if (soundTimer) window.clearInterval(soundTimer)
+  soundTimer = undefined
+}
+
+async function toggleWebSound() {
+  webSound.value = !webSound.value
+  if (!webSound.value) { stopSound(); return }
+  try { audio ||= new AudioContext(); await audio.resume(); beep(); notice.value = '电脑提示音已开启；请保持网页打开' }
+  catch { webSound.value = false; error.value = '浏览器未允许播放声音' }
+}
+
+async function login() {
+  busy.value = true; error.value = ''
+  try {
+    const response = await api<{ access_token: string; account: { display_name?: string } }>('/api/v1/auth/login', json('POST', { username: username.value.trim(), password: password.value }))
+    localStorage.setItem(TOKEN_KEY, response.access_token)
+    localStorage.setItem(USERNAME_KEY, username.value.trim())
+    token.value = response.access_token
+    accountName.value = response.account.display_name || username.value
+    password.value = ''
+    start()
+  } catch (cause) { fail(cause) }
+  finally { busy.value = false }
+}
+
+async function refresh() {
+  if (!token.value || loading.value) return
+  loading.value = true
+  const current = session
+  try {
+    const [status, events, pendingEvents] = await Promise.all([
+      api<{ devices: Device[] }>('/api/v1/master/status'),
+      api<{ events: Alert[] }>('/api/v1/master/events?state=all&limit=200&latest=true'),
+      api<{ events: Alert[] }>('/api/v1/master/events?state=pending&limit=500&latest=true'),
+    ])
+    if (current !== session) return
+    devices.value = status.devices || []
+    alerts.value = Array.from(new Map([...(events.events || []), ...(pendingEvents.events || [])]
+      .map(item => [item.server_event_id, item])).values()).sort((a, b) => b.server_event_id - a.server_event_id)
+    const nextAlerts = new Set(alerts.value.filter(item => !item.acked_at).map(item => item.server_event_id))
+    if (knownAlerts && webSound.value && !ringing.value && [...nextAlerts].some(id => !knownAlerts?.has(id))) {
+      ringing.value = true
+      if (audio?.state === 'running') beep()
+      soundTimer = window.setInterval(beep, 1800)
+    }
+    knownAlerts = nextAlerts
+    if (!nextAlerts.size) stopSound()
+    updatedAt.value = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+    connected.value = true; error.value = ''
+    if (page.value === 'logs') await fetchLogs(logCursor.value)
+  } catch (cause) { if (current === session) fail(cause) }
+  finally { loading.value = false }
+}
+
+async function loadSettings() {
+  try {
+    const [storedPolicy, storedBark, account] = await Promise.all([
+      api<Policy>('/api/v1/master/monitor-log-settings'),
+      api<Bark>('/api/v1/master/notifications/bark'),
+      api<{ account: { display_name?: string; username?: string } }>('/api/v1/master/account'),
+    ])
+    Object.assign(policy, storedPolicy)
+    Object.assign(bark, storedBark)
+    accountName.value = account.account?.display_name || account.account?.username || username.value
+  } catch (cause) { fail(cause) }
+}
+
+function start() {
+  ++session
+  if (timer) window.clearInterval(timer)
+  void refresh()
+  void loadSettings()
+  timer = window.setInterval(() => void refresh(), 5000)
+}
+
+function choose(next: Page) {
+  page.value = next
+  notice.value = ''
+  if (next === 'logs') void fetchLogs(0)
+  if (next === 'settings') void loadSettings()
+}
+
+async function fetchLogs(cursor: number) {
+  if (!token.value) return
+  const params = new URLSearchParams({ limit: '100', before_id: String(cursor) })
+  if (filter.event_type) params.set('event_type', filter.event_type)
+  if (filter.panel_type) params.set('panel_type', filter.panel_type)
+  const current = session
+  try {
+    const data = await api<{ logs: Log[]; has_more: boolean }>(`/api/v1/master/monitor-logs?${params}`)
+    if (current !== session) return
+    logs.value = data.logs || []
+    logCursor.value = cursor
+    logNext.value = logs.value.at(-1)?.id || 0
+    logHasMore.value = data.has_more
+  } catch (cause) { if (current === session) fail(cause) }
+}
+
+function logLabel(item: Log): string {
+  const base = item.event_type === 'game_default' ? '关闭面板，返回默认游戏界面'
+    : item.event_type === 'panel_opened' ? `打开${panelLabels[item.panel_type || ''] || '面板'}`
+    : item.event_type === 'panel_closed' ? `关闭${panelLabels[item.panel_type || ''] || '面板'}`
+    : item.event_type === 'panel_target_changed' ? `${item.panel_type === 'give' ? '给予' : '交易'}对象变化`
+    : ({ window_occluded: '遮挡', window_minimized: '最小化', monitoring_started: '开始监控', monitoring_paused: '暂停监控' } as Record<string, string>)[item.event_type] || item.event_type
+  if (['give', 'trade'].includes(item.panel_type || '') && item.target_status != null) {
+    const target = item.target_status === 'recognized' && item.target_name && item.target_level ? `${item.target_name}，${item.target_level}级` : '对象未识别'
+    return `${base}，对象：${target}`
+  }
+  return item.message || base
+}
+
+async function screenshot(item: Log) {
+  preview.value = ''; previewError.value = ''
+  try {
+    const result = await api<{ url: string }>(`/api/v1/master/monitor-logs/${item.id}/screenshot`)
+    const link = new URL(result.url)
+    if (link.protocol !== 'https:') throw new Error('截图地址无效')
+    preview.value = link.href
+  } catch (cause) { fail(cause) }
+}
+
+async function ack(item: Alert) {
+  try { await api(`/api/v1/master/events/${item.server_event_id}/ack`, json('POST', {})); await refresh() }
+  catch (cause) { fail(cause) }
+}
+
+async function addDevice() {
+  try { const data = await api<{ pairing_code: string }>('/api/v1/master/pairing-codes', json('POST', {})); pairing.value = data.pairing_code }
+  catch (cause) { fail(cause) }
+}
+
+async function editDevice(device: Device) {
+  const name = window.prompt('从机名称', device.display_name || device.hostname || '')
+  if (name === null) return
+  const cleaned = name.trim()
+  if (!cleaned || cleaned.length > 64) { error.value = '名称应为1至64个字符'; return }
+  try { await api(`/api/v1/master/devices/${encodeURIComponent(device.device_id)}`, json('PATCH', { display_name: cleaned })); await refresh() }
+  catch (cause) { fail(cause) }
+}
+
+async function toggleDevice(device: Device) {
+  try { await api(`/api/v1/master/devices/${encodeURIComponent(device.device_id)}`, json('PATCH', { disabled: !device.disabled })); await refresh() }
+  catch (cause) { fail(cause) }
+}
+
+async function reissue(device: Device) {
+  if (!window.confirm('重新配对会使旧凭据立即失效，继续吗？')) return
+  try { const data = await api<{ pairing_code: string }>(`/api/v1/master/devices/${encodeURIComponent(device.device_id)}/reissue`, json('POST', {})); pairing.value = data.pairing_code }
+  catch (cause) { fail(cause) }
+}
+
+async function removeDevice(device: Device) {
+  if (!window.confirm(`确定移除“${device.display_name || device.device_id}”吗？`)) return
+  try { await api(`/api/v1/master/devices/${encodeURIComponent(device.device_id)}`, { method: 'DELETE' }); await refresh() }
+  catch (cause) { fail(cause) }
+}
+
+async function savePolicy() {
+  busy.value = true
+  try { Object.assign(policy, await api<Policy>('/api/v1/master/monitor-log-settings', json('PUT', { ...policy }))); notice.value = '遮挡日志规则已保存' }
+  catch (cause) { fail(cause) }
+  finally { busy.value = false }
+}
+
+async function saveBark() {
+  busy.value = true
+  try {
+    let key = barkKey.value.trim()
+    if (/^https?:\/\//i.test(key)) {
+      const link = new URL(key)
+      if (link.hostname !== 'api.day.app') throw new Error('请使用 Bark 官方测试地址')
+      key = link.pathname.split('/').filter(Boolean)[0] || ''
+    }
+    const data = { enabled: bark.enabled, call_enabled: bark.call_enabled, repeat_minutes: bark.repeat_minutes, ...(key ? { device_key: key } : {}) }
+    Object.assign(bark, await api<Bark>('/api/v1/master/notifications/bark', json('PUT', data)))
+    barkKey.value = ''; notice.value = 'Bark 设置已保存'
+  } catch (cause) { fail(cause) }
+  finally { busy.value = false }
+}
+
+async function testBark() {
+  try { await api('/api/v1/master/notifications/bark/test', json('POST', {})); notice.value = '测试通知已发送，请查看手机' }
+  catch (cause) { fail(cause) }
+}
+
+watch([() => filter.event_type, () => filter.panel_type], () => { if (page.value === 'logs') void fetchLogs(0) })
+onMounted(() => { if (token.value) start() })
+onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void audio?.close() })
+</script>
+
+<template>
+  <div v-if="!token" class="login-stage">
+    <section class="login-card m-surface">
+      <span class="eyebrow">HOYO MONITOR · WEB</span>
+      <h1>梦幻西游监控后台</h1>
+      <p>登录账号，查看所有已配对从机的监控状态。</p>
+      <form @submit.prevent="login">
+        <label>账号<input v-model="username" autocomplete="username" required minlength="3" maxlength="32"></label>
+        <label>密码<input v-model="password" type="password" autocomplete="current-password" required minlength="8"></label>
+        <button class="primary" :disabled="busy" type="submit">{{ busy ? '登录中…' : '登录' }}</button>
+      </form>
+      <p v-if="error" class="message error" role="alert">{{ error }}</p>
+    </section>
+  </div>
+  <div v-else class="app-shell">
+    <aside class="sidebar m-rail">
+      <div class="brand"><span class="brand-mark">M</span><div><strong>梦幻西游监控</strong><small>MONITOR CONSOLE</small></div></div>
+      <nav aria-label="管理板块">
+        <button v-for="item in pages" :key="item.key" :class="['nav-item', { active: page === item.key }]" @click="choose(item.key)">
+          <strong>{{ item.label }}</strong><small>{{ item.hint }}</small><em v-if="item.key === 'alerts' && pending">{{ pending }}</em>
+        </button>
+      </nav>
+      <div class="sidebar-foot"><span>{{ accountName || username }}</span><button @click="logout()">退出登录</button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div><span class="eyebrow">HOYO MONITOR / {{ pages.find(item => item.key === page)?.label }}</span><h1>{{ pages.find(item => item.key === page)?.label }}</h1></div><div class="top-actions"><button v-if="ringing" class="primary" @click="stopSound">停止提示音</button><span :class="['connection', { offline: !connected }]">{{ connected ? '云端已连接' : '连接中断' }}</span><button class="secondary" :disabled="loading" @click="refresh">刷新</button></div></header>
+      <main>
+        <p v-if="error" class="message error" role="alert">{{ error }}</p>
+        <p v-if="notice" class="message success" role="status">{{ notice }}</p>
+
+        <template v-if="page === 'monitor'">
+          <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
+          <Panel title="角色监控" :meta="`${windows.length} 个窗口`"><div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div><div v-else class="table-wrap"><table><thead><tr><th>从机</th><th>区服 / 角色</th><th>背包状态</th><th>空格</th><th>现金 · 确认时间</th><th>窗口状态</th></tr></thead><tbody><tr v-for="window in windows" :key="`${window.device.device_id}:${window.window_id}`"><td>{{ window.device.display_name || window.device.hostname || window.device.device_id }}<small>{{ online(window.device.last_seen_at) ? '在线' : '离线' }}</small></td><td>{{ window.server_name || '—' }} / {{ window.role_name || '—' }}<small v-if="window.character_id">ID {{ window.character_id }}</small></td><td><span :class="['badge', window.status === 'full' ? 'danger' : window.status === 'not_full' ? 'good' : '']">{{ statusLabels[window.status || 'unknown'] || window.status }}</span></td><td>{{ window.empty_slots ?? '—' }}</td><td><strong>{{ window.cash == null ? '未识别' : Number(window.cash).toLocaleString('zh-CN') }}</strong><small>{{ window.cash != null && !window.money_readable ? '上次确认 · ' : '确认 · ' }}{{ time(window.money_confirmed_at) }}</small></td><td><span :class="['badge', window.minimized || (window.occlusion_percent || 0) > 0 ? 'danger' : 'good']">{{ window.minimized ? '已最小化' : `遮挡 ${Number(window.occlusion_percent || 0).toFixed(1)}%` }}</span><small>{{ window.monitoring ? '监控中' : '未监控' }}</small></td></tr></tbody></table></div></Panel>
+        </template>
+
+        <template v-else-if="page === 'alerts'"><Panel title="告警记录" :meta="`待处理 ${pending} 条`"><div v-if="!alerts.length" class="empty">暂无告警记录</div><div v-else class="table-wrap"><table><thead><tr><th>状态</th><th>从机 / 角色</th><th>告警</th><th>发生时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.server_event_id"><td><span :class="['badge', item.acked_at ? 'good' : 'danger']">{{ item.acked_at ? '已处理' : '未处理' }}</span></td><td>{{ item.display_name || item.hostname || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ alertLabels[item.event_type] || item.event_type }}</td><td>{{ time(item.occurred_at) }}</td><td><button v-if="!item.acked_at" class="primary small" @click="ack(item)">确认处理</button><span v-else>—</span></td></tr></tbody></table></div></Panel></template>
+
+        <template v-else-if="page === 'devices'"><Panel title="从机管理" :meta="`${devices.length} 台`"><template #tools><button class="primary" @click="addDevice">＋ 添加从机</button></template><div v-if="pairing" class="pairing">配对码 <strong>{{ pairing }}</strong> · 5分钟有效，仅可使用一次</div><div v-if="!devices.length" class="empty">暂无从机。点击“添加从机”生成配对码。</div><div v-else class="table-wrap"><table><thead><tr><th>从机名称</th><th>状态</th><th>版本</th><th>最后连接</th><th>操作</th></tr></thead><tbody><tr v-for="device in devices" :key="device.device_id"><td><strong>{{ device.display_name || device.hostname || device.device_id }}</strong><small v-if="device.note">{{ device.note }}</small></td><td><span :class="['badge', !device.disabled && online(device.last_seen_at) ? 'good' : '']">{{ device.disabled ? '已禁用' : online(device.last_seen_at) ? '在线' : '离线' }}</span></td><td>{{ device.app_version || '—' }}</td><td>{{ time(device.last_seen_at) }}</td><td class="actions"><button @click="editDevice(device)">编辑</button><button @click="toggleDevice(device)">{{ device.disabled ? '启用' : '禁用' }}</button><button @click="reissue(device)">重新配对</button><button class="text-danger" @click="removeDevice(device)">移除</button></td></tr></tbody></table></div></Panel></template>
+
+        <template v-else-if="page === 'logs'"><Panel title="监控日志" :meta="`${logs.length} 条`"><template #tools><div class="filters"><select v-model="filter.event_type" aria-label="日志类型"><option v-for="[value, label] in eventTypes" :key="value" :value="value">{{ label }}</option></select><select v-model="filter.panel_type" aria-label="面板类型"><option value="">全部面板</option><option v-for="(name, key) in panelLabels" :key="key" :value="key">{{ name }}</option></select><button class="secondary" @click="fetchLogs(0)">最新</button></div></template><div v-if="!logs.length" class="empty">暂无符合条件的记录</div><div v-else class="table-wrap"><table><thead><tr><th>发生时间</th><th>从机 / 角色</th><th>类型与内容</th><th>遮挡 / 最小化</th><th>截图</th></tr></thead><tbody><tr v-for="item in logs" :key="item.id"><td>{{ time(item.occurred_at) }}</td><td>{{ item.display_name || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ logLabel(item) }}<small>{{ reasons[item.reason || ''] || '状态上报' }}</small></td><td>{{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }} / {{ item.minimized == null ? '—' : item.minimized ? '是' : '否' }}</td><td><button v-if="item.screenshot_ready && Date.parse(item.screenshot_expires_at || '') > Date.now()" class="secondary small" @click="screenshot(item)">查看截图</button><span v-else>{{ item.screenshot_ready ? '已过期' : '—' }}</span></td></tr></tbody></table></div><div class="pagination"><button class="secondary" :disabled="logCursor === 0" @click="fetchLogs(0)">返回最新</button><button class="secondary" :disabled="!logHasMore" @click="fetchLogs(logNext)">更早记录</button></div></Panel></template>
+
+        <template v-else><div class="settings-grid"><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel><Panel title="Bark 手机通知" meta="服务端推送"><form class="form-grid" @submit.prevent="saveBark"><label class="check"><input v-model="bark.enabled" type="checkbox"> 启用手机告警</label><label class="check"><input v-model="bark.call_enabled" type="checkbox"> 连续呼叫</label><label>重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label><label>设备密钥或 Bark 测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label><div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存通知设置</button><button class="secondary" type="button" @click="testBark">发送测试</button></div></form></Panel><Panel title="电脑网页提示音" meta="仅网页打开时可用"><div class="form-grid"><p class="hint">启用后，新告警到达时网页会尝试循环播放提示音。浏览器休眠或关闭后请依靠 Bark 手机推送。</p><button class="secondary" @click="toggleWebSound">{{ webSound ? '关闭电脑提示音' : '开启电脑提示音' }}</button></div></Panel></div></template>
+      </main>
+      <footer>数据每 5 秒刷新 · 手机告警由服务端 Bark 推送</footer>
+    </div>
+  </div>
+  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><button class="secondary" @click="preview = ''">关闭截图</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
+</template>

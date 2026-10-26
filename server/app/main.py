@@ -27,8 +27,9 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 WEB_ROOT = Path(__file__).parent / "web"
+ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
 PASSWORD_ITERATIONS = 260_000
@@ -269,6 +270,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.database = database
     app.state.screenshots = app_screenshots
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
+    app.mount("/assets", StaticFiles(directory=ADMIN_ROOT / "assets"), name="admin-assets")
     attempt_log: dict[tuple[str, str], list[float]] = {}
 
     def rate_limit(request: Request, bucket: str, *, limit: int, seconds: int) -> None:
@@ -329,6 +331,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
+        return FileResponse(ADMIN_ROOT / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/legacy", include_in_schema=False)
+    def legacy_index() -> FileResponse:
         return FileResponse(WEB_ROOT / "index.html")
 
     @app.get("/healthz")
@@ -668,9 +674,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         state: Literal["pending", "all"] = "pending",
         after_id: Annotated[int, Query(ge=0)] = 0,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        latest: bool = False,
         account_id: int = Depends(authenticate_master),
     ) -> dict[str, Any]:
-        events = database.list_events(account_id, pending_only=state == "pending", after_id=after_id, limit=limit)
+        events = database.list_events(account_id, pending_only=state == "pending", after_id=after_id,
+                                      limit=limit, latest=latest)
         return {"events": events, "count": len(events)}
 
     @app.post("/api/v1/master/events/{server_event_id}/ack")

@@ -393,6 +393,18 @@ def test_mobile_status_page_and_static_assets_are_available(tmp_path: Path) -> N
         page = client.get("/")
         assert page.status_code == 200
         assert "text/html" in page.headers["content-type"]
+        assert "梦幻西游监控后台" in page.text
+        assert "assets/index-" in page.text
+        assert page.headers["cache-control"] == "no-cache"
+        admin_script = page.text.split('src="/assets/')[1].split('"')[0]
+        script = client.get("/assets/" + admin_script)
+        assert script.status_code == 200
+        assert "api/v1/master/monitor-log-settings" in script.text
+        assert "api/v1/master/status" in script.text
+        assert "api/v1/auth/login" in script.text
+
+        page = client.get("/legacy")
+        assert page.status_code == 200
         assert "登录主机账号" in page.text
         assert 'id="username"' in page.text
         assert 'id="password"' in page.text
@@ -418,6 +430,25 @@ def test_mobile_status_page_and_static_assets_are_available(tmp_path: Path) -> N
         assert "dashboard-tabs" in stylesheet.text
         assert "alerts-list" in stylesheet.text
         assert "managed-devices" in stylesheet.text
+
+
+def test_recent_alert_order_for_web_dashboard(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        for index in range(3):
+            created = client.post(
+                "/api/v1/slave/events", headers=device_headers(),
+                json={"event_id": f"web-alert-{index}", "event_type": "inventory_full",
+                      "occurred_at": "2026-09-29T08:30:00+08:00"},
+            )
+            assert created.status_code == 202
+        recent = client.get("/api/v1/master/events?state=all&limit=2&latest=true", headers=master_headers())
+        assert recent.status_code == 200
+        recent_ids = [item["server_event_id"] for item in recent.json()["events"]]
+        assert recent_ids == sorted(recent_ids, reverse=True)
+        original = client.get("/api/v1/master/events?state=all&limit=2", headers=master_headers())
+        original_ids = [item["server_event_id"] for item in original.json()["events"]]
+        assert original_ids == sorted(original_ids)
+        assert recent_ids[0] > original_ids[-1]
 
 
 def _register(client: TestClient, username: str) -> str:

@@ -8,6 +8,7 @@ venv/
 .mypy_cache/
 .pyright/
 build/
+web-admin/node_modules/
 dist/
 dist-*/
 
