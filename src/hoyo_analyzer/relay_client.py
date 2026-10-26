@@ -13,9 +13,11 @@ from uuid import uuid4
 from PySide6.QtCore import QByteArray, QEventLoop, QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-from . import __version__
+from . import PROTOCOL_VERSION
+from . import SLAVE_VERSION as __version__
 from .cloud_config import CLOUD_RELAY_URL
 from .paths import application_root
+from .screenshots import ScreenshotUploader
 
 
 def normalize_relay_url(value: str) -> str:
@@ -70,6 +72,7 @@ class SlaveRelayClient(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._manager = QNetworkAccessManager(self)
+        self.screenshots = ScreenshotUploader(self)
         self._base_url = ""
         self._device_id = ""
         self._device_token = ""
@@ -111,6 +114,7 @@ class SlaveRelayClient(QObject):
             self._device_id = device_token_or_id.strip()
             self._device_token = legacy_device_token.strip()
         self._heartbeat_timer.stop()
+        self.screenshots.configure(self._base_url, self._device_id, self._device_token)
         self._set_online(False, "尚未连接")
         if self.configured:
             self._heartbeat_timer.start()
@@ -121,7 +125,7 @@ class SlaveRelayClient(QObject):
             return
         self._post(
             "/api/v1/slave/heartbeat",
-            {"hostname": platform.node() or None, "app_version": __version__},
+            {"hostname": platform.node() or None, "protocol_version": PROTOCOL_VERSION, "app_version": __version__},
             "heartbeat",
         )
 
@@ -157,9 +161,11 @@ class SlaveRelayClient(QObject):
             "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
         })
 
-    def send_monitor_payload(self, payload: dict[str, Any]) -> None:
+    def send_monitor_payload(self, payload: dict[str, Any], screenshot_path: str | None = None) -> None:
         self._log_outbox.append({"device_id": self._device_id, "payload": payload})
         self._save_log_outbox()
+        if screenshot_path:
+            self.screenshots.enqueue(payload["event_id"], screenshot_path)
         self._send_next_log()
 
     def send_cash_observation(self, payload: dict[str, Any]) -> None:
@@ -238,7 +244,7 @@ class SlaveRelayClient(QObject):
                 "pairing_code": code,
                 "installation_id": installation_id,
                 "hostname": platform.node() or None,
-                "app_version": __version__,
+                "protocol_version": PROTOCOL_VERSION, "app_version": __version__,
             },
             "pair",
             authenticated=False,
@@ -373,6 +379,9 @@ class MasterRelayClient(QObject):
     devices_received = Signal(object)
     status_received = Signal(object)
     monitor_logs_received = Signal(object)
+    screenshot_result = Signal(bool, object)
+    monitor_log_settings_received = Signal(object)
+    monitor_log_settings_result = Signal(bool, str)
     cash_statistics_received = Signal(object)
     acknowledge_result = Signal(int, bool, str)
     authentication_result = Signal(bool, str, object)
@@ -388,6 +397,7 @@ class MasterRelayClient(QObject):
         self._poll_errors: list[str] = []
         self._event_buffer: list[dict[str, Any]] = []
         self._logs_fetching = False
+        self._desired_log_query = (0, "", "")
         self._cash_fetching = False
         self._configuration_generation = 0
 
@@ -431,10 +441,24 @@ class MasterRelayClient(QObject):
         reply.setProperty("server_event_id", server_event_id)
         self._watch(reply)
 
-    def fetch_monitor_logs(self, before_id: int = 0) -> None:
+    def fetch_monitor_logs(self, before_id: int = 0, *, event_type: str = "", panel_type: str = "") -> None:
+        self._desired_log_query = (before_id, event_type, panel_type)
         if self.configured and not self._logs_fetching:
             self._logs_fetching = True
-            self._get(f"/api/v1/master/monitor-logs?limit=100&before_id={before_id}", "monitor_logs")
+            from urllib.parse import urlencode
+            query = urlencode({"limit": 100, "before_id": before_id, "event_type": event_type, "panel_type": panel_type})
+            self._get(f"/api/v1/master/monitor-logs?{query}", "monitor_logs")
+
+    def fetch_monitor_log_settings(self) -> None:
+        if self.configured:
+            self._get("/api/v1/master/monitor-log-settings", "monitor_log_settings")
+
+    def fetch_screenshot(self, log_id: int) -> None:
+        if self.configured:
+            self._get(f"/api/v1/master/monitor-logs/{int(log_id)}/screenshot", "screenshot")
+
+    def save_monitor_log_settings(self, values: dict[str, Any]) -> None:
+        self._send_custom("PUT", "/api/v1/master/monitor-log-settings", values, "monitor_log_settings_update")
 
     def fetch_cash_statistics(self, day: str) -> None:
         if self.configured and not self._cash_fetching:
@@ -482,16 +506,26 @@ class MasterRelayClient(QObject):
                 self.authentication_result.emit(False, message, {})
             elif kind == "pairing_code":
                 self.pairing_code_received.emit(False, message, {})
+            elif kind == "monitor_log_settings_update":
+                self.monitor_log_settings_result.emit(False, message)
             else:
                 self.device_action_result.emit(False, message)
             return
         reply.setProperty("relay_kind", kind)
+        if kind == "monitor_log_settings_update":
+            reply.setProperty("settings_generation", self._configuration_generation)
         self._watch(reply)
 
     def _get(self, path: str, kind: str) -> None:
         try:
             reply = self._manager.get(self._request(path))
         except Exception as exc:  # noqa: BLE001 - surface request setup errors to the UI
+            if kind == "screenshot":
+                self.screenshot_result.emit(False, {"detail": "无法连接截图服务"})
+                return
+            if kind == "monitor_log_settings":
+                self.monitor_log_settings_result.emit(False, str(exc))
+                return
             if kind == "monitor_logs":
                 self._logs_fetching = False
             if kind == "cash_statistics":
@@ -499,6 +533,13 @@ class MasterRelayClient(QObject):
             self._finish_poll_kind(kind, f"无法发起 HTTPS 请求：{exc}")
             return
         reply.setProperty("relay_kind", kind)
+        if kind == "screenshot":
+            reply.setProperty("screenshot_generation", self._configuration_generation)
+        if kind == "monitor_logs":
+            reply.setProperty("log_query", self._desired_log_query)
+            reply.setProperty("log_generation", self._configuration_generation)
+        if kind == "monitor_log_settings":
+            reply.setProperty("settings_generation", self._configuration_generation)
         if kind == "cash_statistics":
             reply.setProperty("cash_generation", self._configuration_generation)
         self._watch(reply)
@@ -526,6 +567,11 @@ class MasterRelayClient(QObject):
         reply.setProperty("relay_timed_out", True)
         message = "连接超时，请检查云端地址、网络或 HTTPS 证书"
         kind = str(reply.property("relay_kind"))
+        if kind == "screenshot":
+            if reply.property("screenshot_generation") == self._configuration_generation:
+                self.screenshot_result.emit(False, {"detail": "截图请求超时，请重试"})
+            reply.abort()
+            return
         if kind == "monitor_logs":
             self._logs_fetching = False
         if kind == "cash_statistics":
@@ -538,6 +584,8 @@ class MasterRelayClient(QObject):
             self.pairing_code_received.emit(False, message, {})
         elif kind == "device_action":
             self.device_action_result.emit(False, message)
+        elif kind in {"monitor_log_settings", "monitor_log_settings_update"}:
+            self.monitor_log_settings_result.emit(False, message)
         else:
             self._finish_poll_kind(kind, message)
         # Abort after publishing the timeout state. The finished callback will
@@ -570,8 +618,28 @@ class MasterRelayClient(QObject):
                 success = False
                 message = "云端返回的数据格式不正确"
         reply.deleteLater()
+        if kind == "screenshot":
+            if reply.property("screenshot_generation") == self._configuration_generation:
+                self.screenshot_result.emit(success, data if success else {"detail": message or "读取截图失败"})
+            return
         if kind == "monitor_logs":
             self._logs_fetching = False
+            requested = reply.property("log_query")
+            generation = reply.property("log_generation")
+            if (generation is not None and generation != self._configuration_generation) or (
+                requested is not None and tuple(requested) != self._desired_log_query
+            ):
+                before, event, panel = self._desired_log_query
+                self.fetch_monitor_logs(before, event_type=event, panel_type=panel)
+                return
+        if kind in {"monitor_log_settings", "monitor_log_settings_update"}:
+            if reply.property("settings_generation") != self._configuration_generation:
+                return
+            if success:
+                self.monitor_log_settings_received.emit(data)
+            self.monitor_log_settings_result.emit(success, "账号遮挡日志规则已同步" if success else
+                ("服务器尚未升级，请使用本地预览；规则尚未生效" if status == 404 else message or "规则同步失败"))
+            return
         if kind == "cash_statistics":
             self._cash_fetching = False
             if reply.property("cash_generation") != self._configuration_generation:

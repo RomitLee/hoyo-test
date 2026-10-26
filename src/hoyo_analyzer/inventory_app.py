@@ -21,9 +21,11 @@ from .event_machine import EventMachine
 from .inventory_fullness import InventoryAnalysis, InventoryFullnessDetector, InventoryStatus
 from .models import Event, Observation
 from .money import MoneyDetector, MoneyTracker
+from .panel_targets import PanelTargetDetector, PanelTargetTracker, attach_target, target_payload
 from .panels import PanelDetector, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
+from .screenshots import capture_panel_screenshot
 from .storage import JsonlEventSink
 from .wgc import is_window_available, is_window_minimized, list_capturable_windows
 
@@ -173,6 +175,8 @@ class InventoryMonitorWorker(QObject):
             detector = InventoryFullnessDetector(template_path)
             panel_detector = PanelDetector()
             panel_tracker = PanelTracker()
+            target_detector = PanelTargetDetector()
+            target_tracker = PanelTargetTracker()
             money_detector = MoneyDetector()
             money_tracker = MoneyTracker()
             money_character_id = parse_account_info(self.window_title).role_id
@@ -203,6 +207,7 @@ class InventoryMonitorWorker(QObject):
                 if was_paused:
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
+                    target_tracker.reset()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
                     sampler = AdaptiveSampler(
@@ -222,6 +227,7 @@ class InventoryMonitorWorker(QObject):
                 if is_window_minimized(self.hwnd):
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
+                    target_tracker.reset()
                     continue
                 now = monotonic()
                 if now - last_preview >= self.PREVIEW_INTERVAL_SECONDS:
@@ -234,6 +240,7 @@ class InventoryMonitorWorker(QObject):
                     panel = panel_detector.analyze(packet.image)
                     if last_panel_frame_ms is not None and packet.timestamp_ms - last_panel_frame_ms > 1500:
                         panel_tracker.reset_pending()
+                        target_tracker.reset()
                     last_panel_frame_ms = packet.timestamp_ms
                     panel_events = panel_tracker.update(panel, packet.timestamp_ms, packet.frame_index)
                     if panel.panel_type not in {"inventory", "unknown"}:
@@ -246,7 +253,17 @@ class InventoryMonitorWorker(QObject):
                     signal["character_id"] = current_character_id
                     if money_character_id != current_character_id:
                         money_tracker = MoneyTracker()
+                        target_tracker.reset()
                         money_character_id = current_character_id
+                    reading = target_detector.analyze(packet.image, panel)
+                    target_events = target_tracker.update(panel.panel_type, reading, packet.timestamp_ms, packet.frame_index)
+                    signal.update(target_payload(target_tracker.current))
+                    signal["target_reason"] = reading.reason
+                    for action in panel_events:
+                        if action.type == "panel_opened" and panel.panel_type in {"give", "trade"}:
+                            attach_target(action, target_tracker.current)
+                            target_events = []
+
                     money = money_detector.read_fields(
                         packet.image, panel.bbox if panel.panel_type == "inventory" else None,
                         analysis.grid_bbox if panel.panel_type in {"inventory", "unknown"} else None,
@@ -263,15 +280,16 @@ class InventoryMonitorWorker(QObject):
                         analysis.confidence,
                         "inventory-monitor",
                     )
-                    for event in panel_events + machine.update(observation):
+                    for event in panel_events + target_events + machine.update(observation):
                         account = parse_account_info(self.window_title)
                         event.payload.setdefault("window_hwnd", self.hwnd)
                         event.payload.setdefault("window_title", self.window_title)
                         event.payload.setdefault("secondary_region", account.secondary_region)
                         event.payload.setdefault("role_name", account.role_name)
                         event.payload.setdefault("role_id", account.role_id)
+                        capture_panel_screenshot(event, packet.image)
                         sink.write(event)
-                        if event.type in {"panel_opened", "panel_closed", "game_default"}:
+                        if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:
                             text_path = event_log_path.with_name("panel_events.log")
                             with text_path.open("a", encoding="utf-8") as handle:
                                 handle.write(f"{event.display_time}{event.display_name}  "

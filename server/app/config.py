@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -15,6 +15,11 @@ class Settings:
     device_tokens: dict[str, str]
     retention_days: int = 30
     update_directory: Path = Path("/releases")
+    cos_secret_id: str = field(default="", repr=False)
+    cos_secret_key: str = field(default="", repr=False)
+    cos_bucket: str = ""
+    cos_region: str = ""
+    cos_screenshot_domain: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -51,4 +56,9 @@ class Settings:
             device_tokens=device_tokens,
             retention_days=max(1, min(retention_days, 3650)),
             update_directory=Path(os.environ.get("HOYO_UPDATE_DIRECTORY", "/releases")),
+            cos_secret_id=os.environ.get("COS_SECRET_ID", ""),
+            cos_secret_key=os.environ.get("COS_SECRET_KEY", ""),
+            cos_bucket=os.environ.get("COS_BUCKET", ""),
+            cos_region=os.environ.get("COS_REGION", ""),
+            cos_screenshot_domain=os.environ.get("COS_SCREENSHOT_DOMAIN", ""),
         )

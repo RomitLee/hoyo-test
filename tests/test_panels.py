@@ -105,3 +105,39 @@ def test_live_worker_writes_confirmed_panel_actions_with_character_identity(monk
     lines = (tmp_path / "panel_events.log").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     assert "打开背包" in lines[0] and "秦淮风光/清风知夏" in lines[0]
+
+
+def test_worker_enriches_open_log_then_records_same_dialog_target_switch(monkeypatch, tmp_path):
+    from hoyo_analyzer.config import AppConfig
+    from hoyo_analyzer.inventory_app import InventoryMonitorWorker
+    from hoyo_analyzer.models import FramePacket
+    from hoyo_analyzer.panel_targets import TargetReading
+
+    frames = [FramePacket(i, i * 200, np.zeros((48, 64, 3), np.uint8)) for i in range(7)]
+
+    class Source:
+        def __iter__(self):
+            return iter(frames)
+
+        def close(self):
+            pass
+
+    values = [TargetReading("甲", 109, 0.99)] * 3 + [TargetReading("乙", 144, 0.98)] * 4
+    monkeypatch.setattr("hoyo_analyzer.inventory_app.make_source", lambda *a, **k: Source())
+    monkeypatch.setattr("hoyo_analyzer.inventory_app.is_window_minimized", lambda _: False)
+    monkeypatch.setattr("hoyo_analyzer.inventory_app.PanelDetector", lambda: SimpleNamespace(analyze=lambda _: PanelObservation("give", 1)))
+    monkeypatch.setattr("hoyo_analyzer.inventory_app.PanelTargetDetector", lambda: SimpleNamespace(analyze=lambda *a: values.pop(0)))
+    config = AppConfig()
+    config.output.event_log = str(tmp_path / "events.jsonl")
+    config.sampling.normal_fps = 5
+    worker = InventoryMonitorWorker(123, config, "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 角色[54588235])")
+    events, errors = [], []
+    worker.event_ready.connect(events.append)
+    worker.failed.connect(errors.append)
+    worker.run()
+    assert errors == []
+    assert [event.type for event in events] == ["panel_opened", "panel_target_changed"]
+    assert [event.payload["target_name"] for event in events] == ["甲", "乙"]
+    assert events[0].display_name == "打开给予面板，对象：甲，109级"
+    assert all(event.payload["role_id"] == "54588235" for event in events)
+    assert "乙，144级" in (tmp_path / "panel_events.log").read_text(encoding="utf-8")

@@ -17,7 +17,7 @@ from time import monotonic
 from typing import Annotated, Any, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -25,8 +25,9 @@ from .bark import BarkPushError, event_message, send_bark_notification
 from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
+from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.6.0"
+VERSION = "2.9.0"
 WEB_ROOT = Path(__file__).parent / "web"
 SESSION_DAYS = 30
 PAIRING_MINUTES = 5
@@ -61,6 +62,7 @@ class PairDeviceIn(BaseModel):
     installation_id: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     hostname: str | None = Field(default=None, max_length=255)
     app_version: str | None = Field(default=None, max_length=64)
+    protocol_version: int | None = Field(default=None, ge=1, le=65535, strict=True)
 
 
 class DeviceUpdateIn(BaseModel):
@@ -73,6 +75,13 @@ class DeviceUpdateIn(BaseModel):
 class DeviceNameIn(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     display_name: str = Field(min_length=1, max_length=64)
+
+
+class MonitorLogSettingsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    occlusion_enabled: bool = True
+    occlusion_percent: float = Field(default=60, ge=0, le=100)
+    occlusion_seconds: int = Field(default=5, ge=0, le=3600, strict=True)
 
 
 class EventIn(BaseModel):
@@ -94,6 +103,7 @@ class HeartbeatIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hostname: str | None = Field(default=None, max_length=255)
     app_version: str | None = Field(default=None, max_length=64)
+    protocol_version: int | None = Field(default=None, ge=1, le=65535, strict=True)
 
 
 class CashObservationIn(BaseModel):
@@ -155,7 +165,7 @@ class AckIn(BaseModel):
 class MonitorLogIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
-    event_type: Literal["monitoring_started", "monitoring_paused", "panel_opened", "panel_closed", "game_default"]
+    event_type: Literal["monitoring_started", "monitoring_paused", "panel_opened", "panel_closed", "game_default", "panel_target_changed"]
     occurred_at: datetime
     reason: Literal["startup", "resume", "pause", "close", "recognition"]
     window_id: str | None = Field(default=None, max_length=128)
@@ -165,6 +175,10 @@ class MonitorLogIn(BaseModel):
     panel_type: Literal["inventory", "give", "trade", "attributes", "stall", "stall_records"] | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     message: str | None = Field(default=None, max_length=128)
+    target_name: str | None = Field(default=None, min_length=1, max_length=16)
+    target_level: int | None = Field(default=None, ge=1, le=175, strict=True)
+    target_confidence: float | None = Field(default=None, ge=0, le=1)
+    target_status: Literal["recognized", "unrecognized"] | None = None
 
 
 class BarkSettingsIn(BaseModel):
@@ -208,6 +222,7 @@ def _password_matches(password: str, stored: str) -> bool:
 def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or Settings.from_env()
     database = RelayDatabase(app_settings.database_path)
+    app_screenshots = ScreenshotStore(app_settings)
 
     def deliver_bark(notification: dict[str, Any]) -> bool:
         if not notification or notification.get("acked_at") or not notification.get("enabled"):
@@ -252,6 +267,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = app_settings
     app.state.database = database
+    app.state.screenshots = app_screenshots
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
     attempt_log: dict[tuple[str, str], list[float]] = {}
 
@@ -321,7 +337,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/updates/latest", include_in_schema=False)
     def latest_update() -> FileResponse:
-        manifest = app_settings.update_directory / "release-manifest.json"
+        manifest = app_settings.update_directory / "legacy-release-manifest.json"
+        if not manifest.is_file():
+            manifest = app_settings.update_directory / "release-manifest.json"
         if not manifest.is_file():
             raise HTTPException(status_code=404, detail="暂无可用更新")
         return FileResponse(
@@ -330,18 +348,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/api/v1/updates/latest/{role}", include_in_schema=False)
+    def role_update(role: str) -> FileResponse:
+        if role not in {"master", "slave"}:
+            raise HTTPException(status_code=404, detail="程序类型不存在")
+        manifest = app_settings.update_directory / f"release-manifest-{role}.json"
+        if not manifest.is_file():
+            raise HTTPException(status_code=404, detail="暂无该程序的独立更新")
+        return FileResponse(manifest, media_type="application/json", headers={"Cache-Control": "no-store"})
+
     @app.get("/api/v1/updates/download/{role}/{client_version}", include_in_schema=False)
     def download_update(role: str, client_version: str) -> FileResponse:
         if role not in {"slave", "master"} or not re.fullmatch(r"V\d+\.\d+\.\d+", client_version):
             raise HTTPException(status_code=404, detail="更新安装包不存在")
-        manifest_path = app_settings.update_directory / "release-manifest.json"
         try:
-            document = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-            package = document["packages"][role]
-            if document["client_version"] != client_version:
+            package = None
+            for name in (f"release-manifest-{role}.json", "legacy-release-manifest.json", "release-manifest.json",
+                         f"history/{role}/{client_version}/release-manifest.json"):
+                manifest_path = app_settings.update_directory / name
+                if not manifest_path.is_file():
+                    continue
+                document = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                if document.get("client_version") != client_version:
+                    continue
+                if document.get("schema_version") == 3 and document.get("release_role") != role:
+                    continue
+                candidate = document["packages"][role]
+                if candidate.get("client_version", client_version) != client_version:
+                    continue
+                package = candidate
+                break
+            if package is None:
                 raise KeyError(client_version)
             filename = str(package["filename"])
-            archive = (app_settings.update_directory / filename).resolve()
+            archive_root = manifest_path.parent if name.startswith("history/") else app_settings.update_directory
+            if name == "legacy-release-manifest.json" and (archive_root / "legacy").is_dir():
+                archive_root = archive_root / "legacy"
+            archive = (archive_root / filename).resolve()
             archive.relative_to(app_settings.update_directory.resolve())
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=404, detail="更新安装包不存在") from exc
@@ -450,6 +493,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if result is None:
             raise HTTPException(status_code=400, detail="配对码无效、已使用或已过期")
         device_id, _account_id = result
+        database.set_device_protocol(device_id, payload.protocol_version)
         profile = database.device_profile(_account_id, device_id)
         return {"device_id": device_id, "device_token": device_token, **profile}
 
@@ -472,6 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             device_id, hostname=payload.hostname, app_version=payload.app_version,
             ip_address=request.client.host if request.client else None,
         )
+        database.set_device_protocol(device_id, payload.protocol_version)
         return {"device_id": device_id, "server_time": seen_at,
                 **database.device_profile(identity.account_id, device_id)}
 
@@ -512,17 +557,96 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, bool]:
         if payload.event_type in {"panel_opened", "panel_closed"} and not payload.panel_type:
             raise HTTPException(status_code=422, detail="面板日志缺少面板类型")
+        if payload.event_type == "panel_target_changed" and payload.panel_type not in {"give", "trade"}:
+            raise HTTPException(status_code=422, detail="对象日志仅支持给予和交易面板")
+        if payload.event_type == "panel_target_changed" and payload.target_status is None:
+            raise HTTPException(status_code=422, detail="对象日志缺少识别状态")
+        if any(value is not None for value in (payload.target_status, payload.target_name, payload.target_level, payload.target_confidence)):
+            if payload.event_type not in {"panel_opened", "panel_target_changed"} or payload.panel_type not in {"give", "trade"}:
+                raise HTTPException(status_code=422, detail="对象信息仅支持给予和交易面板")
+            if payload.target_status == "recognized":
+                if not payload.target_name or payload.target_level is None or any(c.isspace() or not c.isprintable() for c in payload.target_name):
+                    raise HTTPException(status_code=422, detail="对象昵称与等级必须同时确认")
+            elif (payload.target_status != "unrecognized" or payload.target_name is not None
+                  or payload.target_level is not None or payload.target_confidence is not None):
+                raise HTTPException(status_code=422, detail="未识别对象不能携带旧昵称或等级")
         database.insert_monitor_log(identity.account_id, identity.device_id, payload.model_dump(mode="json"))
         return {"accepted": True}
+
+    @app.put("/api/v1/slave/monitor-logs/{event_id}/screenshot")
+    async def upload_monitor_screenshot(event_id: str, request: Request,
+            identity: DeviceIdentity = Depends(authenticate_device)):  # noqa: B008
+        row = database.screenshot_log(identity.account_id, identity.device_id, event_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="对应监控日志尚未接收")
+        if row["panel_type"] not in {"give", "trade"} or row["event_type"] not in {"panel_opened", "panel_target_changed"}:
+            raise HTTPException(status_code=422, detail="仅给予或交易日志可以上传截图")
+        if not app.state.screenshots.configured:
+            raise HTTPException(status_code=503, detail="截图存储暂未配置")
+        if request.headers.get("content-type", "").split(";")[0] != "image/jpeg":
+            raise HTTPException(status_code=415, detail="仅支持 JPEG 截图")
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_SCREENSHOT_BYTES:
+                raise HTTPException(status_code=413, detail="截图不能超过 2MB")
+        try:
+            await asyncio.to_thread(validate_jpeg, bytes(data))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        def save():
+            token = secrets.token_hex(16)
+            state, key = database.claim_screenshot(identity.account_id, row["id"], token)
+            if state == "busy":
+                raise HTTPException(status_code=409, detail="截图正在上传，请稍后重试")
+            if state == "ready":
+                return {"accepted": True, "duplicate": True}
+            try:
+                app.state.screenshots.put(key, bytes(data))
+            except Exception:  # noqa: BLE001 - prevent SDK request credentials from reaching responses
+                database.finish_screenshot(row["id"], token, success=False)
+                # SDK exception strings may contain signed requests; never expose them.
+                raise HTTPException(status_code=503, detail="截图存储暂不可用，请稍后重试") from None
+            database.finish_screenshot(row["id"], token, success=True)
+            return {"accepted": True}
+        return await asyncio.to_thread(save)
+
+    @app.get("/api/v1/master/monitor-logs/{log_id}/screenshot")
+    def view_monitor_screenshot(log_id: int, account_id: int = Depends(authenticate_master)):
+        row = database.get_screenshot(account_id, log_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="暂无截图或尚未上传完成")
+        if datetime.fromisoformat(row["expires_at"]) <= datetime.now(UTC):
+            raise HTTPException(status_code=410, detail="截图已超过30天保留期")
+        if not app.state.screenshots.configured:
+            raise HTTPException(status_code=503, detail="截图存储暂未配置")
+        try:
+            return JSONResponse({"url": app.state.screenshots.signed_url(row["object_key"]), "expires_in": 300},
+                                headers={"Cache-Control": "no-store"})
+        except Exception:  # noqa: BLE001 - prevent SDK request credentials from reaching responses
+            raise HTTPException(status_code=503, detail="暂时无法读取截图，请稍后重试") from None
+
+    @app.get("/api/v1/master/monitor-log-settings")
+    def get_monitor_log_settings(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return database.get_monitor_log_settings(account_id)
+
+    @app.put("/api/v1/master/monitor-log-settings")
+    def set_monitor_log_settings(payload: MonitorLogSettingsIn, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return database.update_monitor_log_settings(account_id, payload.model_dump())
 
     @app.get("/api/v1/master/monitor-logs")
     def list_monitor_logs(
         before_id: Annotated[int, Query(ge=0)] = 0,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        event_type: Annotated[str, Query(max_length=64)] = "",
+        panel_type: Annotated[str, Query(max_length=64)] = "",
         account_id: int = Depends(authenticate_master),
     ) -> dict[str, Any]:
-        rows = database.list_monitor_logs(account_id, before_id=before_id, limit=limit + 1)
-        return {"logs": rows[:limit], "has_more": len(rows) > limit}
+        rows = database.list_monitor_logs(account_id, before_id=before_id, limit=limit + 1,
+                                          event_type=event_type, panel_type=panel_type)
+        return {"logs": rows[:limit], "has_more": len(rows) > limit,
+                "filters": {"event_type": event_type, "panel_type": panel_type}}
 
     @app.post("/api/v1/slave/events", status_code=status.HTTP_202_ACCEPTED)
     def create_event(

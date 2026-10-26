@@ -15,7 +15,7 @@ def _self_test() -> int:
         import pygame
         from PySide6.QtCore import qVersion
 
-        from hoyo_analyzer import __version__
+        from hoyo_analyzer import MASTER_VERSION as __version__
 
         ssl.create_default_context()
         result.update(
@@ -50,7 +50,7 @@ def _ui_self_test() -> int:
     try:
         from PySide6.QtWidgets import QApplication
 
-        from hoyo_analyzer import __version__
+        from hoyo_analyzer import MASTER_VERSION as __version__
         from hoyo_analyzer.master_app import MasterWindow
 
         app = QApplication.instance() or QApplication(["hoyo-master-ui-self-test"])
@@ -69,7 +69,7 @@ def _ui_self_test() -> int:
             "client_version": __version__,
         }
         result.update(ok=checks["window_visible"] and checks["window_size"] == [800, 632]
-                      and checks["monitor_log_tab"] and checks["monitor_log_columns"] == 7
+                      and checks["monitor_log_tab"] and checks["monitor_log_columns"] == 8
                       and checks["cash_only"] and checks["separate_pages"]
                       and checks["single_device_identity"] and checks["light_theme"], checks=checks)
     except Exception as exc:  # noqa: BLE001 - persist frozen UI startup failures

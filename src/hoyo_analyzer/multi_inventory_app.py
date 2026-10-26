@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__
+from . import SLAVE_VERSION as __version__
 from .alarm_sound import play_alarm_loop, stop_alarm_loop
 from .app_identity import SLAVE_APP_ID, application_icon, apply_application_icon, configure_windows_app_id
 from .auto_update import install_auto_update, mark_update_healthy
@@ -162,7 +162,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.minimize_verify_timer.timeout.connect(self._finish_minimize_all_game_windows)
         QTimer.singleShot(0, self.refresh_windows)
         QTimer.singleShot(250, self._connect_or_pair)
-        mark_update_healthy()
+        mark_update_healthy("slave")
         self.update_controller = install_auto_update("slave", self)
 
     def _build_ui(self) -> None:
@@ -928,20 +928,26 @@ class InventoryMonitorWindow(QMainWindow):
         session = self.sessions.get(hwnd)
         if session is None or self.monitoring_paused:
             return
-        if session.minimized and (event.type not in {"panel_opened", "panel_closed", "game_default"}
+        if session.minimized and (event.type not in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}
                                   or is_window_minimized(hwnd)):
             return
         account_label = f"{session.account.secondary_region} / {session.account.role_name}"
         self.log.appendPlainText(f"{event.display_time}  {account_label}  {event.display_name}")
-        if event.type in {"panel_opened", "panel_closed", "game_default"}:
-            self.relay_client.send_monitor_payload({
+        if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:
+            payload = {
                 "event_id": event.event_id, "event_type": event.type, "reason": "recognition",
                 "occurred_at": event.payload["occurred_at"],
                 "window_id": f"hwnd:{hwnd}", "server_name": session.account.secondary_region,
                 "role_name": session.account.role_name, "character_id": session.account.role_id or None,
                 "panel_type": event.payload.get("panel_type"), "confidence": event.confidence,
                 "message": event.display_name,
-            })
+                **{key: event.payload[key] for key in ("target_name", "target_level", "target_confidence", "target_status")
+                   if key in event.payload},
+            }
+            if event.evidence_path:
+                self.relay_client.send_monitor_payload(payload, screenshot_path=event.evidence_path)
+            else:
+                self.relay_client.send_monitor_payload(payload)
 
     def _show_alert(
         self,

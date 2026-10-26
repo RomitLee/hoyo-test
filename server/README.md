@@ -1,5 +1,7 @@
 # 梦幻西游背包告警中转服务
 
+当前版本 **2.9.0**，配套主机 V2.3.0、从机 V2.2.0，通信协议 1。主从机可独立更新。当前发布与下载见 [项目说明](../README.md)。
+
 这是从机与主机之间的多账号云端中转服务。所有连接均由从机或主机主动发起，家庭和公司路由器不需要开放端口。
 
 ## 身份与数据隔离
@@ -19,8 +21,7 @@
 - `GET /api/v1/master/monitor-logs?limit=100&before_id=0`：按当前账号查询监控日志，
   ID 倒序分页，响应包含 `logs`、`has_more`。更早一页传入上一页最后一条 ID。
 
-从机状态快照中的每个最小化窗口、每个遮挡比例大于 0 的窗口，均在保存最新状态的同一事务中
-写入监控日志。相同快照重传幂等，不同时间的异常快照分别保存。日志独立保存，设备移除或
+最小化状态及符合账号遮挡规则的窗口在保存最新状态时写入监控日志。遮挡规则包含是否上报、比例与持续时间，默认开启、60%、5 秒；原始遮挡状态仍可正常上报。相同快照重传幂等，不同时间的异常快照分别保存。日志独立保存，设备移除或
 状态快照被替换后历史仍保留；记录按账号隔离。现有数据库在服务启动时自动创建新表和索引。
 
 - `GET /healthz`：健康检查。
@@ -39,7 +40,11 @@
 - `DELETE /api/v1/master/devices/{device_id}`：移除从机并撤销凭据。
 - `POST /api/v1/master/devices/{device_id}/reissue`：撤销旧凭据并生成重新配对码。
 - `GET /api/v1/master/status`：读取当前账号的从机和全部游戏窗口状态。
-- `GET /api/v1/updates/latest`：读取当前 RSA 签名的桌面客户端发布清单。
+- `GET /api/v1/updates/latest/{role}`：读取对应角色的 schema3 RSA 签名发布清单。
+- `GET /api/v1/updates/latest`：旧客户端 V2.1.0 过渡清单，不能用新角色清单覆盖。
+- `GET /api/v1/master/monitor-log-settings`、`PUT /api/v1/master/monitor-log-settings`：读取或修改账号遮挡日志规则。
+- `PUT /api/v1/slave/monitor-logs/{event_id}/screenshot`：设备认证上传给予、交易日志 JPEG。
+- `GET /api/v1/master/monitor-logs/{log_id}/screenshot`：账号认证取得 5 分钟有效的图片链接。
 - `GET /api/v1/updates/download/{role}/{version}`：下载清单中当前版本对应的主机或从机 ZIP。
 
 已登录的主机请求携带：
@@ -73,17 +78,27 @@ curl http://127.0.0.1/healthz
 
 无域名 HTTPS 由 Certbot 为公网 IP 申请短期证书，Caddy 使用该证书提供 HTTPS，systemd 定时器每天检查续期。SQLite 数据保存在 Docker 命名卷 `relay_data`；已确认告警默认保留 30 天，未确认告警不会自动删除。
 
-桌面自动更新文件从宿主机 `server/releases/` 只读挂载到容器 `/releases`。发布新版本前，在项目根目录完成签名构建，然后把 `dist/release-manifest.json` 和两个 ZIP 复制到该目录：
+桌面自动更新文件从宿主机 `releases/` 只读挂载到容器 `/releases`。发布需保存两个角色的签名清单、相应版本 ZIP、旧 `legacy-release-manifest.json` 和历史包目录。先部署服务端并检查健康，再上传安装包，最后原子切换被更新角色的清单；未改动端复用原包。旧共享过渡清单必须保持可用。
 
-```bash
-mkdir -p server/releases
-cp dist/release-manifest.json dist/*.zip server/releases/
-cd server
-docker compose up -d --build
-curl --fail https://jiankong.maipi.top/api/v1/updates/latest
+发布目录绝不能包含签名私钥或客户端运行配置。客户端验证 RSA-3072 签名、角色、版本、大小及 SHA-256；不匹配的包不会安装。当前发布流程及验证见 [发布记录](../docs/30-screenshot-production-release.md)。
+
+## 私有 COS 截图配置
+
+仅服务端配置以下环境变量；不要将真实值写入本文件或发送给客户端：
+
+```dotenv
+COS_SECRET_ID=<截图专用账号的 SecretId>
+COS_SECRET_KEY=<截图专用账号的 SecretKey>
+COS_BUCKET=<桶名称>
+COS_REGION=<地域>
+COS_SCREENSHOT_DOMAIN=https://<已配置 HTTPS 的截图域名>
 ```
 
-发布目录不需要、也绝不能包含 `runtime/update-signing-private.json`。客户端会验证清单的 RSA-3072 签名及安装包 SHA-256，未签名、签名错误或文件不匹配的版本不会被安装。
+可将配置直接加入现有 `.env`；若分开保存在 `.env.cos`，需在 Compose 的 relay 服务 `env_file` 中追加该文件后重建容器。仓库默认 Compose 只加载 `.env`，不会自动读取 `.env.cos`。线上已单独配置加载，密钥文件保持 root 所有、600 权限。
+
+桶保持私有，专用账号仅授予 `screenshots/` 前缀的 PutObject、GetObject 和 HeadObject 权限。该前缀设置 30 天生命周期；自定义域名需配置 CNAME、HTTPS 证书和续期维护。单张图片最大 2MB，服务端验证 JPEG 内容、尺寸和日志归属。每条日志唯一关联截图，上传租约处理并发及失败恢复。
+
+主机需登录才能取得 5 分钟 HTTPS 签名链接，响应禁止缓存；不要将签名链接写入公开日志。截图保留 30 天，过期后文字日志继续保留。缺少存储配置时返回可重试错误，原有文字日志不受影响。详情见 [截图说明](../docs/29-panel-screenshots.md)。
 
 全新的 Ubuntu 24.04 服务器也可以使用一键部署脚本：
 
@@ -102,7 +117,7 @@ chmod 700 deploy.sh
 https://<服务器地址>/
 ```
 
-页面使用与 Windows 主机程序相同的账号密码登录，只在浏览器保存登录会话，不保存密码。页面每 5 秒刷新，包含实时状态、告警记录、从机管理和手机通知四个页面。告警可在手机端确认；从机管理支持生成一次性配对码、编辑名称和备注、启用/禁用、重新配对与移除设备。手机布局采用紧凑状态卡，便于单屏查看更多角色。
+页面使用与 Windows 主机程序相同的账号密码登录，只在浏览器保存登录会话，不保存密码。页面每 5 秒刷新，包含监控、告警记录、从机管理、监控日志及手机通知功能。监控日志支持类型筛选和截图查看。告警可在手机端确认；从机管理支持生成一次性配对码、编辑名称和备注、启用/禁用、重新配对与移除设备。手机布局采用紧凑状态卡，便于单屏查看更多角色。
 
 “手机通知”页面可绑定 iPhone Bark 设备密钥。新告警由云服务器直接推送，不依赖 Windows 主机在线；支持测试通知、约 30 秒连续呼叫，以及未确认告警按 5/10/30/60 分钟重复提醒。手机或主机确认告警后停止重复推送。Bark 密钥只存储在服务器数据库中，接口仅返回掩码。
 

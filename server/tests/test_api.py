@@ -72,6 +72,8 @@ def test_money_snapshot_roundtrip_and_legacy_compatibility(tmp_path: Path) -> No
 
 def test_monitor_logs_archive_abnormal_snapshots_and_deduplicate_retries(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
+        client.put("/api/v1/master/monitor-log-settings", headers=master_headers(),
+                   json={"occlusion_enabled": True, "occlusion_percent": 0, "occlusion_seconds": 0})
         window = {
             "window_id": "hwnd:123", "server_name": "秦淮风光", "role_name": "角色一",
             "occlusion_percent": 0.021, "minimized": False,
@@ -427,6 +429,39 @@ def _register(client: TestClient, username: str) -> str:
     return str(response.json()["access_token"])
 
 
+def test_monitor_policy_follows_account_and_validates_values(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        first, second = _register(client, "policy-one"), _register(client, "policy-two")
+        a, b = {"Authorization": f"Bearer {first}"}, {"Authorization": f"Bearer {second}"}
+        path = "/api/v1/master/monitor-log-settings"
+        defaults = {"occlusion_enabled": True, "occlusion_percent": 60.0, "occlusion_seconds": 5}
+        assert client.get(path, headers=a).json() == defaults
+        values = {"occlusion_enabled": False, "occlusion_percent": 80, "occlusion_seconds": 10}
+        assert client.put(path, headers=a, json=values).json() == values
+        assert client.get(path, headers=a).json() == values
+        assert client.get(path, headers=b).json() == defaults
+        assert client.get(path).status_code == 401
+        for field, value in (("occlusion_percent", 101), ("occlusion_percent", -1),
+                             ("occlusion_seconds", -1), ("occlusion_seconds", 3601), ("occlusion_seconds", 2.5)):
+            assert client.put(path, headers=a, json={**values, field: value}).status_code == 422
+
+
+def test_log_filter_is_applied_before_pagination(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        for index in range(125):
+            panel = "trade" if index < 5 else "attributes"
+            payload = {"event_id": f"filter:{index}", "event_type": "panel_opened", "panel_type": panel,
+                       "occurred_at": "2026-10-20T10:31:20+08:00", "reason": "recognition"}
+            assert client.post("/api/v1/slave/monitor-logs", headers=device_headers(), json=payload).status_code == 202
+        url = "/api/v1/master/monitor-logs?panel_type=trade&limit=3"
+        first = client.get(url, headers=master_headers()).json()
+        assert len(first["logs"]) == 3 and first["has_more"]
+        assert all(row["panel_type"] == "trade" for row in first["logs"])
+        second = client.get(url + f'&before_id={first["logs"][-1]["id"]}', headers=master_headers()).json()
+        assert len(second["logs"]) == 2 and not second["has_more"]
+        assert client.get("/api/v1/master/monitor-logs?event_type=window_occluded", headers=master_headers()).json()["logs"] == []
+
+
 def _pair(client: TestClient, master_token: str, installation_id: str) -> tuple[str, str]:
     code_response = client.post(
         "/api/v1/master/pairing-codes",
@@ -552,3 +587,54 @@ def test_device_management_disable_reissue_and_remove(tmp_path: Path) -> None:
         assert client.post("/api/v1/slave/heartbeat", headers=new_headers, json={}).status_code == 200
         assert client.delete(f"/api/v1/master/devices/{device_id}", headers=headers).status_code == 200
         assert client.post("/api/v1/slave/heartbeat", headers=new_headers, json={}).status_code == 401
+
+
+def test_independent_updates_keep_legacy_slave_unchanged(tmp_path: Path):
+    releases = tmp_path / "releases"
+    (releases / "legacy").mkdir(parents=True)
+    packages = {"master": {"filename": "master.zip"}, "slave": {"filename": "slave.zip"}}
+    for role, version in (("master", "V2.1.0"), ("slave", "V2.0.0")):
+        document = {"schema_version": 3, "release_role": role, "client_version": version, "packages": packages}
+        (releases / f"release-manifest-{role}.json").write_text(json.dumps(document), encoding="utf-8")
+        (releases / packages[role]["filename"]).write_bytes(f"new-{role}".encode())
+        (releases / "legacy" / packages[role]["filename"]).write_bytes(f"old-{role}".encode())
+    legacy = {"schema_version": 2, "client_version": "V2.0.0", "packages": packages}
+    (releases / "legacy-release-manifest.json").write_text(json.dumps(legacy), encoding="utf-8")
+    with make_client(tmp_path, releases) as client:
+        assert client.get("/api/v1/updates/latest").json()["client_version"] == "V2.0.0"
+        assert client.get("/api/v1/updates/latest/master").json()["client_version"] == "V2.1.0"
+        assert client.get("/api/v1/updates/latest/slave").json()["client_version"] == "V2.0.0"
+        assert client.get("/api/v1/updates/latest/invalid").status_code == 404
+        assert client.get("/api/v1/updates/download/master/V2.1.0").content == b"new-master"
+        assert client.get("/api/v1/updates/download/master/V2.0.0").content == b"old-master"
+        assert client.get("/api/v1/updates/download/slave/V2.1.0").status_code == 404
+
+
+def test_protocol_is_reported_and_legacy_heartbeat_remains_supported(tmp_path: Path):
+    with make_client(tmp_path) as client:
+        response = client.post("/api/v1/slave/heartbeat", headers=device_headers(), json={"app_version": "V3.0.0", "protocol_version": 2})
+        assert response.status_code == 200
+        devices = client.get("/api/v1/master/devices", headers=master_headers()).json()["devices"]
+        assert devices[0]["protocol_version"] == 2
+        response = client.post("/api/v1/slave/heartbeat", headers=device_headers(), json={"app_version": "V2.0.0"})
+        assert response.status_code == 200
+        devices = client.get("/api/v1/master/devices", headers=master_headers()).json()["devices"]
+        assert devices[0]["protocol_version"] is None
+
+
+def test_download_role_binding_and_history_are_preserved(tmp_path: Path):
+    releases = tmp_path / "releases"
+    archive_root = releases / "history" / "master" / "V2.0.0"
+    archive_root.mkdir(parents=True)
+    old = {"schema_version": 2, "client_version": "V2.0.0", "packages": {"master": {"filename": "master.zip"}}}
+    (archive_root / "release-manifest.json").write_text(json.dumps(old), encoding="utf-8")
+    (archive_root / "master.zip").write_bytes(b"historical-master")
+    current = {"schema_version": 3, "release_role": "master", "client_version": "V2.2.0",
+               "packages": {"master": {"filename": "master.zip", "client_version": "V2.2.0"},
+                            "slave": {"filename": "slave.zip", "client_version": "V2.1.0"}}}
+    (releases / "release-manifest.json").write_text(json.dumps(current), encoding="utf-8")
+    (releases / "slave.zip").write_bytes(b"slave-v210")
+    with make_client(tmp_path, releases) as client:
+        assert client.get("/api/v1/updates/download/master/V2.0.0").content == b"historical-master"
+        assert client.get("/api/v1/updates/download/slave/V2.2.0").status_code == 404
+        assert client.get("/api/v1/updates/download/slave/V2.1.0").status_code == 404

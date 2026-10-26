@@ -43,6 +43,7 @@ models/**/*.pt
 
 # Local secrets and settings
 .env
+.env.cos
 *.local.toml
 deployment-credentials.json
 *.pem

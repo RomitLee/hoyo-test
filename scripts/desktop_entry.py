@@ -43,8 +43,11 @@ def _run_package_self_test() -> int:
         import windows_capture
         from PySide6.QtCore import qVersion
 
-        from hoyo_analyzer import __version__
+        from hoyo_analyzer import SLAVE_VERSION as __version__
         from hoyo_analyzer.alarm_sound import ensure_alarm_sound_file
+        from hoyo_analyzer.panel_targets import LocalTextRecognizer
+
+        target_recognizer = LocalTextRecognizer()
 
         alarm_path = ensure_alarm_sound_file()
         with wave.open(str(alarm_path), "rb") as alarm:
@@ -64,6 +67,7 @@ def _run_package_self_test() -> int:
                 "pygame": pygame.version.ver,
                 "windows_capture": windows_capture.__name__,
                 "alarm_sound": alarm_details,
+                "target_ocr_providers": target_recognizer.session.get_providers(),
             }
         )
     except Exception as exc:  # noqa: BLE001 - report every packaging failure
@@ -151,7 +155,7 @@ def _run_money_diagnostic(path: str) -> int:
         import cv2
         import numpy as np
 
-        from hoyo_analyzer import __version__
+        from hoyo_analyzer import SLAVE_VERSION as __version__
         from hoyo_analyzer.inventory_fullness import InventoryFullnessDetector
         from hoyo_analyzer.money import MoneyDetector, MoneyTracker
         from hoyo_analyzer.panels import PanelDetector
@@ -176,6 +180,37 @@ def _run_money_diagnostic(path: str) -> int:
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if result["ok"] else 1
 
+
+def _run_target_diagnostic(path: str) -> int:
+    result = {"ok": False}
+    try:
+        import cv2
+        import numpy as np
+
+        from hoyo_analyzer.panel_targets import PanelTargetDetector, PanelTargetTracker, target_payload
+        from hoyo_analyzer.panels import PanelDetector
+
+        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("无法读取诊断图片")
+        panel = PanelDetector().analyze(image)
+        reading = PanelTargetDetector().analyze(image, panel)
+        tracker = PanelTargetTracker()
+        for timestamp in (0, 200, 400):
+            events = tracker.update(panel.panel_type, reading, timestamp)
+        result.update(ok=tracker.current is not None, panel_type=panel.panel_type,
+                      reason=reading.reason, **target_payload(tracker.current),
+                      log_messages=[event.display_name for event in events])
+    except Exception as exc:  # noqa: BLE001 - persist native and model errors.
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    output = application_root() / "runtime" / "panel-target-diagnostic.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if result["ok"] else 1
+
+
+if "--diagnose-target" in sys.argv:
+    raise SystemExit(_run_target_diagnostic(sys.argv[sys.argv.index("--diagnose-target") + 1]))
 
 if "--diagnose-money" in sys.argv:
     raise SystemExit(_run_money_diagnostic(sys.argv[sys.argv.index("--diagnose-money") + 1]))

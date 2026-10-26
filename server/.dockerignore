@@ -1,4 +1,5 @@
 .env
+.env.cos
 .venv/
 tests/
 __pycache__/

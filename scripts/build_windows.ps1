@@ -1,10 +1,13 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Python = "",
     [switch]$SkipInstall,
     [switch]$IncludeLocalSettings,
     [string]$SigningPrivateKey = "",
-    [string]$OutputDirectory = "dist"
+    [string]$OutputDirectory = "dist",
+    [ValidateSet("both", "master", "slave")]
+    [string]$Role = "both",
+    [string]$ReuseDirectory = "dist-v200"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,7 +34,7 @@ if ($Python) {
 }
 
 if (-not $SkipInstall) {
-    & $PythonExe -m pip install "numpy>=1.26,<3" "opencv-python>=4.9,<5" "pygame>=2.6,<3" "PySide6>=6.7,<7" "windows-capture>=2.0.1,<3" "pyinstaller>=6,<7"
+    & $PythonExe -m pip install "numpy>=1.26,<3" "opencv-python>=4.9,<5" "onnxruntime>=1.20,<2" "pygame>=2.6,<3" "PySide6>=6.7,<7" "windows-capture>=2.0.1,<3" "pyinstaller>=6,<7"
     if ($LASTEXITCODE -ne 0) { throw "Failed to install build dependencies." }
 }
 
@@ -51,6 +54,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Push-Location $ProjectRoot
 try {
+    $SlaveVersion = (& $PythonExe -c "import sys; sys.path.insert(0, 'src'); from hoyo_analyzer import SLAVE_VERSION; print(SLAVE_VERSION)").Trim()
     $ClientVersion = (& $PythonExe -c "import sys; sys.path.insert(0, 'src'); from hoyo_analyzer import __version__; print(__version__)").Trim()
     if ($LASTEXITCODE -ne 0 -or $ClientVersion -notmatch '^V\d+\.\d+\.\d+$') {
         throw "Client version must use the V1.0.0 format."
@@ -77,35 +81,62 @@ try {
         -WindowStyle Hidden -Wait -PassThru
     if ($UpdaterSelfTest.ExitCode -ne 0) { throw "Packaged updater self-test failed." }
 
-    & $PythonExe -m PyInstaller --noconfirm --clean `
-        --distpath $DistRoot `
-        --workpath (Join-Path $ProjectRoot "build\pyinstaller") `
-        (Join-Path $ProjectRoot "hoyo_analyzer.spec")
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
-
-    & $PythonExe -m PyInstaller --noconfirm --clean `
-        --distpath $DistRoot `
-        --workpath (Join-Path $ProjectRoot "build\pyinstaller-master") `
-        (Join-Path $ProjectRoot "hoyo_master.spec")
-    if ($LASTEXITCODE -ne 0) { throw "Master PyInstaller build failed." }
-
-    $BuiltDirectories = @(Get-ChildItem -LiteralPath $DistRoot -Directory | Sort-Object LastWriteTime -Descending)
-    if ($BuiltDirectories.Count -ne 2) { throw "Expected exactly two packaged application directories." }
-    # The master build runs second, so it is the newest output directory.
-    $MasterOutputRoot = $BuiltDirectories[0].FullName
-    $SlaveOutputRoot = $BuiltDirectories[1].FullName
-    foreach ($OutputRoot in @($SlaveOutputRoot, $MasterOutputRoot)) {
+    $ReuseRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot $ReuseDirectory))
+    if (-not $ReuseRoot.StartsWith($ProjectRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or $ReuseRoot -eq $DistRoot) {
+        throw "Reuse directory must be a different project subdirectory."
+    }
+    $ReuseManifest = $null
+    if ($Role -ne "both") {
+        $ReuseManifestPath = Join-Path $ReuseRoot "release-manifest.json"
+        & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $ReuseManifestPath
+        if ($LASTEXITCODE -ne 0) { throw "Reused release signature is invalid." }
+        $ReuseManifest = Get-Content -LiteralPath $ReuseManifestPath -Raw | ConvertFrom-Json
+    }
+    $RoleRoots = @{}
+    foreach ($BuildRole in @("slave", "master")) {
+        if ($Role -eq "both" -or $Role -eq $BuildRole) {
+            $Spec = if ($BuildRole -eq "slave") { "hoyo_analyzer.spec" } else { "hoyo_master.spec" }
+            $Before = @(Get-ChildItem -LiteralPath $DistRoot -Directory | ForEach-Object FullName)
+            & $PythonExe -m PyInstaller --noconfirm --clean --distpath $DistRoot --workpath (Join-Path $ProjectRoot "build\pyinstaller-$BuildRole") (Join-Path $ProjectRoot $Spec)
+            if ($LASTEXITCODE -ne 0) { throw "$BuildRole build failed." }
+            $Created = @(Get-ChildItem -LiteralPath $DistRoot -Directory | Where-Object { $_.FullName -notin $Before })
+            if ($Created.Count -ne 1) { throw "Expected one $BuildRole output directory." }
+            $RoleRoots[$BuildRole] = $Created[0].FullName
+        } else {
+            $ReusedPackage = $ReuseManifest.packages.$BuildRole
+            $ExpectedVersion = if ($BuildRole -eq "slave") { $SlaveVersion } else { $ClientVersion }
+            $ReusedVersion = if ($ReusedPackage.client_version) { $ReusedPackage.client_version } else { $ReuseManifest.client_version }
+            if ($ReusedVersion -ne $ExpectedVersion) { throw "Unchanged $BuildRole version must match its reused package." }
+            $ReusedZip = Join-Path $ReuseRoot $ReusedPackage.filename
+            if ((Get-FileHash -LiteralPath $ReusedZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $ReusedPackage.sha256 -or (Get-Item -LiteralPath $ReusedZip).Length -ne $ReusedPackage.size) {
+                throw "Reused package integrity check failed."
+            }
+            Expand-Archive -LiteralPath $ReusedZip -DestinationPath $DistRoot
+            $RoleRoots[$BuildRole] = Join-Path $DistRoot $ReusedPackage.archive_root
+        }
+    }
+    $MasterOutputRoot = $RoleRoots.master
+    $SlaveOutputRoot = $RoleRoots.slave
+    foreach ($BuildRole in @("slave", "master")) {
+        if ($Role -ne "both" -and $Role -ne $BuildRole) { continue }
+        $OutputRoot = $RoleRoots[$BuildRole]
         if (-not (Test-Path -LiteralPath $OutputRoot)) { throw "PyInstaller output directory was not found: $OutputRoot" }
-        Copy-Item -LiteralPath (Join-Path $ProjectRoot "assets") -Destination $OutputRoot -Recurse -Force
+        $OutputAssets = Join-Path $OutputRoot "assets"
+        New-Item -ItemType Directory -Path $OutputAssets -Force | Out-Null
+        foreach ($Asset in (Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "assets"))) {
+            if ($BuildRole -eq "master" -and $Asset.Name -eq "ocr") { continue }
+            Copy-Item -LiteralPath $Asset.FullName -Destination $OutputAssets -Recurse -Force
+        }
         Copy-Item -LiteralPath $UpdaterExe.FullName -Destination $OutputRoot -Force
     }
-    Copy-Item -LiteralPath (Join-Path $ProjectRoot "configs") -Destination $SlaveOutputRoot -Recurse -Force
+    if ($Role -in @("both", "slave")) { Copy-Item -LiteralPath (Join-Path $ProjectRoot "configs") -Destination $SlaveOutputRoot -Recurse -Force }
     $SlaveRuntime = Join-Path $SlaveOutputRoot "runtime"
     $MasterRuntime = Join-Path $MasterOutputRoot "runtime"
     New-Item -ItemType Directory -Path $SlaveRuntime -Force | Out-Null
     New-Item -ItemType Directory -Path $MasterRuntime -Force | Out-Null
     # Published packages must start without machine-specific identities or
     # credentials. Each slave/master writes its own settings on first setup.
+    if ($IncludeLocalSettings -and $Role -ne "both") { throw "Private local settings require a full build." }
     if ($IncludeLocalSettings) {
         $LocalSlaveSettings = Join-Path $ProjectRoot "runtime\slave_settings.json"
         $LocalMasterSettings = Join-Path $ProjectRoot "runtime\master_settings.json"
@@ -133,7 +164,7 @@ try {
     if (-not (Test-Path -LiteralPath $SelfTestReport)) { throw "Package self-test report was not created." }
     $SelfTestResult = Get-Content -LiteralPath $SelfTestReport -Raw | ConvertFrom-Json
     if (-not $SelfTestResult.ok) { throw "Package self-test reported a dependency failure." }
-    if ($SelfTestResult.client_version -ne $ClientVersion) { throw "Slave package version does not match the release version." }
+    if ($SelfTestResult.client_version -ne $SlaveVersion) { throw "Slave package version does not match the release version." }
 
     $PreviousQtPlatform = $env:QT_QPA_PLATFORM
     try {
@@ -173,17 +204,20 @@ try {
         Remove-Item -LiteralPath $TestOutbox -Force
     }
 
-    $SlaveArchive = Join-Path $DistRoot ((Split-Path -Leaf $SlaveOutputRoot) + ".zip")
-    $MasterArchive = Join-Path $DistRoot ((Split-Path -Leaf $MasterOutputRoot) + ".zip")
-    Compress-Archive -LiteralPath $SlaveOutputRoot -DestinationPath $SlaveArchive -CompressionLevel Optimal
-    Compress-Archive -LiteralPath $MasterOutputRoot -DestinationPath $MasterArchive -CompressionLevel Optimal
+    $SlaveArchive = Join-Path $DistRoot ((Split-Path -Leaf $SlaveOutputRoot) + ".$SlaveVersion.zip")
+    $MasterArchive = Join-Path $DistRoot ((Split-Path -Leaf $MasterOutputRoot) + ".$ClientVersion.zip")
+    if ($Role -eq "master") { Copy-Item -LiteralPath (Join-Path $ReuseRoot $ReuseManifest.packages.slave.filename) -Destination $SlaveArchive }
+    else { Compress-Archive -LiteralPath $SlaveOutputRoot -DestinationPath $SlaveArchive -CompressionLevel Optimal }
+    if ($Role -eq "slave") { Copy-Item -LiteralPath (Join-Path $ReuseRoot $ReuseManifest.packages.master.filename) -Destination $MasterArchive }
+    else { Compress-Archive -LiteralPath $MasterOutputRoot -DestinationPath $MasterArchive -CompressionLevel Optimal }
     $SlaveHash = (Get-FileHash -LiteralPath $SlaveArchive -Algorithm SHA256).Hash.ToLowerInvariant()
     $MasterHash = (Get-FileHash -LiteralPath $MasterArchive -Algorithm SHA256).Hash.ToLowerInvariant()
     $SlavePackage = [ordered]@{
         filename = (Split-Path -Leaf $SlaveArchive)
         sha256 = $SlaveHash
         size = (Get-Item -LiteralPath $SlaveArchive).Length
-        download_path = "/api/v1/updates/download/slave/$ClientVersion"
+        client_version = $SlaveVersion
+        download_path = "/api/v1/updates/download/slave/$SlaveVersion"
         archive_root = (Split-Path -Leaf $SlaveOutputRoot)
         executable = $OutputExe.Name
     }
@@ -191,12 +225,14 @@ try {
         filename = (Split-Path -Leaf $MasterArchive)
         sha256 = $MasterHash
         size = (Get-Item -LiteralPath $MasterArchive).Length
+        client_version = $ClientVersion
         download_path = "/api/v1/updates/download/master/$ClientVersion"
         archive_root = (Split-Path -Leaf $MasterOutputRoot)
         executable = $MasterExe.Name
     }
     $Manifest = [ordered]@{
-        schema_version = 2
+        schema_version = 3
+        release_role = "master"
         built_at = [DateTime]::UtcNow.ToString("o")
         client_version = $ClientVersion
         contains_local_credentials = [bool]$IncludeLocalSettings
@@ -215,51 +251,74 @@ try {
             slave_ui_startup = $true
             master_dependencies = $true
             master_ui_startup = $true
-            client_version_sync = $true
+            independent_role_versions = $true
         }
         sha256 = [ordered]@{
             slave_archive = $SlaveHash
             master_archive = $MasterHash
         }
     }
-    $SignatureLines = @(
-        "hoyo-update-v1", "2", $ClientVersion,
-        "slave", $SlavePackage.filename, $SlavePackage.sha256, [string]$SlavePackage.size,
-        $SlavePackage.download_path, $SlavePackage.archive_root, $SlavePackage.executable,
-        "master", $MasterPackage.filename, $MasterPackage.sha256, [string]$MasterPackage.size,
-        $MasterPackage.download_path, $MasterPackage.archive_root, $MasterPackage.executable
-    )
-    $SignaturePayload = [Text.Encoding]::UTF8.GetBytes(($SignatureLines -join "`n") + "`n")
-    $StoredKey = Get-Content -LiteralPath $SigningKeyPath -Raw | ConvertFrom-Json
-    $PublicKey = Get-Content -LiteralPath (Join-Path $ProjectRoot "assets\update-public-key.json") -Raw | ConvertFrom-Json
-    if ($StoredKey.Modulus -ne $PublicKey.modulus -or $StoredKey.Exponent -ne $PublicKey.exponent) {
-        throw "Update signing private key does not match the public key embedded in the clients."
-    }
-    $Parameters = [System.Security.Cryptography.RSAParameters]::new()
-    foreach ($Name in @("Modulus", "Exponent", "D", "P", "Q", "DP", "DQ", "InverseQ")) {
-        $Parameters.$Name = [Convert]::FromBase64String([string]$StoredKey.$Name)
-    }
-    $Rsa = [System.Security.Cryptography.RSA]::Create()
-    try {
-        $Rsa.ImportParameters($Parameters)
-        $SignatureBytes = $Rsa.SignData(
-            $SignaturePayload,
-            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+    foreach ($ManifestRole in @("master", "slave")) {
+        $Manifest.release_role = $ManifestRole
+        $Manifest.client_version = if ($ManifestRole -eq "master") { $ClientVersion } else { $SlaveVersion }
+        $SignatureLines = @(
+            "hoyo-update-v1", "3", $Manifest.client_version, $ManifestRole,
+            "slave", $SlavePackage.filename, $SlavePackage.sha256, [string]$SlavePackage.size,
+            $SlavePackage.download_path, $SlavePackage.archive_root, $SlavePackage.executable,
+            "master", $MasterPackage.filename, $MasterPackage.sha256, [string]$MasterPackage.size,
+            $MasterPackage.download_path, $MasterPackage.archive_root, $MasterPackage.executable
         )
-    } finally {
-        $Rsa.Dispose()
-    }
-    $Manifest.signature = [ordered]@{
-        algorithm = "RSA-3072-SHA256"
-        value = [Convert]::ToBase64String($SignatureBytes)
-    }
-    $ManifestPath = Join-Path $DistRoot "release-manifest.json"
-    $ManifestJson = ($Manifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine
-    [IO.File]::WriteAllText($ManifestPath, $ManifestJson, [Text.UTF8Encoding]::new($false))
-    & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $ManifestPath
-    if ($LASTEXITCODE -ne 0) { throw "Release manifest signature self-test failed." }
+        $SignaturePayload = [Text.Encoding]::UTF8.GetBytes(($SignatureLines -join "`n") + "`n")
+        $StoredKey = Get-Content -LiteralPath $SigningKeyPath -Raw | ConvertFrom-Json
+        $PublicKey = Get-Content -LiteralPath (Join-Path $ProjectRoot "assets\update-public-key.json") -Raw | ConvertFrom-Json
+        if ($StoredKey.Modulus -ne $PublicKey.modulus -or $StoredKey.Exponent -ne $PublicKey.exponent) {
+            throw "Update signing private key does not match the public key embedded in the clients."
+        }
+        $Parameters = [System.Security.Cryptography.RSAParameters]::new()
+        foreach ($Name in @("Modulus", "Exponent", "D", "P", "Q", "DP", "DQ", "InverseQ")) {
+            $Parameters.$Name = [Convert]::FromBase64String([string]$StoredKey.$Name)
+        }
+        $Rsa = [System.Security.Cryptography.RSA]::Create()
+        try {
+            $Rsa.ImportParameters($Parameters)
+            $SignatureBytes = $Rsa.SignData(
+                $SignaturePayload,
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+        } finally {
+            $Rsa.Dispose()
+        }
+        $Manifest.signature = [ordered]@{
+            algorithm = "RSA-3072-SHA256"
+            value = [Convert]::ToBase64String($SignatureBytes)
+        }
+        $ManifestPath = Join-Path $DistRoot "release-manifest-$ManifestRole.json"
+        $ManifestJson = ($Manifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine
+        [IO.File]::WriteAllText($ManifestPath, $ManifestJson, [Text.UTF8Encoding]::new($false))
+        & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $ManifestPath
+        if ($LASTEXITCODE -ne 0) { throw "Release manifest signature self-test failed." }
 
+    }
+    Copy-Item -LiteralPath (Join-Path $DistRoot "release-manifest-master.json") -Destination (Join-Path $DistRoot "release-manifest.json")
+    if ($ReuseManifest) {
+        $LegacyPath = Join-Path $ReuseRoot "legacy-release-manifest.json"
+        if (-not (Test-Path -LiteralPath $LegacyPath)) { $LegacyPath = Join-Path $ReuseRoot "release-manifest.json" }
+        & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $LegacyPath
+        if ($LASTEXITCODE -ne 0) { throw "Legacy release signature is invalid." }
+        $LegacyDocument = Get-Content -LiteralPath $LegacyPath -Raw | ConvertFrom-Json
+        if ($LegacyDocument.schema_version -ne 2) { throw "A signed schema2 legacy manifest is required for the migration." }
+        Copy-Item -LiteralPath $LegacyPath -Destination (Join-Path $DistRoot "legacy-release-manifest.json")
+        $LegacyArchives = Join-Path $DistRoot "legacy"
+        New-Item -ItemType Directory -Path $LegacyArchives -Force | Out-Null
+        $OldLegacyRoot = if (Test-Path -LiteralPath (Join-Path $ReuseRoot "legacy")) { Join-Path $ReuseRoot "legacy" } else { $ReuseRoot }
+        foreach ($OldRole in @("master", "slave")) {
+            $OldPackage = $LegacyDocument.packages.$OldRole
+            $OldArchive = Join-Path $OldLegacyRoot $OldPackage.filename
+            if ((Get-FileHash -LiteralPath $OldArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $OldPackage.sha256) { throw "Legacy archive integrity check failed." }
+            Copy-Item -LiteralPath $OldArchive -Destination $LegacyArchives
+        }
+    }
     Write-Host ""
     Write-Host "Slave build: $SlaveOutputRoot" -ForegroundColor Green
     Write-Host "Master build: $MasterOutputRoot" -ForegroundColor Green

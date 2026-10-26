@@ -19,3 +19,4 @@ def qt_application():
 @pytest.fixture(autouse=True)
 def isolated_monitor_log_outbox(monkeypatch, tmp_path):
     monkeypatch.setattr("hoyo_analyzer.relay_client.application_root", lambda: tmp_path)
+    monkeypatch.setattr("hoyo_analyzer.screenshots.application_root", lambda: tmp_path)

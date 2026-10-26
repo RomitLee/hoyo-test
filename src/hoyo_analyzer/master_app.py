@@ -12,8 +12,10 @@ from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -32,14 +34,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__
+from . import MASTER_VERSION as __version__
+from . import PROTOCOL_VERSION, slave_protocol
 from .alarm_sound import play_alarm_loop, stop_alarm_loop
 from .app_identity import MASTER_APP_ID, application_icon, apply_application_icon, configure_windows_app_id
 from .auto_update import install_auto_update, mark_update_healthy
+from .cloud_config import LOCAL_PREVIEW
 from .desktop_theme import MUTED, DarkTitleBar, apply_desktop_theme, banner_style, pill_style
 from .master_settings import MasterSettings, load_master_settings, save_master_settings
-from .panel_types import panel_event_name
+from .panel_types import monitor_event_label
 from .relay_client import MasterRelayClient
+from .screenshot_viewer import ScreenshotViewer
 
 EVENT_NAMES: dict[str, str] = {
     "inventory_full": "背包已满",
@@ -53,7 +58,9 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class MasterSettingsDialog(QDialog):
-    def __init__(self, settings: MasterSettings, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: MasterSettings, parent: QWidget | None = None, *,
+                 policy: dict[str, Any] | None = None, policy_supported: bool = True,
+                 policy_message: str = "规则随当前账号保存，其他主机登录同一账号后同步。") -> None:
         super().__init__(parent)
         self._settings = settings
         self.setWindowTitle("主机设置")
@@ -79,6 +86,33 @@ class MasterSettingsDialog(QDialog):
         form.addRow("拉取间隔：", self.poll_spin)
         form.addRow("弹窗提醒：", self.popup_alert_checkbox)
         root.addWidget(connection_group)
+        self.policy_group = QGroupBox("监控日志 · 遮挡上报（账号设置）")
+        policy_form = QFormLayout(self.policy_group)
+        values = policy or {"occlusion_enabled": True, "occlusion_percent": 60, "occlusion_seconds": 5}
+        self.occlusion_enabled = QCheckBox("上报遮挡日志")
+        self.occlusion_enabled.setChecked(bool(values["occlusion_enabled"]))
+        self.occlusion_percent = QDoubleSpinBox()
+        self.occlusion_percent.setRange(0, 100)
+        self.occlusion_percent.setDecimals(1)
+        self.occlusion_percent.setSuffix(" %")
+        self.occlusion_percent.setValue(float(values["occlusion_percent"]))
+        self.occlusion_seconds = QSpinBox()
+        self.occlusion_seconds.setRange(0, 3600)
+        self.occlusion_seconds.setSuffix(" 秒")
+        self.occlusion_seconds.setValue(int(values["occlusion_seconds"]))
+        policy_form.addRow("是否上报：", self.occlusion_enabled)
+        policy_form.addRow("遮挡比例 ≥：", self.occlusion_percent)
+        policy_form.addRow("连续检测 ≥：", self.occlusion_seconds)
+        self.occlusion_enabled.toggled.connect(self.occlusion_percent.setEnabled)
+        self.occlusion_enabled.toggled.connect(self.occlusion_seconds.setEnabled)
+        self.occlusion_percent.setEnabled(self.occlusion_enabled.isChecked())
+        self.occlusion_seconds.setEnabled(self.occlusion_enabled.isChecked())
+        self.policy_group.setEnabled(policy_supported)
+        root.addWidget(self.policy_group)
+        note = QLabel(policy_message + "\n恢复正常、暂停、最小化或上报中断会重新计时；不删除已有日志。")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color:{MUTED};font-size:11px;")
+        root.addWidget(note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
         buttons.button(QDialogButtonBox.StandardButton.Save).setProperty("role", "primary")
@@ -86,6 +120,10 @@ class MasterSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    def log_policy(self) -> dict[str, Any]:
+        return {"occlusion_enabled": self.occlusion_enabled.isChecked(),
+                "occlusion_percent": self.occlusion_percent.value(), "occlusion_seconds": self.occlusion_seconds.value()}
 
     def settings(self) -> MasterSettings:
         return MasterSettings(
@@ -164,6 +202,9 @@ class MasterWindow(QMainWindow):
         self._monitor_logs_before_id = 0
         self._monitor_logs_next_id = 0
         self._monitor_logs_data: dict[str, Any] = {}
+        self.monitor_log_policy = {"occlusion_enabled": True, "occlusion_percent": 60.0, "occlusion_seconds": 5}
+        self._monitor_policy_supported = False
+        self._monitor_policy_message = "账号规则等待同步"
         self.alert: QMessageBox | None = None
         self.account_dialog: AccountDialog | None = None
         self._build_ui()
@@ -173,6 +214,9 @@ class MasterWindow(QMainWindow):
         self.client.devices_received.connect(self._on_devices_received)
         self.client.status_received.connect(self._on_status_received)
         self.client.monitor_logs_received.connect(self._on_monitor_logs_received)
+        self.client.screenshot_result.connect(self._on_screenshot_result)
+        self.client.monitor_log_settings_received.connect(self._on_monitor_policy_received)
+        self.client.monitor_log_settings_result.connect(self._on_monitor_policy_result)
         self.client.acknowledge_result.connect(self._on_acknowledge_result)
         self.client.authentication_result.connect(self._on_authentication_result)
         self.client.pairing_code_received.connect(self._on_pairing_code_received)
@@ -210,6 +254,8 @@ class MasterWindow(QMainWindow):
         title = QLabel("主机监控中心")
         title.setStyleSheet("font-size:22px;font-weight:800;color:#243247;")
         self.subtitle_label = QLabel(f"多从机状态汇总 · 实时告警处置 · 客户端 {__version__}")
+        if LOCAL_PREVIEW:
+            self.subtitle_label.setText(f"本地预览 · 测试数据 · 不连接生产服务器 · {__version__}")
         self.subtitle_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
         header_text.addWidget(title)
         header_text.addWidget(self.subtitle_label)
@@ -333,6 +379,17 @@ class MasterWindow(QMainWindow):
         toolbar = QHBoxLayout()
         self.monitor_log_summary = QLabel("监控日志 · 等待同步")
         toolbar.addWidget(self.monitor_log_summary, 1)
+        self.monitor_log_filter = QComboBox()
+        self.monitor_log_filter.setMinimumWidth(116)
+        for label, query in [("全部类型", ("", "")), ("遮挡", ("window_occluded", "")),
+                             ("最小化", ("window_minimized", "")), ("开始监控", ("monitoring_started", "")),
+                             ("暂停监控", ("monitoring_paused", "")), ("背包", ("", "inventory")),
+                             ("给予面板", ("", "give")), ("交易面板", ("", "trade")),
+                             ("属性面板", ("", "attributes")), ("摊位面板", ("", "stall")),
+                             ("摊位记录面板", ("", "stall_records")), ("默认游戏界面", ("game_default", ""))]:
+            self.monitor_log_filter.addItem(label, query)
+        self.monitor_log_filter.currentIndexChanged.connect(self._on_log_filter_changed)
+        toolbar.addWidget(self.monitor_log_filter)
         latest_button = QPushButton("最新记录")
         latest_button.clicked.connect(lambda: self._load_monitor_logs(0))
         toolbar.addWidget(latest_button)
@@ -341,30 +398,50 @@ class MasterWindow(QMainWindow):
         self.older_logs_button.clicked.connect(lambda: self._load_monitor_logs(self._monitor_logs_next_id))
         toolbar.addWidget(self.older_logs_button)
         log_layout.addLayout(toolbar)
-        self.monitor_log_table = QTableWidget(0, 7)
-        self.monitor_log_table.setHorizontalHeaderLabels(("发生时间", "从机名称", "区服 / 角色", "类型", "遮挡", "最小化", "原因"))
+        self.monitor_log_table = QTableWidget(0, 8)
+        self.monitor_log_table.setHorizontalHeaderLabels(("发生时间", "从机名称", "区服 / 角色", "类型", "遮挡", "最小化", "原因", "截图"))
+        self.monitor_log_table.setColumnWidth(7, 92)
         self.monitor_log_table.verticalHeader().setVisible(False)
         self.monitor_log_table.setAlternatingRowColors(True)
         self.monitor_log_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.monitor_log_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        for column, width in enumerate((185, 90, 140, 145, 55, 50, 80)):
+        for column, width in enumerate((160, 75, 110, 145, 45, 45, 60)):
             self.monitor_log_table.setColumnWidth(column, width)
         self.monitor_log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         log_layout.addWidget(self.monitor_log_table)
-        log_layout.addWidget(QLabel("每次上报的遮挡、最小化状态均保留；开始和暂停按操作记录。"))
+        self.monitor_policy_label = QLabel("遮挡日志：账号规则等待同步")
+        self.monitor_policy_label.setWordWrap(True)
+        self.monitor_policy_label.setStyleSheet(f"color:{MUTED};font-size:11px;")
+        log_layout.addWidget(self.monitor_policy_label)
         self.tabs.addTab(log_page, "监控日志")
 
     def _poll_master(self) -> None:
         self.client.poll()
+        if self._monitor_policy_supported:
+            self.client.fetch_monitor_log_settings()
+
+    @Slot(int)
+    def _on_log_filter_changed(self, _index: int) -> None:
+        self.monitor_log_table.setRowCount(0)
+        self._monitor_logs_next_id = 0
+        self.older_logs_button.setEnabled(False)
+        self._load_monitor_logs(0)
 
     def _load_monitor_logs(self, before_id: int = 0) -> None:
         self._monitor_logs_before_id = before_id
-        self.client.fetch_monitor_logs(before_id)
+        event, panel = self.monitor_log_filter.currentData()
+        if event or panel:
+            self.client.fetch_monitor_logs(before_id, event_type=event, panel_type=panel)
+        else:
+            self.client.fetch_monitor_logs(before_id)
 
     @Slot(object)
     def _on_monitor_logs_received(self, data: dict[str, Any]) -> None:
         self._monitor_logs_data = data
         logs = data.get("logs", [])
+        event_filter, panel_filter = self.monitor_log_filter.currentData()
+        logs = [item for item in logs if (not event_filter or item.get("event_type") == event_filter)
+                and (not panel_filter or item.get("panel_type") == panel_filter)]
         self.monitor_log_table.setRowCount(len(logs))
         labels = {"window_occluded": "遮挡", "window_minimized": "最小化",
                   "monitoring_started": "开始监控", "monitoring_paused": "暂停监控"}
@@ -380,8 +457,8 @@ class MasterWindow(QMainWindow):
             except (ValueError, TypeError):
                 log_time = "—"
             event_label = labels.get(item["event_type"], item["event_type"])
-            if item["event_type"] in {"panel_opened", "panel_closed", "game_default"}:
-                event_label = item.get("message") or panel_event_name(item["event_type"], item.get("panel_type"))
+            if item["event_type"] in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:
+                event_label = monitor_event_label(item)
             values = (
                 log_time,
                 self._device_name(item),
@@ -394,13 +471,61 @@ class MasterWindow(QMainWindow):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(f"{value}\n从机：{item.get('device_id') or ''}")
                 self.monitor_log_table.setItem(row, column, cell)
-        self._monitor_logs_next_id = int(logs[-1]["id"]) if logs else 0
+            self.monitor_log_table.removeCellWidget(row, 7)
+            if item.get("screenshot_ready"):
+                expired = False
+                try:
+                    expired = datetime.fromisoformat(item["screenshot_expires_at"]) <= datetime.now(UTC)
+                except (KeyError, TypeError, ValueError):
+                    expired = True
+                if expired:
+                    self.monitor_log_table.setItem(row, 7, QTableWidgetItem("已过期"))
+                else:
+                    button = QPushButton("查看截图")
+                    button.clicked.connect(lambda checked=False, log_id=item["id"]: self.client.fetch_screenshot(log_id))
+                    self.monitor_log_table.setCellWidget(row, 7, button)
+            else:
+                self.monitor_log_table.setItem(row, 7, QTableWidgetItem("—"))
+        raw_logs = data.get("logs", [])
+        self._monitor_logs_next_id = int(raw_logs[-1]["id"]) if raw_logs else 0
         self.older_logs_button.setEnabled(bool(data.get("has_more")))
         self.monitor_log_summary.setText(f"监控日志 · {'最新' if not self._monitor_logs_before_id else '历史'} {len(logs)} 条")
+        if (event_filter or panel_filter) and "filters" not in data:
+            self.monitor_log_summary.setText(self.monitor_log_summary.text() + "（当前页预览）")
+
+    @Slot(bool, object)
+    def _on_screenshot_result(self, success: bool, result: dict[str, Any]) -> None:
+        if not success:
+            QMessageBox.information(self, "查看截图", str(result.get("detail", "暂时无法读取截图")))
+            return
+        viewer = ScreenshotViewer(str(result.get("url", "")), self)
+        viewer.show()
+
+    @Slot(object)
+    def _on_monitor_policy_received(self, values: dict[str, Any]) -> None:
+        self.monitor_log_policy = {key: values[key] for key in self.monitor_log_policy}
+        self._monitor_policy_supported = True
+        text = (f'遮挡日志：连续 ≥ {values["occlusion_percent"]:g}% / {values["occlusion_seconds"]} 秒后记录'
+                if values["occlusion_enabled"] else "遮挡日志：已关闭上报")
+        self.monitor_policy_label.setText(text + " · 账号设置")
+
+    @Slot(bool, str)
+    def _on_monitor_policy_result(self, success: bool, message: str) -> None:
+        self._monitor_policy_message = message
+        if not success:
+            self.monitor_policy_label.setText(message)
 
     def _configure_client(self) -> None:
+        for viewer in self.findChildren(ScreenshotViewer):
+            viewer.close()
+        self._monitor_policy_supported = False
+        self.monitor_log_policy = {"occlusion_enabled": True, "occlusion_percent": 60.0, "occlusion_seconds": 5}
+        self._monitor_policy_message = "账号规则等待同步"
+        self.monitor_policy_label.setText("账号规则等待同步")
+        self._monitor_logs_data = {}
         try:
             self.client.configure(self.settings.access_token or self.settings.master_token)
+            self.client.fetch_monitor_log_settings()
         except ValueError as exc:
             self.status_label.setToolTip(str(exc))
 
@@ -459,13 +584,16 @@ class MasterWindow(QMainWindow):
 
     @Slot()
     def _open_settings(self) -> None:
-        dialog = MasterSettingsDialog(self.settings, self)
+        dialog = MasterSettingsDialog(self.settings, self, policy=self.monitor_log_policy,
+                                      policy_supported=self._monitor_policy_supported,
+                                      policy_message=self._monitor_policy_message)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.settings = dialog.settings()
         try:
             save_master_settings(self.settings)
-            self._configure_client()
+            if self._monitor_policy_supported and dialog.log_policy() != self.monitor_log_policy:
+                self.client.save_monitor_log_settings(dialog.log_policy())
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "设置保存失败", str(exc))
             return
@@ -537,12 +665,13 @@ class MasterWindow(QMainWindow):
             device_id = str(device.get("device_id") or "-")
             online = self._is_device_online(device, now) and not bool(device.get("disabled"))
             reported_version = str(device.get("app_version") or "-")
-            version_mismatch = reported_version != __version__
+            protocol = slave_protocol(device)
+            version_mismatch = protocol != PROTOCOL_VERSION
             states: list[str] = []
             if device.get("disabled"):
                 states.append("已禁用")
             if version_mismatch:
-                states.append("版本不匹配")
+                states.append("协议不兼容" if protocol is not None else "兼容性待确认")
             if not states:
                 states.append("正常")
             values = (
@@ -648,7 +777,7 @@ class MasterWindow(QMainWindow):
     @Slot(object)
     def _on_status_received(self, devices: list[dict[str, Any]]) -> None:
         self.status_updated_label.setText(f"列表更新时间：{datetime.now(UTC).astimezone().strftime('%m-%d %H:%M:%S')}")
-        self.client.fetch_monitor_logs(self._monitor_logs_before_id)
+        self._load_monitor_logs(self._monitor_logs_before_id)
         rows: list[dict[str, Any]] = []
         now = datetime.now(UTC)
         for device in devices:

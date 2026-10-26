@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
-from . import __version__
+from . import client_version
 from .paths import application_root
 
 UPDATE_MANIFEST_URL = "https://jiankong.maipi.top/api/v1/updates/latest"
@@ -50,6 +50,8 @@ def manifest_signature_payload(document: dict[str, Any]) -> bytes:
     """Return the stable byte representation signed by the release key."""
 
     lines = ["hoyo-update-v1", str(document.get("schema_version")), str(document.get("client_version"))]
+    if document.get("schema_version") == 3:
+        lines.append(str(document.get("release_role")))
     packages = document.get("packages")
     if not isinstance(packages, dict):
         raise UpdateError("更新清单缺少安装包信息")
@@ -108,8 +110,10 @@ def verify_manifest_signature(document: dict[str, Any], public_key: tuple[int, i
 
 
 def select_update(document: dict[str, Any], role: ClientRole, current_version: str) -> dict[str, Any] | None:
-    if document.get("schema_version") != 2 or not verify_manifest_signature(document):
+    if document.get("schema_version") not in {2, 3} or not verify_manifest_signature(document):
         raise UpdateError("更新清单签名校验失败")
+    if document.get("schema_version") == 3 and document.get("release_role") != role:
+        raise UpdateError("更新清单程序类型不匹配")
     release_version = str(document.get("client_version") or "")
     try:
         if parse_version(release_version) <= parse_version(current_version):
@@ -146,7 +150,7 @@ def _write_update_log(message: str) -> None:
         pass
 
 
-def mark_update_healthy() -> None:
+def mark_update_healthy(role: ClientRole = "master") -> None:
     """Acknowledge to the external updater that the replacement UI started."""
 
     raw_path = os.environ.pop("HOYO_UPDATE_HEALTH_FILE", "").strip()
@@ -157,7 +161,7 @@ def mark_update_healthy() -> None:
         updates_root = (application_root() / "runtime" / "updates").resolve()
         path.relative_to(updates_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(__version__, encoding="utf-8")
+        path.write_text(client_version(role), encoding="utf-8")
     except (OSError, ValueError):
         _write_update_log("更新成功标记写入失败")
 
@@ -170,6 +174,7 @@ class UpdateController(QObject):
     def __init__(self, role: ClientRole, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.role = role
+        self.current_version = client_version(role)
         self._checking = False
         self._installing = False
         self._check_finished.connect(self._on_check_finished)
@@ -195,8 +200,8 @@ class UpdateController(QObject):
 
     def _fetch_and_prepare(self) -> dict[str, Any] | None:
         request = Request(
-            UPDATE_MANIFEST_URL,
-            headers={"Accept": "application/json", "User-Agent": f"HoyoMonitor/{__version__}"},
+            f"{UPDATE_MANIFEST_URL}/{self.role}",
+            headers={"Accept": "application/json", "User-Agent": f"HoyoMonitor/{self.current_version}"},
         )
         with urlopen(request, timeout=15) as response:
             raw_manifest = response.read(MAX_MANIFEST_BYTES + 1)
@@ -205,7 +210,7 @@ class UpdateController(QObject):
         document = json.loads(raw_manifest.decode("utf-8-sig"))
         if not isinstance(document, dict):
             raise UpdateError("更新清单格式无效")
-        package = select_update(document, self.role, __version__)
+        package = select_update(document, self.role, self.current_version)
         if package is None:
             return None
 
@@ -225,7 +230,7 @@ class UpdateController(QObject):
         temporary_path = final_path.with_suffix(".zip.part")
         digest = hashlib.sha256()
         received = 0
-        download_request = Request(download_url, headers={"User-Agent": f"HoyoMonitor/{__version__}"})
+        download_request = Request(download_url, headers={"User-Agent": f"HoyoMonitor/{self.current_version}"})
         try:
             with urlopen(download_request, timeout=30) as response, temporary_path.open("wb") as output:
                 while chunk := response.read(1024 * 1024):
@@ -269,7 +274,7 @@ class UpdateController(QObject):
             "--archive-root", str(package["archive_root"]),
             "--executable", str(package["executable"]),
             "--expected-sha256", str(package["sha256"]),
-            "--old-version", __version__,
+            "--old-version", self.current_version,
             "--new-version", str(package["client_version"]),
             "--pid", str(os.getpid()),
         ]
@@ -285,6 +290,10 @@ class UpdateController(QObject):
 def install_auto_update(role: ClientRole, parent: QObject) -> UpdateController | None:
     """Enable checks for frozen builds; source checkouts never contact production."""
 
+    from .cloud_config import LOCAL_PREVIEW
+
+    if LOCAL_PREVIEW:
+        return None
     if not getattr(sys, "frozen", False) and os.environ.get("HOYO_ENABLE_SOURCE_UPDATES") != "1":
         return None
     return UpdateController(role, parent)

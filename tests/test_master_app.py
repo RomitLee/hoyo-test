@@ -35,6 +35,23 @@ def event(event_id=1, acked_at=None):
     }
 
 
+def test_monitor_log_screenshot_button_fetches_the_matching_log(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(window.client, "fetch_screenshot", calls.append)
+    log = dict(id=42, event_type="panel_opened", panel_type="trade", reason="recognition",
+               occurred_at=datetime.now(UTC).isoformat(), screenshot_ready=1,
+               screenshot_expires_at=(datetime.now(UTC)+timedelta(days=30)).isoformat())
+    window._on_monitor_logs_received({"logs":[log]})
+    button = window.monitor_log_table.cellWidget(0, 7)
+    assert button.text() == "查看截图"
+    button.click()
+    assert calls == [42]
+    log['screenshot_expires_at'] = (datetime.now(UTC)-timedelta(days=1)).isoformat()
+    window._on_monitor_logs_received({"logs":[log]})
+    assert window.monitor_log_table.cellWidget(0, 7) is None
+    assert window.monitor_log_table.item(0, 7).text() == "已过期"
+
+
 def test_acknowledged_row_remains_and_button_disappears(window):
     assert "#F5F7FB" in window.styleSheet()
     assert "QTabWidget::pane" in window.styleSheet()
@@ -42,7 +59,7 @@ def test_acknowledged_row_remains_and_button_disappears(window):
     assert not window.windowIcon().isNull()
     assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert window.title_bar.height() == 32
-    assert __version__ == "V2.0.0"
+    assert __version__ == "V2.3.0"
     assert __version__ in window.subtitle_label.text()
     window._on_events_received([event()])
     assert window.table.cellWidget(0, 6) is not None
@@ -140,7 +157,7 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
             "device_id": "slave-001-001",
             "display_name": "工作室电脑",
             "note": "二楼",
-            "app_version": __version__,
+            "app_version": "V2.0.0",
             "last_seen_at": now.isoformat(),
             "disabled": False,
         },
@@ -155,9 +172,9 @@ def test_device_management_page_renders_devices_and_pairing_code(window):
     assert window.device_table.rowCount() == 2
     assert window.device_table.item(0, 0).text() == "工作室电脑"
     assert window.device_table.item(0, 1).text() == "在线"
-    assert window.device_table.item(0, 3).text() == __version__
+    assert window.device_table.item(0, 3).text() == "V2.0.0"
     assert window.device_table.item(0, 5).text() == "正常"
-    assert window.device_table.item(1, 5).text() == "已禁用 · 版本不匹配"
+    assert window.device_table.item(1, 5).text() == "已禁用 · 兼容性待确认"
     assert window.device_table.cellWidget(0, 6) is not None
 
     window._on_pairing_code_received(
@@ -179,7 +196,7 @@ def test_device_management_warns_when_slave_version_differs(window):
     ])
 
     assert window.device_table.item(0, 3).text() == "V0.9.0"
-    assert window.device_table.item(0, 5).text() == "版本不匹配"
+    assert window.device_table.item(0, 5).text() == "兼容性待确认"
     assert f"主机版本：{__version__}" in window.device_table.item(0, 5).toolTip()
 
 
@@ -243,9 +260,78 @@ def test_device_name_is_shared_across_status_alarms_and_history(window):
     window._on_monitor_logs_received({"logs": [{"id": 1, "device_id": "slave-01", "display_name": "旧名称",
                                                 "event_type": "monitoring_started", "occurred_at": now}]})
     window._on_devices_received([{"device_id": "slave-01", "display_name": "收购电脑01",
-                                  "app_version": __version__, "last_seen_at": now}])
+                                  "app_version": "V2.0.0", "last_seen_at": now}])
     assert window.device_table.columnCount() == 7
     assert window.status_table.item(0, 0).text() == "收购电脑01"
     assert window.table.item(0, 1).text() == "收购电脑01"
     assert window.monitor_log_table.item(0, 1).text() == "收购电脑01"
     assert "设备标识：slave-01" in window.device_table.item(0, 0).toolTip()
+
+
+def test_log_type_selection_keeps_filter_for_older_pages(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(window.client, "fetch_monitor_logs", lambda before=0, **query: calls.append((before, query)))
+    index = window.monitor_log_filter.findText("交易面板")
+    window.monitor_log_filter.setCurrentIndex(index)
+    assert calls[-1] == (0, {"event_type": "", "panel_type": "trade"})
+    window._on_monitor_logs_received({"logs": [{"id": 12, "event_type": "panel_opened", "panel_type": "trade",
+        "device_id": "slave", "occurred_at": datetime.now(UTC).isoformat()}], "has_more": True,
+        "filters": {"panel_type": "trade", "event_type": ""}})
+    window.older_logs_button.click()
+    assert calls[-1] == (12, {"event_type": "", "panel_type": "trade"})
+    window.monitor_log_filter.setCurrentIndex(0)
+    assert calls[-1] == (0, {})
+
+
+def test_account_log_rule_controls_allow_disable_and_edit(window):
+    from hoyo_analyzer.master_app import MasterSettingsDialog
+
+    policy = {"occlusion_enabled": True, "occlusion_percent": 80, "occlusion_seconds": 10}
+    dialog = MasterSettingsDialog(window.settings, policy=policy)
+    try:
+        assert dialog.log_policy() == policy
+        dialog.occlusion_enabled.setChecked(False)
+        assert not dialog.occlusion_percent.isEnabled()
+        assert not dialog.occlusion_seconds.isEnabled()
+        assert dialog.log_policy() == {**policy, "occlusion_enabled": False}
+        dialog.occlusion_enabled.setChecked(True)
+        dialog.occlusion_percent.setValue(60)
+        dialog.occlusion_seconds.setValue(5)
+        assert dialog.log_policy() == {"occlusion_enabled": True, "occlusion_percent": 60, "occlusion_seconds": 5}
+    finally:
+        dialog.close()
+
+
+def test_explicit_incompatible_protocol_warns_even_with_same_version(window):
+    window._on_devices_received([{"device_id": "future", "app_version": __version__, "protocol_version": 2}])
+    assert window.device_table.item(0, 5).text() == "协议不兼容"
+
+
+def test_explicit_compatible_protocol_allows_different_version(window):
+    window._on_devices_received([{"device_id": "future", "app_version": "V3.5.0", "protocol_version": 1}])
+    assert window.device_table.item(0, 5).text() == "正常"
+
+
+def test_target_log_renders_typed_nickname_and_level_and_clears_stale_message(window):
+    row = {"id": 1, "event_type": "panel_target_changed", "panel_type": "trade",
+           "target_name": "惜别离", "target_level": 175, "target_status": "recognized",
+           "occurred_at": "2026-10-23T18:00:00+08:00"}
+    window._on_monitor_logs_received({"logs": [row]})
+    assert window.monitor_log_table.item(0, 3).text() == "交易对象：惜别离，175级"
+    row.update(target_name=None, target_level=None, target_status="unrecognized", message="旧对象：惜别离")
+    window._on_monitor_logs_received({"logs": [row]})
+    assert "惜别离" not in window.monitor_log_table.item(0, 3).text()
+    assert "对象未识别" in window.monitor_log_table.item(0, 3).text()
+
+
+def test_polling_completed_opening_updates_same_row_without_adding_a_record(window):
+    opening = {"id": 10, "event_type": "panel_opened", "panel_type": "trade",
+               "target_status": "unrecognized", "target_name": None, "target_level": None,
+               "occurred_at": "2026-10-23T18:00:00+08:00"}
+    window._on_monitor_logs_received({"logs": [opening]})
+    original_time = window.monitor_log_table.item(0, 0).text()
+    completed = {**opening, "target_status": "recognized", "target_name": "知夏商行", "target_level": 144}
+    window._on_monitor_logs_received({"logs": [completed]})
+    assert window.monitor_log_table.rowCount() == 1
+    assert window.monitor_log_table.item(0, 0).text() == original_time
+    assert window.monitor_log_table.item(0, 3).text() == "打开交易面板，对象：知夏商行，144级"

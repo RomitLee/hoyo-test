@@ -186,7 +186,15 @@
         const label = item.event_type === "game_default" ? "关闭面板，返回默认游戏界面"
           : ["panel_opened", "panel_closed"].includes(item.event_type) ? action + (panelNames[item.panel_type] || "未知面板")
           : labels[item.event_type] || item.event_type;
-        append(identity, "strong", "", item.message || label);
+        let logLabel = item.message || label;
+        if (["give", "trade"].includes(item.panel_type) && item.target_status != null) {
+          const prefix = item.event_type === "panel_target_changed"
+            ? `${item.panel_type === "give" ? "给予" : "交易"}对象` : `${label}，对象`;
+          const target = item.target_status === "recognized" && item.target_name && item.target_level
+            ? `${item.target_name}，${item.target_level}级` : "对象未识别";
+          logLabel = `${prefix}：${target}`;
+        }
+        append(identity, "strong", "", logLabel);
         append(identity, "small", "", item.display_name || item.hostname || item.device_id);
         append(card, "div", "alert-body", [item.server_name, item.role_name].filter(Boolean).join(" / ") || "整台从机");
         const body = append(card, "div", "alert-body");
@@ -201,6 +209,36 @@
         }
         if (item.minimized != null) append(body, "span", "", `最小化 ${item.minimized ? "是" : "否"}`);
         append(body, "span", "", reasons[item.reason] || "状态上报");
+        if (item.screenshot_ready) {
+          if (Date.parse(item.screenshot_expires_at) <= Date.now()) {
+            append(body, "span", "", "截图已过期");
+          } else {
+            const view = append(card, "button", "small-primary", "查看截图");
+            view.type = "button";
+            view.addEventListener("click", async () => {
+              view.disabled = true;
+              try {
+                const result = await api(`/api/v1/master/monitor-logs/${item.id}/screenshot`);
+                const target = new URL(result.url);
+                if (target.protocol !== "https:") throw new Error("截图地址无效");
+                const dialog = document.createElement("dialog");
+                dialog.style.cssText = "max-width:95vw;max-height:95vh;border:0;border-radius:12px;padding:12px";
+                const close = append(dialog, "button", "small-primary", "关闭截图");
+                close.addEventListener("click", () => dialog.close());
+                const image = append(dialog, "img", "", "");
+                image.alt = "触发监控日志时的游戏窗口截图";
+                image.style.cssText = "display:block;max-width:88vw;max-height:80vh;object-fit:contain;margin-top:12px";
+                image.referrerPolicy = "no-referrer";
+                image.onerror = () => { image.alt = "加载失败或链接已过期，请关闭后重新查看"; };
+                image.src = target.href;
+                dialog.addEventListener("close", () => dialog.remove(), { once: true });
+                document.body.append(dialog);
+                dialog.showModal();
+              } catch (error) { handleError(error); }
+              finally { view.disabled = false; }
+            });
+          }
+        }
       });
       logsNextId = logs.length ? logs[logs.length - 1].id : 0;
       el["logs-older"].disabled = !data.has_more;

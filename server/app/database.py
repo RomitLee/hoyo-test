@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cash_ledger
+from .panel_log_merge import BOUNDARY_TYPES, POSITION, merge_confirmation, remember_confirmation, target_message
 
 
 def utc_now() -> str:
@@ -39,6 +40,26 @@ class RelayDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_monitor_logs_account
                 ON monitor_logs(account_id, id DESC);
+                CREATE TABLE IF NOT EXISTS monitor_target_receipts (
+                    device_id TEXT NOT NULL, client_event_id TEXT NOT NULL, account_id INTEGER NOT NULL,
+                    log_id INTEGER, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL,
+                    PRIMARY KEY(device_id,client_event_id),
+                    FOREIGN KEY(log_id) REFERENCES monitor_logs(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS monitor_log_settings (
+                    account_id INTEGER PRIMARY KEY, occlusion_enabled INTEGER NOT NULL,
+                    occlusion_percent REAL NOT NULL, occlusion_seconds INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS monitor_screenshots (
+                    log_id INTEGER PRIMARY KEY REFERENCES monitor_logs(id) ON DELETE CASCADE,
+                    object_key TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+                    ready INTEGER NOT NULL DEFAULT 0, upload_token TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS monitor_occlusion_state (
+                    account_id INTEGER NOT NULL, device_id TEXT NOT NULL, window_id TEXT NOT NULL,
+                    first_seen REAL NOT NULL, last_seen REAL NOT NULL, last_sample REAL NOT NULL,
+                    PRIMARY KEY(account_id,device_id,window_id)
+                );
                 CREATE TABLE IF NOT EXISTS accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE, display_name TEXT, password_hash TEXT,
@@ -98,6 +119,7 @@ class RelayDatabase:
             self._ensure_column(connection, "devices", "created_at", "TEXT")
             self._ensure_column(connection, "devices", "disabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "devices", "removed_at", "TEXT")
+            self._ensure_column(connection, "devices", "protocol_version", "INTEGER")
             self._ensure_column(connection, "events", "account_id", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(connection, "events", "bark_last_sent_at", "TEXT")
             self._ensure_column(connection, "events", "bark_send_count", "INTEGER NOT NULL DEFAULT 0")
@@ -105,6 +127,14 @@ class RelayDatabase:
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
             self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
             self._ensure_column(connection, "monitor_logs", "message", "TEXT")
+            for name, kind in (("target_name", "TEXT"), ("target_level", "INTEGER"),
+                               ("target_confidence", "REAL"), ("target_status", "TEXT"), ("target_confirmed_at", "TEXT")):
+                self._ensure_column(connection, "monitor_logs", name, kind)
+            connection.execute(f"""CREATE INDEX IF NOT EXISTS idx_logs_target_session
+                ON monitor_logs(account_id,device_id,window_id,{POSITION} DESC,id DESC)
+                WHERE event_type IN ({BOUNDARY_TYPES})""")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_logs_event ON monitor_logs(account_id,event_type,id DESC)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_logs_panel ON monitor_logs(account_id,panel_type,id DESC)")
             for name, kind in (("cash", "INTEGER"), ("bank_money", "INTEGER"), ("money_confirmed_at", "TEXT"), ("money_readable", "INTEGER NOT NULL DEFAULT 0")):
                 self._ensure_column(connection, "device_window_status", name, kind)
             now = utc_now()
@@ -310,6 +340,11 @@ class RelayDatabase:
             )
         return seen_at
 
+    def set_device_protocol(self, device_id: str, protocol_version: int | None) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE devices SET protocol_version=? WHERE device_id=?",
+                               (protocol_version, device_id))
+
     def insert_event(self, account_id: int, device_id: str, payload: dict[str, Any]) -> tuple[int, bool, str]:
         received_at = utc_now()
         values = (
@@ -344,9 +379,14 @@ class RelayDatabase:
         received_at = utc_now()
         with self._connect() as connection:
             device = connection.execute("SELECT account_id FROM devices WHERE device_id=?", (device_id,)).fetchone()
+            active_ids = {str(window.get("window_id", "")) for window in windows}
+            for row in connection.execute("SELECT window_id FROM monitor_occlusion_state WHERE device_id=?", (device_id,)).fetchall():
+                if row["window_id"] not in active_ids:
+                    connection.execute("DELETE FROM monitor_occlusion_state WHERE device_id=? AND window_id=?", (device_id, row["window_id"]))
             for window in windows:
                 for kind, active in (
-                    ("window_occluded", float(window.get("occlusion_percent") or 0) > 0),
+                    ("window_occluded", bool(device) and self._qualifies_occlusion(
+                        connection, int(device["account_id"]), device_id, window, received_at)),
                     ("window_minimized", bool(window.get("minimized"))),
                 ):
                     if active and device:
@@ -372,38 +412,149 @@ class RelayDatabase:
         return received_at
 
     @staticmethod
+    def _log_settings(connection: sqlite3.Connection, account_id: int) -> dict[str, Any]:
+        row = connection.execute("SELECT * FROM monitor_log_settings WHERE account_id=?", (account_id,)).fetchone()
+        return {"occlusion_enabled": bool(row["occlusion_enabled"]) if row else True,
+                "occlusion_percent": float(row["occlusion_percent"]) if row else 60.0,
+                "occlusion_seconds": int(row["occlusion_seconds"]) if row else 5}
+
+    def get_monitor_log_settings(self, account_id: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            return self._log_settings(connection, account_id)
+
+    def update_monitor_log_settings(self, account_id: int, values: dict[str, Any]) -> dict[str, Any]:
+        with self._connect() as connection:
+            changed = self._log_settings(connection, account_id) != values
+            connection.execute("""INSERT INTO monitor_log_settings VALUES (?,?,?,?)
+                ON CONFLICT(account_id) DO UPDATE SET occlusion_enabled=excluded.occlusion_enabled,
+                occlusion_percent=excluded.occlusion_percent,occlusion_seconds=excluded.occlusion_seconds""",
+                (account_id, int(values["occlusion_enabled"]), values["occlusion_percent"], values["occlusion_seconds"]))
+            if changed:
+                connection.execute("DELETE FROM monitor_occlusion_state WHERE account_id=?", (account_id,))
+            return self._log_settings(connection, account_id)
+
+    def _qualifies_occlusion(self, connection: sqlite3.Connection, account_id: int, device_id: str,
+                            window: dict[str, Any], received_at: str) -> bool:
+        policy = self._log_settings(connection, account_id)
+        key = (account_id, device_id, str(window.get("window_id") or ""))
+        percentage = float(window.get("occlusion_percent") or 0)
+        eligible = (policy["occlusion_enabled"] and percentage > 0 and percentage >= policy["occlusion_percent"]
+                    and window.get("monitoring", True) and not window.get("minimized") and bool(key[2]))
+        if not eligible:
+            connection.execute("DELETE FROM monitor_occlusion_state WHERE account_id=? AND device_id=? AND window_id=?", key)
+            return False
+        try:
+            now = datetime.fromisoformat(received_at).timestamp()
+            sample = datetime.fromisoformat(str(window.get("updated_at") or window.get("occurred_at"))).timestamp()
+        except (ValueError, TypeError):
+            connection.execute("DELETE FROM monitor_occlusion_state WHERE account_id=? AND device_id=? AND window_id=?", key)
+            return False
+        previous = connection.execute("SELECT * FROM monitor_occlusion_state WHERE account_id=? AND device_id=? AND window_id=?", key).fetchone()
+        if previous and sample <= previous["last_sample"]:
+            return False
+        first = previous["first_seen"] if previous and 0 <= now - previous["last_seen"] <= 15 else now
+        connection.execute("INSERT OR REPLACE INTO monitor_occlusion_state VALUES (?,?,?,?,?,?)", (*key, first, now, sample))
+        return now - first >= policy["occlusion_seconds"]
+
+    @staticmethod
     def _insert_monitor_log(
         connection: sqlite3.Connection, account_id: int, device_id: str,
         payload: dict[str, Any], received_at: str,
     ) -> None:
-        connection.execute(
+        if merge_confirmation(connection, account_id, device_id, payload, received_at):
+            return
+        payload = dict(payload)
+        if payload.get("panel_type") in {"give", "trade"} and payload.get("target_status") is not None:
+            payload["message"] = target_message(payload, opened=payload["event_type"] == "panel_opened")
+        cursor = connection.execute(
             """INSERT OR IGNORE INTO monitor_logs(account_id,device_id,client_event_id,event_type,
                window_id,server_name,role_name,character_id,occlusion_percent,minimized,
-               occurred_at,received_at,reason,panel_type,confidence,message) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               occurred_at,received_at,reason,panel_type,confidence,message,target_name,target_level,target_confidence,target_status,target_confirmed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (account_id, device_id, payload["event_id"], payload["event_type"], payload.get("window_id"),
              payload.get("server_name"), payload.get("role_name"), payload.get("character_id"),
              payload.get("occlusion_percent"),
              None if payload.get("minimized") is None else int(payload["minimized"]),
              str(payload["occurred_at"]), received_at, payload.get("reason"), payload.get("panel_type"),
-             payload.get("confidence"), payload.get("message")),
+             payload.get("confidence"), payload.get("message"), payload.get("target_name"), payload.get("target_level"),
+             payload.get("target_confidence"), payload.get("target_status"),
+             str(payload["occurred_at"]) if payload.get("target_status") == "recognized" else None),
         )
+
+        if payload["event_type"] == "panel_target_changed" and cursor.rowcount:
+            remember_confirmation(connection, account_id, device_id, payload, received_at, int(cursor.lastrowid))
 
     def insert_monitor_log(self, account_id: int, device_id: str, payload: dict[str, Any]) -> None:
         with self._connect() as connection:
-            self._insert_monitor_log(connection, account_id, device_id, payload, utc_now())
+            connection.execute("BEGIN IMMEDIATE")
+            received = utc_now()
+            if payload["event_type"] == "window_occluded" and not self._qualifies_occlusion(connection, account_id, device_id, payload, received):
+                return
+            self._insert_monitor_log(connection, account_id, device_id, payload, received)
 
     def list_monitor_logs(
-        self, account_id: int, *, before_id: int = 0, limit: int = 100,
+        self, account_id: int, *, before_id: int = 0, limit: int = 100, event_type: str = "", panel_type: str = "",
     ) -> list[dict[str, Any]]:
+        clauses = ["l.account_id=?"]
+        parameters: list[Any] = [account_id]
+        if before_id:
+            clauses.append("l.id<?")
+            parameters.append(before_id)
+        if event_type:
+            clauses.append("l.event_type=?")
+            parameters.append(event_type)
+        if panel_type:
+            clauses.append("l.panel_type=?")
+            parameters.append(panel_type)
+        parameters.append(limit)
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT l.*,d.display_name,d.hostname FROM monitor_logs l
+                f"""SELECT l.*,d.display_name,d.hostname,
+                   s.ready AS screenshot_ready,s.expires_at AS screenshot_expires_at FROM monitor_logs l
                    LEFT JOIN devices d ON d.device_id=l.device_id
-                   WHERE l.account_id=? AND (?=0 OR l.id<?) ORDER BY l.id DESC LIMIT ?""",
-                (account_id, before_id, before_id, limit),
+                   LEFT JOIN monitor_screenshots s ON s.log_id=l.id
+                   WHERE {' AND '.join(clauses)} ORDER BY l.id DESC LIMIT ?""",
+                parameters,
             ).fetchall()
         return [{**dict(row), "minimized": None if row["minimized"] is None else bool(row["minimized"])}
                 for row in rows]
+
+    def screenshot_log(self, account_id: int, device_id: str, event_id: str):
+        with self._connect() as connection:
+            row = connection.execute("""SELECT l.* FROM monitor_logs l WHERE l.account_id=? AND l.device_id=?
+                AND (l.client_event_id=? OR l.id IN (SELECT log_id FROM monitor_target_receipts
+                     WHERE account_id=? AND device_id=? AND client_event_id=?))""",
+                (account_id, device_id, event_id, account_id, device_id, event_id)).fetchone()
+        return dict(row) if row else None
+
+    def claim_screenshot(self, account_id: int, log_id: int, token: str):
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM monitor_screenshots WHERE log_id=?", (log_id,)).fetchone()
+            if row and row["ready"]:
+                return "ready", row["object_key"]
+            if row and datetime.fromisoformat(row["created_at"]) > now - timedelta(minutes=5):
+                return "busy", row["object_key"]
+            key = f"screenshots/{account_id}/{log_id}/{token}.jpg"
+            connection.execute("""INSERT OR REPLACE INTO monitor_screenshots
+                (log_id,object_key,created_at,expires_at,ready,upload_token) VALUES (?,?,?,?,0,?)""",
+                (log_id, key, now.isoformat(), (now + timedelta(days=30)).isoformat(), token))
+            return "claimed", key
+
+    def finish_screenshot(self, log_id: int, token: str, *, success: bool):
+        with self._connect() as connection:
+            if success:
+                connection.execute("UPDATE monitor_screenshots SET ready=1 WHERE log_id=? AND upload_token=?",
+                                   (log_id, token))
+            else:
+                connection.execute("DELETE FROM monitor_screenshots WHERE log_id=? AND upload_token=? AND ready=0",
+                                   (log_id, token))
+
+    def get_screenshot(self, account_id: int, log_id: int):
+        with self._connect() as connection:
+            row = connection.execute("""SELECT s.* FROM monitor_screenshots s JOIN monitor_logs l ON l.id=s.log_id
+                WHERE l.account_id=? AND l.id=? AND s.ready=1""", (account_id, log_id)).fetchone()
+        return dict(row) if row else None
 
     def list_events(self, account_id: int, *, pending_only: bool, after_id: int, limit: int) -> list[dict[str, Any]]:
         predicates = ["account_id=?", "id>?"]
@@ -523,7 +674,7 @@ class RelayDatabase:
     def list_devices(self, account_id: int) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT device_id,display_name,note,hostname,app_version,ip_address,last_seen_at,created_at,disabled
+                """SELECT device_id,display_name,note,hostname,app_version,protocol_version,ip_address,last_seen_at,created_at,disabled
                    FROM devices WHERE account_id=? AND removed_at IS NULL ORDER BY created_at,device_id""",
                 (account_id,),
             ).fetchall()

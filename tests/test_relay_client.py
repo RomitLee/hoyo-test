@@ -146,3 +146,49 @@ def test_slave_name_roundtrip_and_legacy_heartbeat_compatibility(monkeypatch):
     assert results == [True, False]
     client._log_timer.stop()
     client._heartbeat_timer.stop()
+
+
+def test_log_filter_change_discards_inflight_old_page(monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtNetwork import QNetworkReply
+    from PySide6.QtWidgets import QApplication
+
+    from hoyo_analyzer.relay_client import MasterRelayClient
+
+    client = MasterRelayClient(QApplication.instance())
+    client.configure("token")
+    requests, received = [], []
+    monkeypatch.setattr(client, "_get", lambda path, kind: requests.append(path))
+    client.monitor_logs_received.connect(received.append)
+    client.fetch_monitor_logs(90)
+    client.fetch_monitor_logs(0, panel_type="trade")
+    assert len(requests) == 1
+    props = {"relay_kind": "monitor_logs", "log_query": (90, "", ""), "log_generation": 1}
+    reply = SimpleNamespace(property=props.get, attribute=lambda key: 200,
+                            error=lambda: QNetworkReply.NetworkError.NoError,
+                            readAll=lambda: b'{"logs":[],"has_more":false}', deleteLater=lambda: None)
+    client._on_finished(reply)
+    assert received == []
+    assert "panel_type=trade" in requests[-1] and "before_id=0" in requests[-1]
+
+
+def test_rules_reply_from_previous_account_is_ignored(monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtNetwork import QNetworkReply
+    from PySide6.QtWidgets import QApplication
+
+    from hoyo_analyzer.relay_client import MasterRelayClient
+
+    client = MasterRelayClient(QApplication.instance())
+    client.configure("old-account")
+    client.configure("new-account")
+    received = []
+    client.monitor_log_settings_received.connect(received.append)
+    props = {"relay_kind": "monitor_log_settings", "settings_generation": 1}
+    reply = SimpleNamespace(property=props.get, attribute=lambda key: 200,
+                            error=lambda: QNetworkReply.NetworkError.NoError,
+                            readAll=lambda: b'{"occlusion_enabled":true}', deleteLater=lambda: None)
+    client._on_finished(reply)
+    assert received == []
