@@ -6,6 +6,7 @@ import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from '
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
+type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; device: Device }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
 type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; configured?: boolean; masked_key?: string }
@@ -35,6 +36,7 @@ const notice = ref('')
 const connected = ref(false)
 const updatedAt = ref('')
 const devices = ref<Device[]>([])
+const roles = ref<Omit<RoleStatus, 'device'>[]>([])
 const alerts = ref<Alert[]>([])
 const logs = ref<Log[]>([])
 const logHasMore = ref(false)
@@ -65,19 +67,21 @@ let soundTimer: number | undefined
 let timer: number | undefined
 let session = 0
 
-const windows = computed(() => devices.value.flatMap(device => (device.windows || []).map(window => ({ ...window, device }))))
-const snapshotKey = (deviceId: string, windowId: string) => `${deviceId}:${windowId}`
+const windows = computed<RoleStatus[]>(() => roles.value.map(role => ({ ...role,
+  device: devices.value.find(device => device.device_id === role.device_id) || { device_id: role.device_id || '' },
+})).sort((a, b) => Number(b.role_online) - Number(a.role_online) || (b.received_at || b.first_seen_at || '').localeCompare(a.received_at || a.first_seen_at || '')))
+const snapshotKey = (item: RoleStatus) => item.character_id || `${item.device_id}:${item.window_id}`
 
 async function snapshotUrl(deviceId: string, windowId: string) {
   return api<{ url: string; captured_at: string }>(`/api/v1/master/live-screenshots/${encodeURIComponent(deviceId)}/view?window_id=${encodeURIComponent(windowId)}`)
 }
 
 async function refreshThumbnails() {
-  await Promise.all(windows.value.filter(item => item.screenshot_at && thumbnailDates[snapshotKey(item.device.device_id, item.window_id)] !== item.screenshot_at)
+  await Promise.all(windows.value.filter(item => item.screenshot_at && item.screenshot_device_id && item.screenshot_window_id && thumbnailDates[snapshotKey(item)] !== item.screenshot_at)
     .map(async item => {
-      const key = snapshotKey(item.device.device_id, item.window_id)
+      const key = snapshotKey(item)
       try {
-        const shot = await snapshotUrl(item.device.device_id, item.window_id)
+        const shot = await snapshotUrl(item.screenshot_device_id!, item.screenshot_window_id!)
         if (new URL(shot.url).protocol !== 'https:') return
         thumbnails[key] = shot.url
         thumbnailDates[key] = item.screenshot_at || ''
@@ -94,8 +98,8 @@ async function viewSnapshot(deviceId: string, windowId: string) {
   preview.value = shot.url
 }
 
-async function openHistory(item: WindowStatus & { device: Device }) {
-  if (!item.character_id) { await viewSnapshot(item.device.device_id, item.window_id); return }
+async function openHistory(item: RoleStatus) {
+  if (!item.character_id) { await viewSnapshot(item.screenshot_device_id || item.device.device_id, item.screenshot_window_id || item.window_id); return }
   preview.value = ''; previewError.value = ''
   historyCharacter.value = item.character_id
   const result = await api<{ items: HistoricalShot[]; has_more: boolean }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(item.character_id)}&limit=30`)
@@ -103,7 +107,7 @@ async function openHistory(item: WindowStatus & { device: Device }) {
   historyHasMore.value = result.has_more
   historyIndex.value = 0
   if (history.value.length) await showHistorical(0)
-  else await viewSnapshot(item.device.device_id, item.window_id)
+  else if (item.screenshot_device_id && item.screenshot_window_id) await viewSnapshot(item.screenshot_device_id, item.screenshot_window_id)
 }
 
 async function showHistorical(index: number) {
@@ -140,8 +144,8 @@ function previewKey(event: KeyboardEvent) {
   if (event.key === 'ArrowRight') void navigateHistory(-1).catch(fail)
 }
 
-async function requestSnapshot(item: WindowStatus & { device: Device }) {
-  const key = snapshotKey(item.device.device_id, item.window_id)
+async function requestSnapshot(item: RoleStatus) {
+  const key = snapshotKey(item)
   pendingSnapshots[key] = true
   try {
     const result = await api<{ request_id: string }>(`/api/v1/master/live-screenshots/${encodeURIComponent(item.device.device_id)}/request`, json('POST', { window_id: item.window_id }))
@@ -163,7 +167,7 @@ const pending = computed(() => alerts.value.filter(item => !item.acked_at).lengt
 const activeDevices = computed(() => devices.value.filter(item => !item.disabled && online(item.last_seen_at)).length)
 const eventTypes = [
   ['', '全部类型'], ['window_occluded', '遮挡'], ['window_minimized', '最小化'],
-  ['monitoring_started', '开始监控'], ['monitoring_paused', '暂停监控'],
+  ['monitoring_started', '开始监控'], ['monitoring_paused', '暂停监控'], ['window_monitored', '开始监控角色'],
   ['panel_opened', '打开面板'], ['panel_closed', '关闭面板'],
   ['panel_target_changed', '对象变化'], ['game_default', '默认界面'],
 ]
@@ -238,12 +242,13 @@ async function refresh() {
   const current = session
   try {
     const [status, events, pendingEvents] = await Promise.all([
-      api<{ devices: Device[] }>('/api/v1/master/status'),
+      api<{ devices: Device[]; roles: Omit<RoleStatus, 'device'>[] }>('/api/v1/master/status'),
       api<{ events: Alert[] }>('/api/v1/master/events?state=all&limit=200&latest=true'),
       api<{ events: Alert[] }>('/api/v1/master/events?state=pending&limit=500&latest=true'),
     ])
     if (current !== session) return
     devices.value = status.devices || []
+    roles.value = status.roles || []
     if (page.value === 'monitor') void refreshThumbnails()
     alerts.value = Array.from(new Map([...(events.events || []), ...(pendingEvents.events || [])]
       .map(item => [item.server_event_id, item])).values()).sort((a, b) => b.server_event_id - a.server_event_id)
@@ -313,7 +318,7 @@ function logLabel(item: Log): string {
     : item.event_type === 'panel_opened' ? `打开${panelLabels[item.panel_type || ''] || '面板'}`
     : item.event_type === 'panel_closed' ? `关闭${panelLabels[item.panel_type || ''] || '面板'}`
     : item.event_type === 'panel_target_changed' ? `${item.panel_type === 'give' ? '给予' : '交易'}对象变化`
-    : ({ window_occluded: '遮挡', window_minimized: '最小化', monitoring_started: '开始监控', monitoring_paused: '暂停监控' } as Record<string, string>)[item.event_type] || item.event_type
+    : ({ window_occluded: '遮挡', window_minimized: '最小化', monitoring_started: '开始监控', monitoring_paused: '暂停监控', window_monitored: '开始监控角色' } as Record<string, string>)[item.event_type] || item.event_type
   if (['give', 'trade'].includes(item.panel_type || '') && item.target_status != null) {
     const target = item.target_status === 'recognized' && item.target_name && item.target_level ? `${item.target_name}，${item.target_level}级` : '对象未识别'
     return `${base}，对象：${target}`
@@ -434,18 +439,17 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer
           <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 状态约 5 秒刷新 · 截图每 ${snapshotInterval} 分钟`">
             <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
             <div v-else class="snapshot-grid">
-              <article v-for="item in windows" :key="snapshotKey(item.device.device_id, item.window_id)" class="snapshot-card">
-                <div class="snapshot-identity" :title="`${item.server_name || '未知区服'} / ${item.role_name || '未知角色'} · ${item.device.display_name || item.device.hostname || item.device.device_id}`">
+              <article v-for="item in windows" :key="snapshotKey(item)" class="snapshot-card">
+                <div class="snapshot-identity" :title="`${item.server_name || '未知区服'} / ${item.role_name || '未知角色'} · ${item.device_name || item.device.device_id}`">
                   <strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong>
-                  <span>· {{ item.device.display_name || item.device.hostname || item.device.device_id }}</span>
-                  <span :class="online(item.device.last_seen_at) ? 'online' : 'offline'">· {{ online(item.device.last_seen_at) ? '在线' : '离线' }}</span>
+                  <span>· {{ item.device_name || item.device.display_name || item.device.hostname || item.device.device_id }}</span>
                 </div>
                 <div class="snapshot-toolbar">
-                  <span :class="['badge', item.status === 'window_closed' || !online(item.device.last_seen_at) || item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ item.status === 'window_closed' || !online(item.device.last_seen_at) ? '已掉线' : item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span>
+                  <span :class="['badge', !item.role_online || item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ !item.role_online ? '已掉线' : item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span>
                   <span class="snapshot-occlusion">遮挡 {{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }}</span>
-                  <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] || !item.monitoring || item.minimized || !online(item.device.last_seen_at)" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] ? '获取中…' : '获取实时截图' }}</button>
+                  <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item)] || !item.role_online || !item.monitoring || item.minimized" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item)] ? '获取中…' : '获取实时截图' }}</button>
                 </div>
-                <button class="snapshot-image" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" :src="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
+                <button class="snapshot-image" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
               </article>

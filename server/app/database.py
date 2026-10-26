@@ -136,6 +136,17 @@ class RelayDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_window_status_device
                 ON device_window_status(device_id, updated_at);
+                CREATE TABLE IF NOT EXISTS game_roles (
+                    character_id TEXT PRIMARY KEY,
+                    server_name TEXT, role_name TEXT,
+                    first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS game_role_accounts (
+                    character_id TEXT NOT NULL REFERENCES game_roles(character_id),
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    last_device_id TEXT, last_window_id TEXT, last_seen_at TEXT,
+                    PRIMARY KEY(character_id,account_id)
+                );
                 CREATE TABLE IF NOT EXISTS bark_settings (
                     account_id INTEGER PRIMARY KEY, device_key TEXT NOT NULL DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 0, call_enabled INTEGER NOT NULL DEFAULT 1,
@@ -174,6 +185,8 @@ class RelayDatabase:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_logs_panel ON monitor_logs(account_id,panel_type,id DESC)")
             for name, kind in (("cash", "INTEGER"), ("bank_money", "INTEGER"), ("money_confirmed_at", "TEXT"), ("money_readable", "INTEGER NOT NULL DEFAULT 0")):
                 self._ensure_column(connection, "device_window_status", name, kind)
+            for name in ("last_device_id", "last_window_id", "last_seen_at"):
+                self._ensure_column(connection, "game_role_accounts", name, "TEXT")
             now = utc_now()
             cash_ledger.initialize(connection)
             connection.execute(
@@ -181,6 +194,30 @@ class RelayDatabase:
                 (now,),
             )
             connection.execute("UPDATE devices SET created_at=COALESCE(created_at,last_seen_at,?)", (now,))
+            connection.execute("""INSERT OR IGNORE INTO game_roles(character_id,server_name,role_name,first_seen_at,last_seen_at)
+                SELECT s.character_id,s.server_name,s.role_name,MIN(s.received_at),MAX(s.received_at)
+                FROM device_window_status s WHERE s.character_id IS NOT NULL AND s.character_id<>''
+                GROUP BY s.character_id""")
+            connection.execute("""INSERT OR IGNORE INTO game_role_accounts(character_id,account_id)
+                SELECT DISTINCT s.character_id,d.account_id FROM device_window_status s
+                JOIN devices d ON d.device_id=s.device_id JOIN game_roles r ON r.character_id=s.character_id
+                WHERE s.character_id IS NOT NULL AND s.character_id<>''""")
+            connection.execute("""INSERT OR IGNORE INTO game_roles(character_id,server_name,role_name,first_seen_at,last_seen_at)
+                SELECT h.character_id,h.server_name,h.role_name,MIN(h.received_at),MAX(h.received_at)
+                FROM live_snapshot_history h WHERE h.character_id<>'' GROUP BY h.character_id""")
+            connection.execute("""INSERT OR IGNORE INTO game_role_accounts(character_id,account_id)
+                SELECT DISTINCT h.character_id,h.account_id FROM live_snapshot_history h
+                JOIN game_roles r ON r.character_id=h.character_id WHERE h.character_id<>''""")
+            connection.execute("""UPDATE game_role_accounts SET
+                last_device_id=(SELECT s.device_id FROM device_window_status s JOIN devices d ON d.device_id=s.device_id
+                    WHERE s.character_id=game_role_accounts.character_id AND d.account_id=game_role_accounts.account_id
+                    ORDER BY s.received_at DESC LIMIT 1),
+                last_window_id=(SELECT s.window_id FROM device_window_status s JOIN devices d ON d.device_id=s.device_id
+                    WHERE s.character_id=game_role_accounts.character_id AND d.account_id=game_role_accounts.account_id
+                    ORDER BY s.received_at DESC LIMIT 1),
+                last_seen_at=(SELECT MAX(s.received_at) FROM device_window_status s JOIN devices d ON d.device_id=s.device_id
+                    WHERE s.character_id=game_role_accounts.character_id AND d.account_id=game_role_accounts.account_id)
+                WHERE last_seen_at IS NULL""")
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -547,6 +584,7 @@ class RelayDatabase:
             for window in windows:
                 character_id = str(window.get("character_id") or "")
                 if character_id:
+                    self._remember_game_role(connection, int(device["account_id"]), device_id, window, received_at)
                     connection.execute(
                         """DELETE FROM device_window_status WHERE device_id=? AND character_id=?
                            AND window_id<>? AND status='window_closed'""",
@@ -576,6 +614,27 @@ class RelayDatabase:
                 ) for w in windows if str(w.get("window_id", ""))],
             )
         return received_at
+
+    @staticmethod
+    def _remember_game_role(connection: sqlite3.Connection, account_id: int, device_id: str,
+                            payload: dict[str, Any], seen_at: str) -> None:
+        character_id = str(payload.get("character_id") or "").strip()
+        if not character_id:
+            return
+        connection.execute("""INSERT INTO game_roles
+            (character_id,server_name,role_name,first_seen_at,last_seen_at) VALUES (?,?,?,?,?)
+            ON CONFLICT(character_id) DO UPDATE SET
+            server_name=COALESCE(NULLIF(excluded.server_name,''),game_roles.server_name),
+            role_name=COALESCE(NULLIF(excluded.role_name,''),game_roles.role_name),
+            last_seen_at=MAX(game_roles.last_seen_at,excluded.last_seen_at)""",
+            (character_id, payload.get("server_name"), payload.get("role_name"), seen_at, seen_at))
+        connection.execute("""INSERT INTO game_role_accounts
+            (character_id,account_id,last_device_id,last_window_id,last_seen_at) VALUES (?,?,?,?,?)
+            ON CONFLICT(character_id,account_id) DO UPDATE SET
+            last_device_id=CASE WHEN excluded.last_seen_at>=COALESCE(game_role_accounts.last_seen_at,'') THEN excluded.last_device_id ELSE game_role_accounts.last_device_id END,
+            last_window_id=CASE WHEN excluded.last_seen_at>=COALESCE(game_role_accounts.last_seen_at,'') THEN excluded.last_window_id ELSE game_role_accounts.last_window_id END,
+            last_seen_at=MAX(COALESCE(game_role_accounts.last_seen_at,''),excluded.last_seen_at)""",
+            (character_id, account_id, device_id, payload.get("window_id"), seen_at))
 
     @staticmethod
     def _log_settings(connection: sqlite3.Connection, account_id: int) -> dict[str, Any]:
@@ -645,6 +704,9 @@ class RelayDatabase:
              payload.get("target_confidence"), payload.get("target_status"),
              str(payload["occurred_at"]) if payload.get("target_status") == "recognized" else None),
         )
+
+        if cursor.rowcount and payload.get("character_id"):
+            RelayDatabase._remember_game_role(connection, account_id, device_id, payload, received_at)
 
         if payload["event_type"] == "panel_target_changed" and cursor.rowcount:
             remember_confirmation(connection, account_id, device_id, payload, received_at, int(cursor.lastrowid))
@@ -871,6 +933,52 @@ class RelayDatabase:
         for item in devices:
             item["windows"] = grouped.get(str(item["device_id"]), [])
         return devices
+
+    def list_game_roles(self, account_id: int, devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """One account-visible card per globally unique game ID, across all devices."""
+        with self._connect() as connection:
+            registered = connection.execute("""SELECT r.character_id,r.server_name,r.role_name,r.first_seen_at,
+                a.last_device_id,a.last_window_id,a.last_seen_at
+                FROM game_roles r JOIN game_role_accounts a ON a.character_id=r.character_id
+                WHERE a.account_id=?""", (account_id,)).fetchall()
+            shots = connection.execute("""SELECT character_id,device_id,window_id,captured_at FROM (
+                SELECT character_id,device_id,window_id,captured_at,
+                    ROW_NUMBER() OVER (PARTITION BY character_id ORDER BY captured_at DESC,id DESC) AS rank
+                FROM live_snapshot_history WHERE account_id=?
+            ) WHERE rank=1""", (account_id,)).fetchall()
+        latest_shots = {str(row["character_id"]): dict(row) for row in shots}
+        candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+        now = datetime.now(UTC)
+        for device in devices:
+            try:
+                device_online = not device["disabled"] and (now - datetime.fromisoformat(device["last_seen_at"])).total_seconds() <= 20
+            except (KeyError, TypeError, ValueError):
+                device_online = False
+            for window in device["windows"]:
+                character_id = str(window.get("character_id") or "")
+                if character_id:
+                    candidates.setdefault(character_id, []).append((device, {**window,
+                        "role_online": device_online and window["status"] != "window_closed"}))
+        result = []
+        for role in registered:
+            character_id = str(role["character_id"])
+            options = candidates.get(character_id, [])
+            # Prefer a live reporting window. Within the same state, the latest report owns the card.
+            options.sort(key=lambda pair: (pair[1]["role_online"], pair[1].get("received_at") or ""), reverse=True)
+            device, window = options[0] if options else (next((d for d in devices if d["device_id"] == role["last_device_id"]), {}), {})
+            shot = latest_shots.get(character_id)
+            result.append({**window, "character_id": character_id,
+                "server_name": window.get("server_name") or role["server_name"],
+                "role_name": window.get("role_name") or role["role_name"],
+                "device_id": device.get("device_id") or role["last_device_id"] or (shot or {}).get("device_id"),
+                "device_name": device.get("display_name") or device.get("hostname") or "曾监控的从机",
+                "role_online": bool(window.get("role_online")),
+                "first_seen_at": role["first_seen_at"], "received_at": window.get("received_at") or role["last_seen_at"],
+                "screenshot_at": shot["captured_at"] if shot else window.get("screenshot_at"),
+                "screenshot_device_id": shot["device_id"] if shot else device.get("device_id"),
+                "screenshot_window_id": shot["window_id"] if shot else window.get("window_id")})
+        result.sort(key=lambda role: (role["role_online"], role.get("received_at") or role["first_seen_at"]), reverse=True)
+        return result
 
     def backfill_closed_windows(self) -> int:
         """Recover previously discarded window cards when a recent screenshot remains."""

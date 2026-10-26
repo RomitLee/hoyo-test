@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any, ClassVar
+from uuid import uuid4
 
 import cv2
 from PySide6.QtCore import Qt, QThread, QTimer, Slot
@@ -867,6 +868,14 @@ class InventoryMonitorWindow(QMainWindow):
             output_occlusion=output_occlusion,
         )
         self.sessions[hwnd] = session
+        if account.role_id:
+            # Persist first sight locally; the outbox retries even if this window closes immediately.
+            self.relay_client.send_monitor_payload({
+                "event_id": uuid4().hex, "event_type": "window_monitored", "reason": "startup",
+                "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+                "window_id": f"hwnd:{hwnd}", "server_name": account.secondary_region,
+                "role_name": account.role_name, "character_id": account.role_id,
+            })
 
         thread.started.connect(worker.run)
         worker.preview_for_window.connect(self._on_preview)

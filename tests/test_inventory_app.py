@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.6.0"
+        assert __version__ == "V2.7.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()

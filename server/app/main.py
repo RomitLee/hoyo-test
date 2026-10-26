@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.15.0"
+VERSION = "2.16.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -202,7 +202,7 @@ class AckIn(BaseModel):
 class MonitorLogIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
-    event_type: Literal["monitoring_started", "monitoring_paused", "panel_opened", "panel_closed", "game_default", "panel_target_changed"]
+    event_type: Literal["monitoring_started", "monitoring_paused", "window_monitored", "panel_opened", "panel_closed", "game_default", "panel_target_changed"]
     occurred_at: datetime
     reason: Literal["startup", "resume", "pause", "close", "recognition"]
     window_id: str | None = Field(default=None, max_length=128)
@@ -813,7 +813,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for window in device["windows"]:
                 shot = database.live_snapshot(account_id, device["device_id"], window["window_id"])
                 window["screenshot_at"] = shot["captured_at"] if shot else None
-        return {"devices": devices, "count": len(devices)}
+        return {"devices": devices, "roles": database.list_game_roles(account_id, devices), "count": len(devices)}
 
     def live_key(identity: DeviceIdentity, window_id: str, capture_id: str | None = None) -> str:
         device_hash = hashlib.sha256(identity.device_id.encode()).hexdigest()[:24]
