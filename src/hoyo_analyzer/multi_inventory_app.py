@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -48,6 +49,7 @@ from .desktop_theme import (
     apply_desktop_theme,
     pill_style,
 )
+from .device_auth import DeviceAuthClient
 from .inventory_app import (
     APP_NAME,
     MAX_MONITORED_WINDOWS,
@@ -135,11 +137,13 @@ class InventoryMonitorWindow(QMainWindow):
         self._mini_mode = False
         self._full_position = None
         self._closing = False
+        self._authenticated = False
         self._build_ui()
+        self.auth_client = DeviceAuthClient(self)
+        self.auth_client.result.connect(self._on_auth_result)
         self.relay_client = SlaveRelayClient(self)
         self.relay_client.connection_changed.connect(self._on_relay_connection_changed)
         self.relay_client.event_result.connect(self._on_relay_event_result)
-        self.relay_client.pairing_result.connect(self._on_pairing_result)
         self.relay_client.profile_received.connect(self._on_device_profile)
         self.relay_client.profile_result.connect(self._on_profile_result)
         self.relay_client.live_screenshots.control_received.connect(self._on_live_control)
@@ -147,26 +151,25 @@ class InventoryMonitorWindow(QMainWindow):
         self._live_interval_minutes = 5
         self._last_live_capture: dict[int, float] = {}
         self._seen_live_requests: set[str] = set()
-        self._configure_relay()
-        self.relay_client.send_monitor_log("monitoring_started", "startup")
-
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.refresh_windows)
-        self.scan_timer.start(3000)
+        self.scan_timer.setInterval(3000)
         self.window_state_timer = QTimer(self)
         self.window_state_timer.timeout.connect(self._poll_active_window_states)
-        self.window_state_timer.start(1000)
+        self.window_state_timer.setInterval(1000)
         self.occlusion_timer = QTimer(self)
         self.occlusion_timer.timeout.connect(self._poll_window_occlusion)
-        self.occlusion_timer.start(2000)
+        self.occlusion_timer.setInterval(2000)
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._report_window_status)
-        self.status_timer.start(5000)
+        self.status_timer.setInterval(5000)
+        self.auth_timer = QTimer(self)
+        self.auth_timer.setInterval(30000)
+        self.auth_timer.timeout.connect(self._verify_saved_identity)
         self.minimize_verify_timer = QTimer(self)
         self.minimize_verify_timer.setSingleShot(True)
         self.minimize_verify_timer.timeout.connect(self._finish_minimize_all_game_windows)
-        QTimer.singleShot(0, self.refresh_windows)
-        QTimer.singleShot(250, self._connect_or_pair)
+        QTimer.singleShot(250, self._verify_saved_identity)
         mark_update_healthy("slave")
         self.update_controller = install_auto_update("slave", self)
 
@@ -233,6 +236,9 @@ class InventoryMonitorWindow(QMainWindow):
         self.settings_button.setToolTip("设置从机告警策略和云端连接")
         self.settings_button.clicked.connect(self._open_settings)
         heading_controls.addWidget(self.settings_button, 0, 3)
+        self.logout_button = QPushButton("退出登录")
+        self.logout_button.clicked.connect(self._logout)
+        heading_controls.addWidget(self.logout_button, 2, 3)
         self.host_status_label = QLabel("云端：未连接")
         self.host_status_label.setStyleSheet(pill_style("#B42335", "#FFF0F2", "#F2BCC4"))
         heading_controls.addWidget(self.host_status_label, 1, 1, Qt.AlignmentFlag.AlignRight)
@@ -304,6 +310,47 @@ class InventoryMonitorWindow(QMainWindow):
         self.mini_content.hide()
         self._refresh_mini_status()
 
+        self.login_content = QWidget()
+        self.login_content.setObjectName("appRoot")
+        login_layout = QVBoxLayout(self.login_content)
+        login_layout.setContentsMargins(40, 35, 40, 35)
+        login_layout.setSpacing(14)
+        login_layout.addStretch(1)
+        login_title = QLabel("登录后开始监控")
+        login_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        login_title.setStyleSheet("font-size:22px;font-weight:800;color:#243247;")
+        login_layout.addWidget(login_title)
+        login_hint = QLabel("使用网页后台的账号和密码。首次登录会自动登记这台机器。")
+        login_hint.setWordWrap(True)
+        login_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        login_hint.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        login_layout.addWidget(login_hint)
+        self.login_username = QLineEdit(self.slave_settings.account_username)
+        self.login_username.setPlaceholderText("后台账号")
+        self.login_username.setMaxLength(32)
+        login_layout.addWidget(self.login_username)
+        self.login_password = QLineEdit()
+        self.login_password.setPlaceholderText("密码")
+        self.login_password.setEchoMode(QLineEdit.EchoMode.Password)
+        login_layout.addWidget(self.login_password)
+        self.login_password.returnPressed.connect(self._submit_login)
+        self.login_button = QPushButton("登录并开始使用")
+        self.login_button.setProperty("role", "primary")
+        self.login_button.clicked.connect(self._submit_login)
+        login_layout.addWidget(self.login_button)
+        self.retry_auth_button = QPushButton("重新验证本机登录")
+        self.retry_auth_button.clicked.connect(self._verify_saved_identity)
+        self.retry_auth_button.setVisible(bool(self.slave_settings.device_id and self.slave_settings.device_token))
+        login_layout.addWidget(self.retry_auth_button)
+        self.login_status = QLabel("请先登录账号")
+        self.login_status.setWordWrap(True)
+        self.login_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.login_status.setStyleSheet(f"color:{MUTED};font-size:12px;")
+        login_layout.addWidget(self.login_status)
+        login_layout.addStretch(1)
+        shell_layout.addWidget(self.login_content, 1)
+        self.full_content.hide()
+
     @Slot()
     def _enter_mini_mode(self) -> None:
         if self._mini_mode:
@@ -339,6 +386,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot()
     def refresh_windows(self) -> None:
+        if not self._authenticated:
+            return
         try:
             windows = [item for item in list_capturable_windows() if is_mhxy_game_window_title(item.title)]
         except Exception as exc:  # noqa: BLE001 - native enumeration errors belong in the status area
@@ -373,6 +422,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot()
     def _toggle_monitoring(self) -> None:
+        if not self._authenticated:
+            return
         self._set_monitoring_paused(not self.monitoring_paused)
 
     def _set_monitoring_paused(self, paused: bool) -> None:
@@ -438,6 +489,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot()
     def _minimize_all_game_windows(self) -> None:
+        if not self._authenticated:
+            return
         """Pause monitoring and minimize every game window, monitored or not."""
         self._set_monitoring_paused(True)
         try:
@@ -500,6 +553,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot()
     def _open_settings(self) -> None:
+        if not self._authenticated:
+            return
         dialog = SlaveSettingsDialog(self.slave_settings, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -520,11 +575,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._configure_relay()
         self._refresh_host_status()
         self.log.appendPlainText("从机设置已保存并生效。")
-        if self.slave_settings.pairing_code:
-            self.host_status_label.setText("云端：配对中…")
-            self.relay_client.pair(self.slave_settings.pairing_code, self.slave_settings.installation_id)
-        else:
-            self.relay_client.connect_now()
+        self.relay_client.connect_now()
         self._poll_window_occlusion()
 
     def _refresh_host_status(self) -> None:
@@ -535,7 +586,7 @@ class InventoryMonitorWindow(QMainWindow):
         )
         configured = bool(self.slave_settings.device_id and self.slave_settings.device_token)
         self.host_status_label.setToolTip(
-            f"固定云端：{CLOUD_RELAY_URL}\n设备：{self.slave_settings.device_id or '尚未配对'}"
+            f"固定云端：{CLOUD_RELAY_URL}\n设备：{self.slave_settings.device_id or '未登录'}"
         )
         self.host_connect_button.setVisible(True)
         self.host_connect_button.setEnabled(configured)
@@ -575,6 +626,8 @@ class InventoryMonitorWindow(QMainWindow):
         self.log.appendPlainText(message)
 
     def _configure_relay(self) -> None:
+        if not self._authenticated:
+            return
         try:
             self.relay_client.configure(self.slave_settings.device_id, self.slave_settings.device_token)
         except ValueError as exc:
@@ -582,11 +635,128 @@ class InventoryMonitorWindow(QMainWindow):
             self.log.appendPlainText(f"云端设置无效：{exc}")
         self._refresh_host_status()
 
-    def _connect_or_pair(self) -> None:
-        if self.slave_settings.pairing_code:
-            self.relay_client.pair(self.slave_settings.pairing_code, self.slave_settings.installation_id)
+    @Slot()
+    def _verify_saved_identity(self) -> None:
+        if self._closing or not self.login_button.isEnabled():
+            return
+        if not self.slave_settings.device_id or not self.slave_settings.device_token:
+            if not self._authenticated:
+                self.login_status.setText("请输入后台账号和密码")
+            return
+        if not self._authenticated:
+            self.login_status.setText("正在验证本机登录…")
+        self.auth_client.verify(self.slave_settings.device_id, self.slave_settings.device_token)
+
+    @Slot()
+    def _submit_login(self) -> None:
+        if self._closing or self._authenticated:
+            return
+        username = self.login_username.text().strip()
+        password = self.login_password.text()
+        if not username or not password:
+            self.login_status.setText("请输入账号和密码")
+            return
+        self.login_button.setEnabled(False)
+        self.login_status.setText("正在登录并绑定机器…")
+        self.auth_client.login(username, password, self.slave_settings.installation_id)
+
+    @Slot(str, bool, str, object)
+    def _on_auth_result(self, kind: str, success: bool, message: str, data: dict[str, Any]) -> None:
+        if self._closing:
+            return
+        if kind == "login":
+            self.login_button.setEnabled(True)
+        if success:
+            previous = (self.slave_settings.device_id, self.slave_settings.device_token,
+                        self.slave_settings.display_name, self.slave_settings.account_username)
+            if kind == "login":
+                self.slave_settings.device_id = str(data.get("device_id") or "")
+                self.slave_settings.device_token = str(data.get("device_token") or "")
+                self.slave_settings.pairing_code = ""
+                self.login_password.clear()
+            self.slave_settings.display_name = str(data.get("display_name") or self.slave_settings.display_name)
+            self.slave_settings.account_username = str(data.get("account_username") or self.slave_settings.account_username)
+            current = (self.slave_settings.device_id, self.slave_settings.device_token,
+                       self.slave_settings.display_name, self.slave_settings.account_username)
+            if current != previous:
+                try:
+                    save_slave_settings(self.slave_settings)
+                except OSError as exc:
+                    self._deactivate(f"无法保存本机登录状态：{exc}")
+                    return
+            if not self._authenticated:
+                self._activate_authenticated()
+            else:
+                self._refresh_host_status()
+            return
+        if kind == "verify" and int(data.get("http_status") or 0) in {401, 403}:
+            self.slave_settings.device_id = ""
+            self.slave_settings.device_token = ""
+            try:
+                save_slave_settings(self.slave_settings)
+            except OSError:
+                pass
+        if kind == "verify" and self._authenticated:
+            self._deactivate(message)
         else:
-            self.relay_client.connect_now()
+            self.login_status.setText(message)
+            self.retry_auth_button.setVisible(bool(self.slave_settings.device_token))
+            if self.slave_settings.device_token:
+                self.auth_timer.start()
+
+    def _activate_authenticated(self) -> None:
+        self._authenticated = True
+        self.login_content.hide()
+        self.full_content.show()
+        self._configure_relay()
+        self._refresh_host_status()
+        self.scan_timer.start()
+        self.window_state_timer.start()
+        self.occlusion_timer.start()
+        self.status_timer.start()
+        self.auth_timer.start()
+        self.refresh_windows()
+        self.relay_client.send_monitor_log("monitoring_started", "startup")
+        self.relay_client.connect_now()
+
+    def _deactivate(self, message: str) -> None:
+        self._authenticated = False
+        self.scan_timer.stop()
+        self.window_state_timer.stop()
+        self.occlusion_timer.stop()
+        self.status_timer.stop()
+        for hwnd in tuple(self.sessions):
+            self._request_remove_window(hwnd)
+        for alert in tuple(self.alerts):
+            alert.close()
+        self._sounding_alerts.clear()
+        self._stop_alarm_sound()
+        self.relay_client.configure("", "")
+        if self._mini_mode:
+            self._restore_full_mode()
+        self.full_content.hide()
+        self.mini_content.hide()
+        self.login_content.show()
+        self.setFixedSize(self.FULL_WIDTH, self.FULL_HEIGHT)
+        self.retry_auth_button.setVisible(bool(self.slave_settings.device_token))
+        self.login_status.setText(message)
+        if self.slave_settings.device_token:
+            self.auth_timer.start()
+        else:
+            self.auth_timer.stop()
+
+    @Slot()
+    def _logout(self) -> None:
+        self.auth_client.cancel()
+        self.slave_settings.device_id = ""
+        self.slave_settings.device_token = ""
+        self.slave_settings.display_name = ""
+        try:
+            save_slave_settings(self.slave_settings)
+        except OSError as exc:
+            QMessageBox.critical(self, "退出失败", f"无法清除本机登录状态：{exc}")
+            return
+        self._deactivate("已退出登录，请重新输入后台账号和密码")
 
     @Slot()
     def _connect_relay(self) -> None:
@@ -610,26 +780,6 @@ class InventoryMonitorWindow(QMainWindow):
     def _on_relay_event_result(self, _success: bool, message: str) -> None:
         self.log.appendPlainText(message)
 
-    @Slot(bool, str, object)
-    def _on_pairing_result(self, success: bool, message: str, data: dict[str, Any]) -> None:
-        if not success:
-            self.host_status_label.setText("云端：配对失败")
-            self.host_status_label.setToolTip(message)
-            self.log.appendPlainText(f"从机配对失败：{message}")
-            return
-        self.slave_settings.device_id = str(data.get("device_id") or "")
-        self.slave_settings.device_token = str(data.get("device_token") or "")
-        self.slave_settings.display_name = str(data.get("display_name") or "")
-        self.slave_settings.pairing_code = ""
-        try:
-            save_slave_settings(self.slave_settings)
-        except OSError as exc:
-            QMessageBox.critical(self, "配对保存失败", f"无法保存设备身份：{exc}")
-            return
-        self._configure_relay()
-        self.log.appendPlainText(f"从机配对成功：{self.slave_settings.display_name or '未命名从机'}")
-        self.relay_client.connect_now()
-
     def _send_host_alert(
         self,
         session: MonitorSession,
@@ -641,6 +791,8 @@ class InventoryMonitorWindow(QMainWindow):
         minimized: bool | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
+        if not self._authenticated:
+            return
         self.relay_client.send_event(
             make_event_payload(
                 event_type,
@@ -654,10 +806,12 @@ class InventoryMonitorWindow(QMainWindow):
                 details=details,
             )
         )
-        self.log.appendPlainText(f"正在发送主机告警：{session.account.secondary_region} / {session.account.role_name}")
+        self.log.appendPlainText(f"正在发送云端告警：{session.account.secondary_region} / {session.account.role_name}")
 
     @Slot()
     def _show_add_window_menu(self) -> None:
+        if not self._authenticated:
+            return
         if len(self.sessions) >= MAX_MONITORED_WINDOWS:
             QMessageBox.information(self, "已达到上限", "一台电脑最多同时监控 8 个游戏窗口。")
             return
@@ -673,6 +827,8 @@ class InventoryMonitorWindow(QMainWindow):
         menu.exec(self.add_window_button.mapToGlobal(self.add_window_button.rect().bottomLeft()))
 
     def _add_window(self, hwnd: int) -> None:
+        if not self._authenticated:
+            return
         if hwnd in self.sessions or len(self.sessions) >= MAX_MONITORED_WINDOWS:
             return
         title = self._window_titles.get(hwnd, "")
@@ -818,6 +974,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(int, object)
     def _on_preview(self, hwnd: int, image: Any) -> None:
+        if not self._authenticated:
+            return
         session = self.sessions.get(hwnd)
         if session is None or session.minimized or self.monitoring_paused:
             return
@@ -839,6 +997,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(int, object)
     def _on_analysis(self, hwnd: int, signal: dict[str, Any]) -> None:
+        if not self._authenticated:
+            return
         session = self.sessions.get(hwnd)
         if session is None or session.minimized or self.monitoring_paused:
             return
@@ -910,7 +1070,7 @@ class InventoryMonitorWindow(QMainWindow):
             message = f"检测到背包剩余 {empty_count} 格，已达到提醒阈值（≤ {threshold} 格），请及时处理。"
         host_alert = self.slave_settings.inventory_capacity_host_alert_enabled
         local_alert = self.slave_settings.inventory_capacity_local_alert_enabled
-        action = "正在上报主机" if host_alert else "正在触发本机提醒"
+        action = "正在上报云端" if host_alert else "正在触发本机提醒"
         self.log.appendPlainText(f"{title}：{account_label}，{action}")
         if host_alert:
             self._send_host_alert(
@@ -931,6 +1091,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(int, object)
     def _on_event(self, hwnd: int, event: Event) -> None:
+        if not self._authenticated:
+            return
         session = self.sessions.get(hwnd)
         if session is None or self.monitoring_paused:
             return
@@ -1034,7 +1196,7 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot()
     def _poll_active_window_states(self) -> None:
-        if self.monitoring_paused:
+        if not self._authenticated or self.monitoring_paused:
             return
         now = monotonic()
         for hwnd, session in tuple(self.sessions.items()):
@@ -1076,7 +1238,7 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot()
     def _poll_window_occlusion(self) -> None:
-        if self.monitoring_paused:
+        if not self._authenticated or self.monitoring_paused:
             return
         for session in tuple(self.sessions.values()):
             if session.removing or not is_window_available(session.hwnd):
@@ -1114,6 +1276,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(int, str)
     def _on_failed(self, hwnd: int, message: str) -> None:
+        if not self._authenticated:
+            return
         session = self.sessions.get(hwnd)
         if session is None:
             return
@@ -1152,6 +1316,8 @@ class InventoryMonitorWindow(QMainWindow):
     @Slot()
     def _report_window_status(self) -> None:
         """Publish a replaceable snapshot so the master can show every game window."""
+        if not self._authenticated:
+            return
         windows: list[dict[str, Any]] = []
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         for session in tuple(self.sessions.values()):
@@ -1209,6 +1375,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(object)
     def _on_live_control(self, control: dict[str, Any]) -> None:
+        if not self._authenticated:
+            return
         try:
             interval = int(control.get("interval_minutes", 5))
             self._live_interval_minutes = max(1, min(60, interval))
@@ -1237,7 +1405,7 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(int, object, str, str)
     def _on_live_snapshot(self, hwnd: int, jpeg: bytes, captured_at: str, request_id: str) -> None:
-        if hwnd not in self.sessions:
+        if not self._authenticated or hwnd not in self.sessions:
             return
         self._last_live_capture[hwnd] = monotonic()
         self.relay_client.live_screenshots.upload(f"hwnd:{hwnd}", jpeg, captured_at, request_id)
@@ -1247,12 +1415,16 @@ class InventoryMonitorWindow(QMainWindow):
             event.accept()
             return
         self._closing = True
-        self.relay_client.send_monitor_log("monitoring_paused", "close")
+        if self._authenticated:
+            self.relay_client.send_monitor_log("monitoring_paused", "close")
+        self.auth_timer.stop()
+        self.auth_client.cancel()
         self.scan_timer.stop()
         self.window_state_timer.stop()
         self.occlusion_timer.stop()
         self.status_timer.stop()
         self.relay_client.flush_monitor_logs()
+        self.relay_client.configure("", "")
         for alert in tuple(self.alerts):
             alert.close()
         self._sounding_alerts.clear()

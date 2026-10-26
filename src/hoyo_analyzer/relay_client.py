@@ -124,7 +124,7 @@ class SlaveRelayClient(QObject):
 
     def connect_now(self) -> None:
         if not self.configured:
-            self._set_online(False, "请在设置中输入主机生成的配对码")
+            self._set_online(False, "请先登录后台账号")
             return
         self._post(
             "/api/v1/slave/heartbeat",

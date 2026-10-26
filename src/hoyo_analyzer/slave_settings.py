@@ -40,6 +40,7 @@ class SlaveSettings:
     relay_url: str = ""
     device_id: str = ""
     display_name: str = ""
+    account_username: str = ""
     device_token: str = ""
     installation_id: str = ""
     pairing_code: str = ""
@@ -84,6 +85,7 @@ class SlaveSettings:
             relay_url=str(raw.get("relay_url", "")).strip().rstrip("/"),
             device_id=str(raw.get("device_id", "")).strip(),
             display_name=str(raw.get("display_name", "")).strip()[:64],
+            account_username=str(raw.get("account_username", "")).strip()[:32],
             device_token=str(raw.get("device_token", "")).strip(),
             installation_id=str(raw.get("installation_id", "")).strip() or uuid4().hex,
             pairing_code=str(raw.get("pairing_code", "")).strip().upper(),

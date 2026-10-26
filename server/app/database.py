@@ -305,10 +305,46 @@ class RelayDatabase:
     def authenticate_device(self, device_id: str, credential_hash: str) -> int | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT account_id FROM devices WHERE device_id=? AND credential_hash=? AND disabled=0 AND removed_at IS NULL",
+                """SELECT d.account_id FROM devices d JOIN accounts a ON a.id=d.account_id
+                   WHERE d.device_id=? AND d.credential_hash=? AND d.disabled=0
+                   AND d.removed_at IS NULL AND a.disabled=0""",
                 (device_id, credential_hash),
             ).fetchone()
         return int(row["account_id"]) if row else None
+
+    def login_device(
+        self, account_id: int, installation_id: str, credential_hash: str,
+        hostname: str | None, app_version: str | None, protocol_version: int | None,
+    ) -> str:
+        """Bind an installation to an account without changing its saved name."""
+        now = utc_now()
+        with self._connect() as connection:
+            existing = connection.execute(
+                """SELECT device_id,disabled,removed_at FROM devices
+                   WHERE account_id=? AND installation_id=? ORDER BY created_at DESC LIMIT 1""",
+                (account_id, installation_id),
+            ).fetchone()
+            if existing and not existing["removed_at"]:
+                if existing["disabled"]:
+                    raise PermissionError("这台机器已在后台禁用，请联系账号管理员")
+                device_id = str(existing["device_id"])
+                connection.execute(
+                    """UPDATE devices SET credential_hash=?,hostname=COALESCE(?,hostname),
+                       app_version=COALESCE(?,app_version),protocol_version=?,last_seen_at=?
+                       WHERE device_id=?""",
+                    (credential_hash, hostname, app_version, protocol_version, now, device_id),
+                )
+            else:
+                device_id = self._new_device_id(connection, account_id)
+                default_name = (hostname or "").strip()[:64] or f"新从机 {device_id}"
+                connection.execute(
+                    """INSERT INTO devices(device_id,account_id,display_name,hostname,app_version,
+                       protocol_version,last_seen_at,credential_hash,installation_id,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (device_id, account_id, default_name, hostname, app_version,
+                     protocol_version, now, credential_hash, installation_id, now),
+                )
+        return device_id
 
     def register_legacy_device(self, device_id: str, credential_hash: str) -> int:
         now = utc_now()

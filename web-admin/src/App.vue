@@ -14,7 +14,7 @@ type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion
 const pages: { key: Page; label: string; hint: string }[] = [
   { key: 'monitor', label: '监控', hint: '角色状态与现金' },
   { key: 'alerts', label: '告警', hint: '待处理事件' },
-  { key: 'devices', label: '从机管理', hint: '配对与设备' },
+  { key: 'devices', label: '从机管理', hint: '登录与设备' },
   { key: 'logs', label: '监控日志', hint: '操作与截图' },
   { key: 'settings', label: '设置', hint: '上报与通知' },
 ]
@@ -44,7 +44,6 @@ const filter = reactive({ event_type: '', panel_type: '' })
 const policy = reactive<Policy>({ occlusion_enabled: true, occlusion_percent: 60, occlusion_seconds: 5 })
 const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10 })
 const barkKey = ref('')
-const pairing = ref('')
 const preview = ref('')
 const previewError = ref('')
 const previewTime = ref('')
@@ -131,7 +130,6 @@ function logout(message = '') {
   alerts.value = []
   logs.value = []
   preview.value = ''
-  pairing.value = ''
   error.value = message
   connected.value = false
   stopSound()
@@ -285,11 +283,6 @@ async function ack(item: Alert) {
   catch (cause) { fail(cause) }
 }
 
-async function addDevice() {
-  try { const data = await api<{ pairing_code: string }>('/api/v1/master/pairing-codes', json('POST', {})); pairing.value = data.pairing_code }
-  catch (cause) { fail(cause) }
-}
-
 async function editDevice(device: Device) {
   const name = window.prompt('从机名称', device.display_name || device.hostname || '')
   if (name === null) return
@@ -301,12 +294,6 @@ async function editDevice(device: Device) {
 
 async function toggleDevice(device: Device) {
   try { await api(`/api/v1/master/devices/${encodeURIComponent(device.device_id)}`, json('PATCH', { disabled: !device.disabled })); await refresh() }
-  catch (cause) { fail(cause) }
-}
-
-async function reissue(device: Device) {
-  if (!window.confirm('重新配对会使旧凭据立即失效，继续吗？')) return
-  try { const data = await api<{ pairing_code: string }>(`/api/v1/master/devices/${encodeURIComponent(device.device_id)}/reissue`, json('POST', {})); pairing.value = data.pairing_code }
   catch (cause) { fail(cause) }
 }
 
@@ -364,7 +351,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void au
     <section class="login-card m-surface">
       <span class="eyebrow">HOYO MONITOR · WEB</span>
       <h1>梦幻西游监控后台</h1>
-      <p>登录账号，查看所有已配对从机的监控状态。</p>
+      <p>登录账号，查看已登录从机的监控状态。</p>
       <form @submit.prevent="login">
         <label>账号<input v-model="username" autocomplete="username" required minlength="3" maxlength="32"></label>
         <label>密码<input v-model="password" type="password" autocomplete="current-password" required minlength="8"></label>
@@ -396,7 +383,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void au
 
         <template v-else-if="page === 'alerts'"><Panel title="告警记录" :meta="`待处理 ${pending} 条`"><div v-if="!alerts.length" class="empty">暂无告警记录</div><div v-else class="table-wrap"><table><thead><tr><th>状态</th><th>从机 / 角色</th><th>告警</th><th>发生时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.server_event_id"><td><span :class="['badge', item.acked_at ? 'good' : 'danger']">{{ item.acked_at ? '已处理' : '未处理' }}</span></td><td>{{ item.display_name || item.hostname || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ alertLabels[item.event_type] || item.event_type }}</td><td>{{ time(item.occurred_at) }}</td><td><button v-if="!item.acked_at" class="primary small" @click="ack(item)">确认处理</button><span v-else>—</span></td></tr></tbody></table></div></Panel></template>
 
-        <template v-else-if="page === 'devices'"><Panel title="从机管理" :meta="`${devices.length} 台`"><template #tools><button class="primary" @click="addDevice">＋ 添加从机</button></template><div v-if="pairing" class="pairing">配对码 <strong>{{ pairing }}</strong> · 5分钟有效，仅可使用一次</div><div v-if="!devices.length" class="empty">暂无从机。点击“添加从机”生成配对码。</div><div v-else class="table-wrap"><table><thead><tr><th>从机名称</th><th>状态</th><th>版本</th><th>最后连接</th><th>操作</th></tr></thead><tbody><tr v-for="device in devices" :key="device.device_id"><td><strong>{{ device.display_name || device.hostname || device.device_id }}</strong><small v-if="device.note">{{ device.note }}</small></td><td><span :class="['badge', !device.disabled && online(device.last_seen_at) ? 'good' : '']">{{ device.disabled ? '已禁用' : online(device.last_seen_at) ? '在线' : '离线' }}</span></td><td>{{ device.app_version || '—' }}</td><td>{{ time(device.last_seen_at) }}</td><td class="actions"><button @click="editDevice(device)">编辑</button><button @click="toggleDevice(device)">{{ device.disabled ? '启用' : '禁用' }}</button><button @click="reissue(device)">重新配对</button><button class="text-danger" @click="removeDevice(device)">移除</button></td></tr></tbody></table></div></Panel></template>
+        <template v-else-if="page === 'devices'"><Panel title="从机管理" :meta="`${devices.length} 台`"><div v-if="!devices.length" class="empty">暂无从机。请在从机程序中登录本账号，机器会自动出现在这里。</div><div v-else class="table-wrap"><table><thead><tr><th>从机名称</th><th>状态</th><th>版本</th><th>最后连接</th><th>操作</th></tr></thead><tbody><tr v-for="device in devices" :key="device.device_id"><td><strong>{{ device.display_name || device.hostname || device.device_id }}</strong><small v-if="device.note">{{ device.note }}</small></td><td><span :class="['badge', !device.disabled && online(device.last_seen_at) ? 'good' : '']">{{ device.disabled ? '已禁用' : online(device.last_seen_at) ? '在线' : '离线' }}</span></td><td>{{ device.app_version || '—' }}</td><td>{{ time(device.last_seen_at) }}</td><td class="actions"><button @click="editDevice(device)">编辑</button><button @click="toggleDevice(device)">{{ device.disabled ? '启用' : '禁用' }}</button><button class="text-danger" @click="removeDevice(device)">移除</button></td></tr></tbody></table></div></Panel></template>
 
         <template v-else-if="page === 'logs'"><Panel title="监控日志" :meta="`${logs.length} 条`"><template #tools><div class="filters"><select v-model="filter.event_type" aria-label="日志类型"><option v-for="[value, label] in eventTypes" :key="value" :value="value">{{ label }}</option></select><select v-model="filter.panel_type" aria-label="面板类型"><option value="">全部面板</option><option v-for="(name, key) in panelLabels" :key="key" :value="key">{{ name }}</option></select><button class="secondary" @click="fetchLogs(0)">最新</button></div></template><div v-if="!logs.length" class="empty">暂无符合条件的记录</div><div v-else class="table-wrap"><table><thead><tr><th>发生时间</th><th>从机 / 角色</th><th>类型与内容</th><th>遮挡 / 最小化</th><th>截图</th></tr></thead><tbody><tr v-for="item in logs" :key="item.id"><td>{{ time(item.occurred_at) }}</td><td>{{ item.display_name || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ logLabel(item) }}<small>{{ reasons[item.reason || ''] || '状态上报' }}</small></td><td>{{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }} / {{ item.minimized == null ? '—' : item.minimized ? '是' : '否' }}</td><td><button v-if="item.screenshot_ready && Date.parse(item.screenshot_expires_at || '') > Date.now()" class="secondary small" @click="screenshot(item)">查看截图</button><span v-else>{{ item.screenshot_ready ? '已过期' : '—' }}</span></td></tr></tbody></table></div><div class="pagination"><button class="secondary" :disabled="logCursor === 0" @click="fetchLogs(0)">返回最新</button><button class="secondary" :disabled="!logHasMore" @click="fetchLogs(logNext)">更早记录</button></div></Panel></template>
 

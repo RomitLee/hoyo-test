@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.3.0"
+        assert __version__ == "V2.4.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -91,6 +91,85 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         }
         assert not hasattr(window, "equipment_button")
         assert not hasattr(window, "navigation")
+        assert not window._authenticated
+        assert not window.scan_timer.isActive()
+        assert not window.status_timer.isActive()
+        assert not window.relay_client.configured
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_login_gate_blocks_monitoring_until_verified_and_logout_stops_it(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    monkeypatch.setattr("hoyo_analyzer.relay_client.SlaveRelayClient._post", lambda *args: None)
+    saved = []
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.save_slave_settings", lambda value: saved.append(value.device_id))
+    window = InventoryMonitorWindow()
+    try:
+        window.show()
+        app.processEvents()
+        assert window.login_content.isVisible() and not window.full_content.isVisible()
+        window._window_titles[123] = "game"
+        window._add_window(123)
+        assert not window.sessions
+        sent = []
+        monkeypatch.setattr(window.relay_client, "send_status", lambda rows: sent.append(rows))
+        window._report_window_status()
+        assert not sent
+        window.login_password.setText("temporary-password")
+        window._on_auth_result("login", True, "", {
+            "device_id": "slave-001-001", "device_token": "test-token",
+            "display_name": "收购电脑", "account_username": "merchant",
+        })
+        app.processEvents()
+        assert window._authenticated and window.full_content.isVisible()
+        assert all(timer.isActive() for timer in (
+            window.scan_timer, window.window_state_timer, window.occlusion_timer, window.status_timer,
+        ))
+        assert window.relay_client.configured and window.login_password.text() == ""
+        assert window.device_name_label.text() == "收购电脑"
+        assert saved[-1] == "slave-001-001"
+        window._logout()
+        app.processEvents()
+        assert not window._authenticated and window.login_content.isVisible()
+        assert not window.relay_client.configured
+        assert not window.scan_timer.isActive() and not window.status_timer.isActive()
+        assert saved[-1] == ""
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_saved_device_is_verified_before_monitoring_and_revocation_locks_screen(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    settings = SlaveSettings(device_id="slave-001-001", device_token="saved-token",
+                             display_name="旧名称", installation_id="installation-1234567890")
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.load_slave_settings", lambda: settings)
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.save_slave_settings", lambda value: None)
+    monkeypatch.setattr("hoyo_analyzer.relay_client.SlaveRelayClient._post", lambda *args: None)
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    seen = []
+    monkeypatch.setattr(window.auth_client, "verify", lambda device_id, token: seen.append((device_id, token)))
+    try:
+        window.show()
+        window._verify_saved_identity()
+        assert seen == [("slave-001-001", "saved-token")]
+        assert not window._authenticated and not window.scan_timer.isActive()
+        window._on_auth_result("verify", True, "", {
+            "device_id": "slave-001-001", "display_name": "后台改名", "account_username": "merchant",
+        })
+        app.processEvents()
+        assert window._authenticated and window.full_content.isVisible()
+        assert settings.display_name == "后台改名"
+        assert window.login_password.text() == ""
+        window._on_auth_result("verify", False, "设备已禁用", {"http_status": 401})
+        app.processEvents()
+        assert not window._authenticated and window.login_content.isVisible()
+        assert settings.device_token == "" and not window.scan_timer.isActive()
+        assert not window.relay_client.configured
     finally:
         window.close()
         app.processEvents()
@@ -107,6 +186,8 @@ def test_slave_name_edits_wait_for_server_confirmation_and_cache_new_name(monkey
     monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.QInputDialog.getText", lambda *args, **kwargs: (" 收购电脑02 ", True))
     window = InventoryMonitorWindow()
     try:
+        window._authenticated = True
+        window.relay_client.configure(settings.device_id, settings.device_token)
         monkeypatch.setattr(window.relay_client, "rename_device", requested.append)
         window._edit_device_name()
         assert requested == ["收购电脑02"]
@@ -148,6 +229,11 @@ def test_mini_mode_preserves_runtime_and_restores_geometry(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
+    window._authenticated = True
+    window.login_content.hide()
+    window.full_content.show()
+    for timer in (window.scan_timer, window.window_state_timer, window.occlusion_timer, window.status_timer):
+        timer.start()
     window.move(120, 80)
     window.show()
     app.processEvents()
@@ -247,6 +333,7 @@ def test_minimized_window_updates_status_without_alert(monkeypatch) -> None:
     monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.monotonic", lambda: current_time)
 
     window = InventoryMonitorWindow()
+    window._authenticated = True
     alerts: list[tuple[str, str]] = []
     monkeypatch.setattr(
         window,
@@ -452,6 +539,7 @@ def test_non_capacity_inventory_states_do_not_create_alerts(monkeypatch) -> None
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
+    window._authenticated = True
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     window.sessions[0x1234] = SimpleNamespace(account=account, minimized=False)
     alerts: list[str] = []
@@ -563,6 +651,7 @@ def test_one_click_minimize_pauses_and_includes_unmonitored_game_windows(monkeyp
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
+    window._authenticated = True
     windows = [WindowInfo(index, f"【梦幻西游 ONLINE】角色{index}", 100 + index, "GameWindow") for index in range(1, 5)]
     minimized: set[int] = set()
     paused: list[bool] = []
@@ -597,6 +686,7 @@ def test_monitoring_button_pauses_alerts_and_resumes_from_fresh_state(monkeypatc
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
+    window._authenticated = True
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     output_panel, title, preview, status, detail, occlusion = window._make_output_panel(0x1234, account)
     pause_states: list[bool] = []

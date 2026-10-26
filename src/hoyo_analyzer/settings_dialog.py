@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QRadioButton,
     QSpinBox,
     QVBoxLayout,
@@ -46,7 +45,7 @@ class SlaveSettingsDialog(QDialog):
 
         title = QLabel("从机控制中心")
         title.setStyleSheet("font-size:20px;font-weight:800;color:#243247;")
-        subtitle = QLabel("设置背包容量提醒与从机配对")
+        subtitle = QLabel("设置背包容量提醒，查看登录状态")
         subtitle.setStyleSheet(f"color:{MUTED};font-size:11px;")
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -59,7 +58,7 @@ class SlaveSettingsDialog(QDialog):
         self.capacity_alert_buttons: dict[int, QRadioButton] = {}
         for level, text in (
             (CAPACITY_ALERT_NONE, "1 不提醒"),
-            (CAPACITY_ALERT_HOST, "2 主机推送"),
+            (CAPACITY_ALERT_HOST, "2 云端推送"),
             (CAPACITY_ALERT_LOCAL, "3 本机提醒"),
         ):
             button = QRadioButton(text)
@@ -75,7 +74,7 @@ class SlaveSettingsDialog(QDialog):
         self.capacity_threshold_spin.setToolTip("当背包剩余空格小于或等于此数值并持续 5 秒时触发")
         warning_form.addRow("空格阈值：", self.capacity_threshold_spin)
         note = QLabel(
-            "达到空格阈值并连续确认 5 秒后：2 档仅向主机推送告警；"
+            "达到空格阈值并连续确认 5 秒后：2 档仅向云端推送告警；"
             "3 档仅在本机弹窗并循环播放声音，直到手动确认。"
         )
         note.setWordWrap(True)
@@ -83,17 +82,13 @@ class SlaveSettingsDialog(QDialog):
         warning_form.addRow(note)
         root.addWidget(warning_group)
 
-        host_group = QGroupBox("从机配对")
+        host_group = QGroupBox("登录状态")
         host_form = QFormLayout(host_group)
         self.binding_status_label = QLabel()
         host_form.addRow("当前状态：", self.binding_status_label)
-        self.pairing_code_edit = QLineEdit()
-        self.pairing_code_edit.setMaxLength(6)
-        self.pairing_code_edit.setPlaceholderText("输入主机生成的 6 位配对码")
-        host_form.addRow("配对码：", self.pairing_code_edit)
         note = QLabel(
-            "服务器地址已内置。输入一次性配对码并保存后，程序会自动完成绑定；"
-            "配对码有效期为 5 分钟且只能使用一次。"
+            "服务器地址已内置。首次使用请在启动界面输入后台账号和密码；"
+            "以后启动会自动验证本机登录状态。"
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{MUTED};padding:4px 0;")
@@ -118,9 +113,9 @@ class SlaveSettingsDialog(QDialog):
         self.capacity_threshold_spin.setValue(settings.inventory_capacity_threshold)
         self._refresh_capacity_controls()
         self.binding_status_label.setText(
-            f"已绑定 · {settings.display_name or '未命名从机'}" if settings.device_id and settings.device_token else "尚未绑定"
+            f"已登录 · {settings.account_username or '后台账号'} · {settings.display_name or '未命名从机'}"
+            if settings.device_id and settings.device_token else "未登录"
         )
-        self.pairing_code_edit.setText(settings.pairing_code)
 
     def _refresh_capacity_controls(self, _level: int | None = None) -> None:
         self.capacity_threshold_spin.setEnabled(
@@ -133,7 +128,8 @@ class SlaveSettingsDialog(QDialog):
             inventory_capacity_threshold=self.capacity_threshold_spin.value(),
             device_id=self._source_settings.device_id,
             display_name=self._source_settings.display_name,
+            account_username=self._source_settings.account_username,
             device_token=self._source_settings.device_token,
             installation_id=self._source_settings.installation_id,
-            pairing_code=self.pairing_code_edit.text().strip().upper(),
+            pairing_code="",
         )

@@ -37,6 +37,7 @@ def test_slave_settings_are_saved_and_loaded(tmp_path) -> None:
         "relay_url",
         "device_id",
         "display_name",
+        "account_username",
         "device_token",
         "installation_id",
         "pairing_code",
@@ -72,21 +73,21 @@ def test_invalid_settings_fall_back_to_safe_values(tmp_path) -> None:
     assert settings.relay_url == ""
 
 
-def test_settings_dialog_only_exposes_capacity_alert_and_pairing() -> None:
+def test_settings_dialog_only_exposes_capacity_alert_and_login_status() -> None:
     app = QApplication.instance() or QApplication([])
     dialog = SlaveSettingsDialog(SlaveSettings())
     try:
         assert dialog.capacity_alert_group.exclusive()
         assert [dialog.capacity_alert_buttons[level].text() for level in (1, 2, 3)] == [
             "1 不提醒",
-            "2 主机推送",
+            "2 云端推送",
             "3 本机提醒",
         ]
         assert dialog.capacity_alert_group.checkedId() == CAPACITY_ALERT_NONE
         assert dialog.capacity_alert_buttons[CAPACITY_ALERT_NONE].isChecked()
         assert not dialog.capacity_threshold_spin.isEnabled()
-        assert dialog.pairing_code_edit.text() == ""
-        assert "尚未绑定" in dialog.binding_status_label.text()
+        assert not hasattr(dialog, "pairing_code_edit")
+        assert "未登录" in dialog.binding_status_label.text()
         assert not hasattr(dialog, "relay_url_edit")
         assert not hasattr(dialog, "device_token_edit")
         assert not hasattr(dialog, "minimize_alert_combo")
@@ -96,14 +97,13 @@ def test_settings_dialog_only_exposes_capacity_alert_and_pairing() -> None:
 
         dialog.capacity_alert_buttons[CAPACITY_ALERT_HOST].click()
         dialog.capacity_threshold_spin.setValue(3)
-        dialog.pairing_code_edit.setText("123456")
         assert dialog.capacity_alert_group.checkedId() == CAPACITY_ALERT_HOST
         assert not dialog.capacity_alert_buttons[CAPACITY_ALERT_NONE].isChecked()
         assert dialog.settings().inventory_capacity_alert_enabled
         assert dialog.settings().inventory_capacity_host_alert_enabled
         assert not dialog.settings().inventory_capacity_local_alert_enabled
         assert dialog.settings().inventory_capacity_threshold == 3
-        assert dialog.settings().pairing_code == "123456"
+        assert dialog.settings().pairing_code == ""
 
         dialog.capacity_alert_buttons[CAPACITY_ALERT_LOCAL].click()
         assert dialog.capacity_alert_group.checkedId() == CAPACITY_ALERT_LOCAL

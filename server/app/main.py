@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.11.0"
+VERSION = "2.12.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -60,6 +60,13 @@ class PairingCodeIn(BaseModel):
 class PairDeviceIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     pairing_code: str = Field(min_length=6, max_length=16, pattern=r"^[A-Za-z0-9]+$")
+    installation_id: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    hostname: str | None = Field(default=None, max_length=255)
+    app_version: str | None = Field(default=None, max_length=64)
+    protocol_version: int | None = Field(default=None, ge=1, le=65535, strict=True)
+
+
+class DeviceLoginIn(CredentialsIn):
     installation_id: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     hostname: str | None = Field(default=None, max_length=255)
     app_version: str | None = Field(default=None, max_length=64)
@@ -519,6 +526,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.set_device_protocol(device_id, payload.protocol_version)
         profile = database.device_profile(_account_id, device_id)
         return {"device_id": device_id, "device_token": device_token, **profile}
+
+    @app.post("/api/v1/slave/login", status_code=status.HTTP_201_CREATED)
+    def login_device(payload: DeviceLoginIn, request: Request) -> dict[str, Any]:
+        rate_limit(request, "slave_login", limit=15, seconds=300)
+        account = database.account_by_username(payload.username.strip())
+        if not account or bool(account["disabled"]) or not _password_matches(payload.password, str(account["password_hash"])):
+            raise HTTPException(status_code=401, detail="账号或密码错误")
+        device_token = secrets.token_urlsafe(40)
+        try:
+            device_id = database.login_device(
+                int(account["id"]), payload.installation_id, _secret_hash(device_token),
+                payload.hostname, payload.app_version, payload.protocol_version,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        profile = database.device_profile(int(account["id"]), device_id)
+        return {"device_id": device_id, "device_token": device_token,
+                "account_username": account["username"], **profile}
+
+    @app.get("/api/v1/slave/auth-state")
+    def device_auth_state(identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
+        account = database.account_by_id(identity.account_id)
+        return {"device_id": identity.device_id, "account_username": account["username"] if account else "",
+                **database.device_profile(identity.account_id, identity.device_id)}
 
     @app.post("/api/v1/slave/profile")
     def rename_self(
