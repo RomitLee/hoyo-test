@@ -16,6 +16,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from . import PROTOCOL_VERSION
 from . import SLAVE_VERSION as __version__
 from .cloud_config import CLOUD_RELAY_URL
+from .live_screenshots import LiveScreenshotClient
 from .paths import application_root
 from .screenshots import ScreenshotUploader
 
@@ -73,6 +74,7 @@ class SlaveRelayClient(QObject):
         super().__init__(parent)
         self._manager = QNetworkAccessManager(self)
         self.screenshots = ScreenshotUploader(self)
+        self.live_screenshots = LiveScreenshotClient(self)
         self._base_url = ""
         self._device_id = ""
         self._device_token = ""
@@ -115,6 +117,7 @@ class SlaveRelayClient(QObject):
             self._device_token = legacy_device_token.strip()
         self._heartbeat_timer.stop()
         self.screenshots.configure(self._base_url, self._device_id, self._device_token)
+        self.live_screenshots.configure(self._base_url, self._device_id, self._device_token)
         self._set_online(False, "尚未连接")
         if self.configured:
             self._heartbeat_timer.start()

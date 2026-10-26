@@ -68,3 +68,13 @@ class ScreenshotStore:
         return self._client(custom=True).get_presigned_url(
             Bucket=self.settings.cos_bucket, Key=key, Method="GET", Expired=300
         )
+
+    def signed_put_url(self, key: str):
+        # One object-scoped upload permission can be reused for a day's captures.
+        return self._client().get_presigned_url(
+            Bucket=self.settings.cos_bucket, Key=key, Method="PUT", Expired=86400
+        )
+
+    def exists(self, key: str) -> bool:
+        self._client().head_object(Bucket=self.settings.cos_bucket, Key=key)
+        return True

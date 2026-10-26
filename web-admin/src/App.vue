@@ -4,7 +4,7 @@ import Panel from './components/Panel.vue'
 import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from './api'
 
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
-type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string }
+type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
@@ -47,6 +47,11 @@ const barkKey = ref('')
 const pairing = ref('')
 const preview = ref('')
 const previewError = ref('')
+const previewTime = ref('')
+const snapshotInterval = ref(5)
+const thumbnails = reactive<Record<string, string>>({})
+const thumbnailDates = reactive<Record<string, string>>({})
+const pendingSnapshots = reactive<Record<string, boolean>>({})
 const webSound = ref(false)
 const ringing = ref(false)
 let knownAlerts: Set<number> | undefined
@@ -56,6 +61,52 @@ let timer: number | undefined
 let session = 0
 
 const windows = computed(() => devices.value.flatMap(device => (device.windows || []).map(window => ({ ...window, device }))))
+const snapshotKey = (deviceId: string, windowId: string) => `${deviceId}:${windowId}`
+
+async function snapshotUrl(deviceId: string, windowId: string) {
+  return api<{ url: string; captured_at: string }>(`/api/v1/master/live-screenshots/${encodeURIComponent(deviceId)}/view?window_id=${encodeURIComponent(windowId)}`)
+}
+
+async function refreshThumbnails() {
+  await Promise.all(windows.value.filter(item => item.screenshot_at && thumbnailDates[snapshotKey(item.device.device_id, item.window_id)] !== item.screenshot_at)
+    .map(async item => {
+      const key = snapshotKey(item.device.device_id, item.window_id)
+      try {
+        const shot = await snapshotUrl(item.device.device_id, item.window_id)
+        if (new URL(shot.url).protocol !== 'https:') return
+        thumbnails[key] = shot.url
+        thumbnailDates[key] = item.screenshot_at || ''
+      } catch { /* A thumbnail failure must not hide the status dashboard. */ }
+    }))
+}
+
+async function viewSnapshot(deviceId: string, windowId: string) {
+  preview.value = ''; previewError.value = ''
+  const shot = await snapshotUrl(deviceId, windowId)
+  if (new URL(shot.url).protocol !== 'https:') throw new Error('截图地址无效')
+  previewTime.value = time(shot.captured_at)
+  preview.value = shot.url
+}
+
+async function requestSnapshot(item: WindowStatus & { device: Device }) {
+  const key = snapshotKey(item.device.device_id, item.window_id)
+  pendingSnapshots[key] = true
+  try {
+    const result = await api<{ request_id: string }>(`/api/v1/master/live-screenshots/${encodeURIComponent(item.device.device_id)}/request`, json('POST', { window_id: item.window_id }))
+    for (let attempt = 0; attempt < 24; attempt++) {
+      await new Promise(resolve => window.setTimeout(resolve, 2000))
+      const state = await api<{ state: string; error?: string }>(`/api/v1/master/live-screenshots/requests/${encodeURIComponent(result.request_id)}`)
+      if (state.state === 'complete') {
+        await viewSnapshot(item.device.device_id, item.window_id)
+        await refresh()
+        return
+      }
+      if (state.state !== 'pending') throw new Error(state.error || '实时截图超时，请检查从机和游戏窗口')
+    }
+    throw new Error('实时截图超时，请稍后重试')
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+  finally { delete pendingSnapshots[key] }
+}
 const pending = computed(() => alerts.value.filter(item => !item.acked_at).length)
 const activeDevices = computed(() => devices.value.filter(item => !item.disabled && online(item.last_seen_at)).length)
 const eventTypes = [
@@ -142,6 +193,7 @@ async function refresh() {
     ])
     if (current !== session) return
     devices.value = status.devices || []
+    if (page.value === 'monitor') void refreshThumbnails()
     alerts.value = Array.from(new Map([...(events.events || []), ...(pendingEvents.events || [])]
       .map(item => [item.server_event_id, item])).values()).sort((a, b) => b.server_event_id - a.server_event_id)
     const nextAlerts = new Set(alerts.value.filter(item => !item.acked_at).map(item => item.server_event_id))
@@ -161,13 +213,15 @@ async function refresh() {
 
 async function loadSettings() {
   try {
-    const [storedPolicy, storedBark, account] = await Promise.all([
+    const [storedPolicy, storedBark, account, liveSettings] = await Promise.all([
       api<Policy>('/api/v1/master/monitor-log-settings'),
       api<Bark>('/api/v1/master/notifications/bark'),
       api<{ account: { display_name?: string; username?: string } }>('/api/v1/master/account'),
+      api<{ interval_minutes: number }>('/api/v1/master/live-screenshot-settings'),
     ])
     Object.assign(policy, storedPolicy)
     Object.assign(bark, storedBark)
+    snapshotInterval.value = liveSettings.interval_minutes
     accountName.value = account.account?.display_name || account.account?.username || username.value
   } catch (cause) { fail(cause) }
 }
@@ -217,7 +271,7 @@ function logLabel(item: Log): string {
 }
 
 async function screenshot(item: Log) {
-  preview.value = ''; previewError.value = ''
+  preview.value = ''; previewError.value = ''; previewTime.value = ''
   try {
     const result = await api<{ url: string }>(`/api/v1/master/monitor-logs/${item.id}/screenshot`)
     const link = new URL(result.url)
@@ -266,6 +320,16 @@ async function savePolicy() {
   busy.value = true
   try { Object.assign(policy, await api<Policy>('/api/v1/master/monitor-log-settings', json('PUT', { ...policy }))); notice.value = '遮挡日志规则已保存' }
   catch (cause) { fail(cause) }
+  finally { busy.value = false }
+}
+
+async function saveSnapshotInterval() {
+  busy.value = true
+  try {
+    const result = await api<{ interval_minutes: number }>('/api/v1/master/live-screenshot-settings', json('PUT', { interval_minutes: snapshotInterval.value }))
+    snapshotInterval.value = result.interval_minutes
+    notice.value = `截图周期已设为 ${result.interval_minutes} 分钟`
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
   finally { busy.value = false }
 }
 
@@ -327,7 +391,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void au
 
         <template v-if="page === 'monitor'">
           <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
-          <Panel title="角色监控" :meta="`${windows.length} 个窗口`"><div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div><div v-else class="table-wrap"><table><thead><tr><th>从机</th><th>区服 / 角色</th><th>背包状态</th><th>空格</th><th>现金 · 确认时间</th><th>窗口状态</th></tr></thead><tbody><tr v-for="window in windows" :key="`${window.device.device_id}:${window.window_id}`"><td>{{ window.device.display_name || window.device.hostname || window.device.device_id }}<small>{{ online(window.device.last_seen_at) ? '在线' : '离线' }}</small></td><td>{{ window.server_name || '—' }} / {{ window.role_name || '—' }}<small v-if="window.character_id">ID {{ window.character_id }}</small></td><td><span :class="['badge', window.status === 'full' ? 'danger' : window.status === 'not_full' ? 'good' : '']">{{ statusLabels[window.status || 'unknown'] || window.status }}</span></td><td>{{ window.empty_slots ?? '—' }}</td><td><strong>{{ window.cash == null ? '未识别' : Number(window.cash).toLocaleString('zh-CN') }}</strong><small>{{ window.cash != null && !window.money_readable ? '上次确认 · ' : '确认 · ' }}{{ time(window.money_confirmed_at) }}</small></td><td><span :class="['badge', window.minimized || (window.occlusion_percent || 0) > 0 ? 'danger' : 'good']">{{ window.minimized ? '已最小化' : `遮挡 ${Number(window.occlusion_percent || 0).toFixed(1)}%` }}</span><small>{{ window.monitoring ? '监控中' : '未监控' }}</small></td></tr></tbody></table></div></Panel>
+          <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 每 ${snapshotInterval} 分钟自动截图`"><div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div><div v-else class="snapshot-grid"><article v-for="item in windows" :key="snapshotKey(item.device.device_id, item.window_id)" class="snapshot-card"><div class="snapshot-heading"><div><strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong><small>{{ item.device.display_name || item.device.hostname || item.device.device_id }} · {{ online(item.device.last_seen_at) ? '在线' : '离线' }}</small></div><span :class="['badge', item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span></div><button class="snapshot-image" :disabled="!item.screenshot_at" @click="viewSnapshot(item.device.device_id, item.window_id).catch(fail)"><img v-if="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" :src="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" alt="游戏窗口最近截图" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button><div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div><div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div><div class="snapshot-actions"><span>遮挡 {{ Number(item.occlusion_percent || 0).toFixed(1) }}%</span><button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] || item.minimized || !online(item.device.last_seen_at)" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] ? '正在获取…' : '获取实时截图' }}</button></div></article></div></Panel>
         </template>
 
         <template v-else-if="page === 'alerts'"><Panel title="告警记录" :meta="`待处理 ${pending} 条`"><div v-if="!alerts.length" class="empty">暂无告警记录</div><div v-else class="table-wrap"><table><thead><tr><th>状态</th><th>从机 / 角色</th><th>告警</th><th>发生时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.server_event_id"><td><span :class="['badge', item.acked_at ? 'good' : 'danger']">{{ item.acked_at ? '已处理' : '未处理' }}</span></td><td>{{ item.display_name || item.hostname || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ alertLabels[item.event_type] || item.event_type }}</td><td>{{ time(item.occurred_at) }}</td><td><button v-if="!item.acked_at" class="primary small" @click="ack(item)">确认处理</button><span v-else>—</span></td></tr></tbody></table></div></Panel></template>
@@ -336,10 +400,10 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); stopSound(); void au
 
         <template v-else-if="page === 'logs'"><Panel title="监控日志" :meta="`${logs.length} 条`"><template #tools><div class="filters"><select v-model="filter.event_type" aria-label="日志类型"><option v-for="[value, label] in eventTypes" :key="value" :value="value">{{ label }}</option></select><select v-model="filter.panel_type" aria-label="面板类型"><option value="">全部面板</option><option v-for="(name, key) in panelLabels" :key="key" :value="key">{{ name }}</option></select><button class="secondary" @click="fetchLogs(0)">最新</button></div></template><div v-if="!logs.length" class="empty">暂无符合条件的记录</div><div v-else class="table-wrap"><table><thead><tr><th>发生时间</th><th>从机 / 角色</th><th>类型与内容</th><th>遮挡 / 最小化</th><th>截图</th></tr></thead><tbody><tr v-for="item in logs" :key="item.id"><td>{{ time(item.occurred_at) }}</td><td>{{ item.display_name || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ logLabel(item) }}<small>{{ reasons[item.reason || ''] || '状态上报' }}</small></td><td>{{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }} / {{ item.minimized == null ? '—' : item.minimized ? '是' : '否' }}</td><td><button v-if="item.screenshot_ready && Date.parse(item.screenshot_expires_at || '') > Date.now()" class="secondary small" @click="screenshot(item)">查看截图</button><span v-else>{{ item.screenshot_ready ? '已过期' : '—' }}</span></td></tr></tbody></table></div><div class="pagination"><button class="secondary" :disabled="logCursor === 0" @click="fetchLogs(0)">返回最新</button><button class="secondary" :disabled="!logHasMore" @click="fetchLogs(logNext)">更早记录</button></div></Panel></template>
 
-        <template v-else><div class="settings-grid"><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel><Panel title="Bark 手机通知" meta="服务端推送"><form class="form-grid" @submit.prevent="saveBark"><label class="check"><input v-model="bark.enabled" type="checkbox"> 启用手机告警</label><label class="check"><input v-model="bark.call_enabled" type="checkbox"> 连续呼叫</label><label>重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label><label>设备密钥或 Bark 测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label><div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存通知设置</button><button class="secondary" type="button" @click="testBark">发送测试</button></div></form></Panel><Panel title="电脑网页提示音" meta="仅网页打开时可用"><div class="form-grid"><p class="hint">启用后，新告警到达时网页会尝试循环播放提示音。浏览器休眠或关闭后请依靠 Bark 手机推送。</p><button class="secondary" @click="toggleWebSound">{{ webSound ? '关闭电脑提示音' : '开启电脑提示音' }}</button></div></Panel></div></template>
+        <template v-else><div class="settings-grid"><Panel title="窗口截图" meta="账号级设置"><form class="form-grid" @submit.prevent="saveSnapshotInterval"><label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label><p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p><button class="primary" :disabled="busy" type="submit">保存截图周期</button></form></Panel><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel><Panel title="Bark 手机通知" meta="服务端推送"><form class="form-grid" @submit.prevent="saveBark"><label class="check"><input v-model="bark.enabled" type="checkbox"> 启用手机告警</label><label class="check"><input v-model="bark.call_enabled" type="checkbox"> 连续呼叫</label><label>重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label><label>设备密钥或 Bark 测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label><div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存通知设置</button><button class="secondary" type="button" @click="testBark">发送测试</button></div></form></Panel><Panel title="电脑网页提示音" meta="仅网页打开时可用"><div class="form-grid"><p class="hint">启用后，新告警到达时网页会尝试循环播放提示音。浏览器休眠或关闭后请依靠 Bark 手机推送。</p><button class="secondary" @click="toggleWebSound">{{ webSound ? '关闭电脑提示音' : '开启电脑提示音' }}</button></div></Panel></div></template>
       </main>
       <footer>数据每 5 秒刷新 · 手机告警由服务端 Bark 推送</footer>
     </div>
   </div>
-  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><button class="secondary" @click="preview = ''">关闭截图</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
+  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
 </template>

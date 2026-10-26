@@ -142,6 +142,11 @@ class InventoryMonitorWindow(QMainWindow):
         self.relay_client.pairing_result.connect(self._on_pairing_result)
         self.relay_client.profile_received.connect(self._on_device_profile)
         self.relay_client.profile_result.connect(self._on_profile_result)
+        self.relay_client.live_screenshots.control_received.connect(self._on_live_control)
+        self.relay_client.live_screenshots.upload_failed.connect(self.log.appendPlainText)
+        self._live_interval_minutes = 5
+        self._last_live_capture: dict[int, float] = {}
+        self._seen_live_requests: set[str] = set()
         self._configure_relay()
         self.relay_client.send_monitor_log("monitoring_started", "startup")
 
@@ -704,6 +709,7 @@ class InventoryMonitorWindow(QMainWindow):
         worker.analysis_for_window.connect(self._on_analysis)
         worker.event_for_window.connect(self._on_event)
         worker.stats_for_window.connect(self._on_stats)
+        worker.live_snapshot_ready.connect(self._on_live_snapshot)
         worker.failed_for_window.connect(self._on_failed)
         worker.finished.connect(thread.quit)
         worker.finished_for_window.connect(self._on_worker_finished)
@@ -1200,6 +1206,41 @@ class InventoryMonitorWindow(QMainWindow):
                 }
             )
         self.relay_client.send_status(windows)
+
+    @Slot(object)
+    def _on_live_control(self, control: dict[str, Any]) -> None:
+        try:
+            interval = int(control.get("interval_minutes", 5))
+            self._live_interval_minutes = max(1, min(60, interval))
+        except (TypeError, ValueError):
+            self._live_interval_minutes = 5
+        for item in control.get("requests", []):
+            request_id = str(item.get("request_id") or "")
+            window_id = str(item.get("window_id") or "")
+            if not request_id or request_id in self._seen_live_requests or not window_id.startswith("hwnd:"):
+                continue
+            try:
+                hwnd = int(window_id[5:])
+            except ValueError:
+                continue
+            session = self.sessions.get(hwnd)
+            if session and not session.removing and not is_window_minimized(hwnd):
+                self._seen_live_requests.add(request_id)
+                session.worker.request_live_snapshot(request_id)
+        now = monotonic()
+        for hwnd, session in self.sessions.items():
+            if session.removing or self.monitoring_paused or is_window_minimized(hwnd):
+                continue
+            if now - self._last_live_capture.get(hwnd, -3600.0) >= self._live_interval_minutes * 60:
+                self._last_live_capture[hwnd] = now
+                session.worker.request_live_snapshot()
+
+    @Slot(int, object, str, str)
+    def _on_live_snapshot(self, hwnd: int, jpeg: bytes, captured_at: str, request_id: str) -> None:
+        if hwnd not in self.sessions:
+            return
+        self._last_live_capture[hwnd] = monotonic()
+        self.relay_client.live_screenshots.upload(f"hwnd:{hwnd}", jpeg, captured_at, request_id)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._closing:

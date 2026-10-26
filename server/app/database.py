@@ -55,6 +55,24 @@ class RelayDatabase:
                     object_key TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
                     ready INTEGER NOT NULL DEFAULT 0, upload_token TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS live_snapshot_settings (
+                    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                    interval_minutes INTEGER NOT NULL DEFAULT 5
+                );
+                CREATE TABLE IF NOT EXISTS live_snapshots (
+                    device_id TEXT NOT NULL, window_id TEXT NOT NULL,
+                    object_key TEXT NOT NULL, captured_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL, request_id TEXT,
+                    PRIMARY KEY(device_id,window_id),
+                    FOREIGN KEY(device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS live_snapshot_requests (
+                    request_id TEXT PRIMARY KEY, account_id INTEGER NOT NULL,
+                    device_id TEXT NOT NULL, window_id TEXT NOT NULL,
+                    requested_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+                    completed_at TEXT, error TEXT,
+                    FOREIGN KEY(device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS monitor_occlusion_state (
                     account_id INTEGER NOT NULL, device_id TEXT NOT NULL, window_id TEXT NOT NULL,
                     first_seen REAL NOT NULL, last_seen REAL NOT NULL, last_sample REAL NOT NULL,
@@ -705,6 +723,67 @@ class RelayDatabase:
         for item in devices:
             item["windows"] = grouped.get(str(item["device_id"]), [])
         return devices
+
+    def snapshot_interval(self, account_id: int) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT interval_minutes FROM live_snapshot_settings WHERE account_id=?", (account_id,)).fetchone()
+        return int(row[0]) if row else 5
+
+    def set_snapshot_interval(self, account_id: int, minutes: int) -> int:
+        with self._connect() as connection:
+            connection.execute("INSERT INTO live_snapshot_settings(account_id,interval_minutes) VALUES (?,?) ON CONFLICT(account_id) DO UPDATE SET interval_minutes=excluded.interval_minutes", (account_id, minutes))
+        return minutes
+
+    def snapshot_window(self, account_id: int, device_id: str, window_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("""SELECT s.window_id,s.minimized,s.monitoring,d.last_seen_at,d.disabled
+                FROM device_window_status s JOIN devices d ON d.device_id=s.device_id
+                WHERE d.account_id=? AND d.removed_at IS NULL AND s.device_id=? AND s.window_id=?""",
+                (account_id, device_id, window_id)).fetchone()
+        return dict(row) if row else None
+
+    def snapshot_requests(self, device_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT request_id,window_id FROM live_snapshot_requests
+                WHERE device_id=? AND completed_at IS NULL AND expires_at>? ORDER BY requested_at""",
+                (device_id, utc_now())).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_snapshot_request(self, account_id: int, device_id: str, window_id: str, request_id: str) -> None:
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("""UPDATE live_snapshot_requests SET completed_at=?,error='已被新的请求替代'
+                WHERE device_id=? AND window_id=? AND completed_at IS NULL""", (now.isoformat(), device_id, window_id))
+            connection.execute("""INSERT INTO live_snapshot_requests
+                (request_id,account_id,device_id,window_id,requested_at,expires_at)
+                VALUES (?,?,?,?,?,?)""", (request_id, account_id, device_id, window_id,
+                now.isoformat(), (now + timedelta(seconds=45)).isoformat()))
+
+    def snapshot_request(self, account_id: int, request_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM live_snapshot_requests WHERE account_id=? AND request_id=?", (account_id, request_id)).fetchone()
+        return dict(row) if row else None
+
+    def save_live_snapshot(self, device_id: str, window_id: str, key: str, captured_at: str, request_id: str | None) -> None:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("""INSERT INTO live_snapshots(device_id,window_id,object_key,captured_at,received_at,request_id)
+                VALUES (?,?,?,?,?,?) ON CONFLICT(device_id,window_id) DO UPDATE SET
+                object_key=excluded.object_key,captured_at=excluded.captured_at,
+                received_at=excluded.received_at,request_id=excluded.request_id""",
+                (device_id, window_id, key, captured_at, now, request_id))
+            if request_id:
+                connection.execute("""UPDATE live_snapshot_requests SET completed_at=?
+                    WHERE request_id=? AND device_id=? AND window_id=? AND completed_at IS NULL""",
+                    (now, request_id, device_id, window_id))
+
+    def live_snapshot(self, account_id: int, device_id: str, window_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("""SELECT l.object_key,l.captured_at,l.received_at,l.request_id
+                FROM live_snapshots l JOIN devices d ON d.device_id=l.device_id
+                WHERE d.account_id=? AND d.removed_at IS NULL AND l.device_id=? AND l.window_id=?""",
+                (account_id, device_id, window_id)).fetchone()
+        return dict(row) if row else None
 
     def purge_acknowledged_events(self, retention_days: int) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat(timespec="milliseconds")

@@ -4,17 +4,17 @@
 
 ## 当前版本
 
-2026 年 10 月 26 日新增 Vue 网页管理界面，沿用 `jiankong.maipi.top`、现有账号和从机配对关系。通信协议为 `1`。主机与从机独立更新，无须保持相同产品版本号。
+2026 年 10 月 26 日新增窗口定时截图和即时截图，沿用 `jiankong.maipi.top`、现有账号和从机配对关系。通信协议为 `1`。主机与从机独立更新，无须保持相同产品版本号。
 
 | 组件 | 当前版本 | 获取方式 |
 | --- | --- | --- |
 | Windows 主机 | V2.3.0 | [下载主机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/master/V2.3.0) |
-| Windows 从机 | V2.2.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.2.0) |
-| 云端服务 | 2.10.0 | [网页管理界面](https://jiankong.maipi.top/) |
+| Windows 从机 | V2.3.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.3.0) |
+| 云端服务 | 2.11.0 | [网页管理界面](https://jiankong.maipi.top/) |
 
-网页管理界面覆盖监控、现金、告警、从机管理、监控日志、截图、遮挡日志规则和 Bark 设置，可在电脑与手机浏览器使用。旧版 H5 暂保留在 `/legacy` 作为回退入口。浏览器提示音需在每次打开网页时主动开启；关闭或休眠浏览器后，持续告警依靠服务端 Bark。Windows 主机程序的 V2.3.0 历史包继续保留，确认网页满足日常操作后再停止发布主机新版。
+网页管理界面覆盖监控、现金、告警、从机管理、监控日志、截图、遮挡日志规则和 Bark 设置，可在电脑与手机浏览器使用。监控页按窗口显示最近截图和实际截图时间；设置页按账号配置 1～60 分钟自动截图周期，默认 5 分钟；每个窗口可以独立请求即时截图。截图从从机直传私有 COS，服务端仅签发特定窗口对象的 24 小时上传许可并保存时间和关联信息；查看时提供 5 分钟读取链接。旧版 H5 暂保留在 `/legacy`。浏览器提示音需在每次打开网页时主动开启；关闭或休眠浏览器后，持续告警依靠服务端 Bark。Windows 主机程序的 V2.3.0 历史包继续保留。
 
-本次正式安装包位于 `dist-master-v230-slave-v220/`。已验证两端安装包自检、发布签名、公网完整下载和线上截图上传查看。具体包大小、SHA-256 及部署验证见 [正式发布记录](docs/30-screenshot-production-release.md)。
+本次正式安装包位于 `dist-master-v230-slave-v230/`，验证和回退信息见 [窗口截图上线记录](docs/32-live-screenshots-production-release.md)。既有事件截图说明见 [V2.2.0 发布记录](docs/30-screenshot-production-release.md)。
 
 ## 主要功能
 
@@ -106,7 +106,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Role both -O
 只修改主机时复用已有从机包；只修改从机时使用 `-Role slave`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -SkipInstall -Role master -ReuseDirectory dist-master-v230-slave-v220 -OutputDirectory dist-next
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -SkipInstall -Role master -ReuseDirectory dist-master-v230-slave-v230 -OutputDirectory dist-next
 ```
 
 复用目录需保留原签名清单和安装包，复用端版本必须与源码常量一致。构建脚本验证包大小、哈希和版本，生成分角色签名清单、带版本号 ZIP、更新器和自检报告。输出目录不要指向复用目录或正在运行的安装目录。
@@ -155,6 +155,8 @@ docs/                    设计、验证和历史发布记录
 
 | 版本 | 主要变化 |
 | --- | --- |
+| 从机 V2.3.0 / 服务端 2.11.0 | 窗口截图墙、1～60 分钟账号级周期、单窗口即时截图、24 小时单对象直传许可 |
+| 服务端 2.10.0 | Vue 网页管理界面上线，主机与手机统一使用 |
 | 主机 V2.3.0 / 从机 V2.2.0 / 服务端 2.9.0 | 给予、交易自动截图，主机及 H5 查看，私有 COS 与失败重试 |
 | 服务端 2.8.1 | 首次对象确认补全原日志，减少重复记录 |
 | 主机 V2.2.0 / 从机 V2.1.0 | 给予、交易对象昵称和等级识别 |

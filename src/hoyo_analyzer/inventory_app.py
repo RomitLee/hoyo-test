@@ -6,8 +6,10 @@ import os
 import re
 import traceback
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event as ThreadEvent
+from threading import Lock
 from time import monotonic
 from typing import Any, ClassVar
 
@@ -125,6 +127,7 @@ class InventoryMonitorWorker(QObject):
     finished_for_window = Signal(int)
     failed = Signal(str)
     failed_for_window = Signal(int, str)
+    live_snapshot_ready = Signal(int, object, str, str)
 
     PREVIEW_INTERVAL_SECONDS = 0.15
     MAX_PREVIEW_EDGE = 560
@@ -137,6 +140,14 @@ class InventoryMonitorWorker(QObject):
         self._stop_requested = ThreadEvent()
         self._pause_requested = ThreadEvent()
         self._source: Any | None = None
+        self._snapshot_lock = Lock()
+        self._snapshot_request: str | None = None
+
+    def request_live_snapshot(self, request_id: str = "") -> None:
+        """Request the next genuine game frame from the capture thread."""
+        with self._snapshot_lock:
+            if self._snapshot_request is None or request_id:
+                self._snapshot_request = request_id
 
     def set_paused(self, paused: bool) -> None:
         """Pause analysis without tearing down the window capture session."""
@@ -201,6 +212,21 @@ class InventoryMonitorWorker(QObject):
             for captured, packet in enumerate(self._source, start=1):
                 if self._stop_requested.is_set():
                     break
+                if not is_window_minimized(self.hwnd):
+                    with self._snapshot_lock:
+                        request_id = self._snapshot_request
+                        self._snapshot_request = None
+                    if request_id is not None:
+                        image = packet.image
+                        if max(image.shape[:2]) > 1280:
+                            scale = 1280 / max(image.shape[:2])
+                            image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                        encoded, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 78])
+                        if encoded:
+                            self.live_snapshot_ready.emit(
+                                self.hwnd, jpeg.tobytes(),
+                                datetime.now(UTC).isoformat(timespec="milliseconds"), request_id,
+                            )
                 if self._pause_requested.is_set():
                     was_paused = True
                     continue

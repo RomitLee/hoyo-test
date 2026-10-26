@@ -90,7 +90,7 @@ try {
         $ReuseManifestPath = Join-Path $ReuseRoot "release-manifest.json"
         & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $ReuseManifestPath
         if ($LASTEXITCODE -ne 0) { throw "Reused release signature is invalid." }
-        $ReuseManifest = Get-Content -LiteralPath $ReuseManifestPath -Raw | ConvertFrom-Json
+        $ReuseManifest = Get-Content -LiteralPath $ReuseManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     }
     $RoleRoots = @{}
     foreach ($BuildRole in @("slave", "master")) {
@@ -306,7 +306,7 @@ try {
         if (-not (Test-Path -LiteralPath $LegacyPath)) { $LegacyPath = Join-Path $ReuseRoot "release-manifest.json" }
         & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $LegacyPath
         if ($LASTEXITCODE -ne 0) { throw "Legacy release signature is invalid." }
-        $LegacyDocument = Get-Content -LiteralPath $LegacyPath -Raw | ConvertFrom-Json
+        $LegacyDocument = Get-Content -LiteralPath $LegacyPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($LegacyDocument.schema_version -ne 2) { throw "A signed schema2 legacy manifest is required for the migration." }
         Copy-Item -LiteralPath $LegacyPath -Destination (Join-Path $DistRoot "legacy-release-manifest.json")
         $LegacyArchives = Join-Path $DistRoot "legacy"

@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.10.0"
+VERSION = "2.11.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -156,6 +156,23 @@ class WindowStatusSnapshotIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reported_at: datetime
     windows: list[WindowStatusIn] = Field(default_factory=list, max_length=8)
+
+
+class LiveSnapshotSettingsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    interval_minutes: int = Field(ge=1, le=60, strict=True)
+
+
+class LiveSnapshotUploadIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window_id: str = Field(min_length=1, max_length=128)
+    captured_at: datetime
+    request_id: str | None = Field(default=None, max_length=64)
+
+
+class LiveSnapshotWindowIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    window_id: str = Field(min_length=1, max_length=128)
 
 
 class AckIn(BaseModel):
@@ -723,6 +740,92 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/master/status")
     def list_status(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
         devices = database.list_device_status(account_id)
+        for device in devices:
+            for window in device["windows"]:
+                shot = database.live_snapshot(account_id, device["device_id"], window["window_id"])
+                window["screenshot_at"] = shot["captured_at"] if shot else None
         return {"devices": devices, "count": len(devices)}
+
+    def live_key(identity: DeviceIdentity, window_id: str) -> str:
+        device_hash = hashlib.sha256(identity.device_id.encode()).hexdigest()[:24]
+        window_hash = hashlib.sha256(window_id.encode()).hexdigest()[:24]
+        return f"screenshots/live/{identity.account_id}/{device_hash}/{window_hash}.jpg"
+
+    @app.get("/api/v1/master/live-screenshot-settings")
+    def get_live_settings(account_id: int = Depends(authenticate_master)) -> dict[str, int]:
+        return {"interval_minutes": database.snapshot_interval(account_id)}
+
+    @app.put("/api/v1/master/live-screenshot-settings")
+    def put_live_settings(payload: LiveSnapshotSettingsIn, account_id: int = Depends(authenticate_master)) -> dict[str, int]:
+        return {"interval_minutes": database.set_snapshot_interval(account_id, payload.interval_minutes)}
+
+    @app.get("/api/v1/slave/live-screenshots/control")
+    def live_control(identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
+        return {"interval_minutes": database.snapshot_interval(identity.account_id),
+                "requests": database.snapshot_requests(identity.device_id)}
+
+    @app.post("/api/v1/slave/live-screenshots/permission")
+    def live_permission(payload: LiveSnapshotWindowIn, identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
+        if not database.snapshot_window(identity.account_id, identity.device_id, payload.window_id):
+            raise HTTPException(status_code=404, detail="该窗口未在监控中")
+        if not app.state.screenshots.configured:
+            raise HTTPException(status_code=503, detail="截图存储未配置")
+        key = live_key(identity, payload.window_id)
+        try:
+            url = app.state.screenshots.signed_put_url(key)
+        except Exception:  # noqa: BLE001 - do not expose signing credentials
+            raise HTTPException(status_code=503, detail="暂时无法签发上传许可") from None
+        return {"url": url, "expires_at": (datetime.now(UTC) + timedelta(hours=24)).isoformat(),
+                "window_id": payload.window_id}
+
+    @app.post("/api/v1/slave/live-screenshots/complete")
+    def live_complete(payload: LiveSnapshotUploadIn, identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
+        if not database.snapshot_window(identity.account_id, identity.device_id, payload.window_id):
+            raise HTTPException(status_code=404, detail="该窗口未在监控中")
+        if payload.captured_at.tzinfo is None or abs((datetime.now(UTC) - payload.captured_at).total_seconds()) > 120:
+            raise HTTPException(status_code=422, detail="截图时间无效")
+        if payload.request_id:
+            request = database.snapshot_request(identity.account_id, payload.request_id)
+            if not request or request["device_id"] != identity.device_id or request["window_id"] != payload.window_id or request["completed_at"]:
+                raise HTTPException(status_code=409, detail="实时截图请求已失效")
+        key = live_key(identity, payload.window_id)
+        try:
+            app.state.screenshots.exists(key)
+        except Exception:  # noqa: BLE001 - COS failure is an unavailable object
+            raise HTTPException(status_code=409, detail="COS 中尚未找到上传的截图") from None
+        database.save_live_snapshot(identity.device_id, payload.window_id, key, payload.captured_at.isoformat(), payload.request_id)
+        return {"accepted": True}
+
+    @app.post("/api/v1/master/live-screenshots/{device_id}/request")
+    def request_live_screenshot(device_id: str, payload: LiveSnapshotWindowIn,
+                                account_id: int = Depends(authenticate_master)) -> dict[str, str]:
+        row = database.snapshot_window(account_id, device_id, payload.window_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="该游戏窗口当前不在监控中")
+        if row["disabled"] or row["minimized"] or datetime.now(UTC) - datetime.fromisoformat(row["last_seen_at"]) > timedelta(seconds=45):
+            raise HTTPException(status_code=409, detail="从机离线或窗口已最小化，无法获取实时截图")
+        request_id = secrets.token_urlsafe(18)
+        database.create_snapshot_request(account_id, device_id, payload.window_id, request_id)
+        return {"request_id": request_id}
+
+    @app.get("/api/v1/master/live-screenshots/requests/{request_id}")
+    def get_live_request(request_id: str, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        row = database.snapshot_request(account_id, request_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="实时截图请求不存在")
+        state = "complete" if row["completed_at"] and not row["error"] else "failed" if row["error"] else "expired" if datetime.now(UTC) > datetime.fromisoformat(row["expires_at"]) else "pending"
+        return {"state": state, "error": row["error"], "device_id": row["device_id"], "window_id": row["window_id"]}
+
+    @app.get("/api/v1/master/live-screenshots/{device_id}/view")
+    def view_live_screenshot(device_id: str, window_id: str = Query(min_length=1, max_length=128),
+                             account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        row = database.live_snapshot(account_id, device_id, window_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="该窗口尚无截图")
+        try:
+            url = app.state.screenshots.signed_url(row["object_key"])
+        except Exception:  # noqa: BLE001 - do not expose signing credentials
+            raise HTTPException(status_code=503, detail="暂时无法读取截图") from None
+        return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": 300}, headers={"Cache-Control": "no-store"})
 
     return app
