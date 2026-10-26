@@ -122,6 +122,17 @@ class SlaveRelayClient(QObject):
         if self.configured:
             self._heartbeat_timer.start()
 
+    def rebind_device(self, old_device_id: str, new_device_id: str) -> None:
+        if old_device_id == new_device_id:
+            return
+        changed = False
+        for item in self._log_outbox:
+            if item.get("device_id") == old_device_id:
+                item["device_id"] = new_device_id
+                changed = True
+        if changed:
+            self._save_log_outbox()
+
     def connect_now(self) -> None:
         if not self.configured:
             self._set_online(False, "请先登录后台账号")

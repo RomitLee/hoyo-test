@@ -4,17 +4,17 @@
 
 ## 当前版本
 
-2026 年 10 月 26 日监控页改为宽屏每行五个窗口，截图可按角色账号 ID 翻看最近 30 天历史。新截图从本版开始积累历史，现有账号和设备登录方式不变。通信协议为 `1`。
+2026 年 10 月 27 日修复从机重装后重复建档和名称重置，并让退出的游戏窗口在网页中保留为“已掉线”，可继续查看最后截图和历史画面。在线状态与背包容量约每 5 秒更新，自动截图按设置的分钟周期独立执行。通信协议为 `1`。
 
 | 组件 | 当前版本 | 获取方式 |
 | --- | --- | --- |
 | Windows 主机 | V2.3.0 | [下载主机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/master/V2.3.0) |
-| Windows 从机 | V2.5.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.5.0) |
-| 云端服务 | 2.13.0 | [网页管理界面](https://jiankong.maipi.top/) |
+| Windows 从机 | V2.6.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.6.0) |
+| 云端服务 | 2.15.0 | [网页管理界面](https://jiankong.maipi.top/) |
 
 网页管理界面覆盖监控、现金、告警、从机管理、监控日志、截图、遮挡日志规则和 Bark 设置，可在电脑与手机浏览器使用。监控页宽屏每行展示五个窗口，状态、遮挡和实时截图操作集中在画面上方；点击画面可按账号 ID 翻看历史。设置页按账号配置 1～60 分钟自动截图周期，默认 5 分钟。截图从从机直传私有 COS，新版每张截图使用独立对象；查看时提供 5 分钟读取链接。旧版 H5 暂保留在 `/legacy`。浏览器提示音需在每次打开网页时主动开启；关闭或休眠浏览器后，持续告警依靠服务端 Bark。Windows 主机程序的 V2.3.0 历史包继续保留。
 
-本次正式安装包位于 `dist-master-v230-slave-v250/`。窗口截图的前次发布记录见 [窗口截图上线记录](docs/32-live-screenshots-production-release.md)。
+本次正式安装包位于 `dist-master-v230-slave-v260/`。窗口截图的前次发布记录见 [窗口截图上线记录](docs/32-live-screenshots-production-release.md)。
 
 ## 主要功能
 

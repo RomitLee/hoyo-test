@@ -13,6 +13,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from . import PROTOCOL_VERSION
 from . import SLAVE_VERSION as __version__
 from .cloud_config import CLOUD_RELAY_URL
+from .machine_identity import machine_id
 
 
 class DeviceAuthClient(QObject):
@@ -31,7 +32,13 @@ class DeviceAuthClient(QObject):
         request = self._request("/api/v1/slave/auth-state")
         request.setRawHeader(b"X-Device-ID", device_id.encode())
         request.setRawHeader(b"Authorization", f"Bearer {token}".encode())
-        self._start("verify", self._manager.get(request))
+        fingerprint = machine_id()
+        if fingerprint:
+            request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+            payload = {"machine_id": fingerprint, "hostname": platform.node() or None}
+            self._start("verify", self._manager.post(request, QByteArray(json.dumps(payload).encode("utf-8"))))
+        else:
+            self._start("verify", self._manager.get(request))
 
     def login(self, username: str, password: str, installation_id: str) -> None:
         if not username.strip() or not password:
@@ -43,6 +50,7 @@ class DeviceAuthClient(QObject):
             "username": username.strip(), "password": password,
             "installation_id": installation_id, "hostname": platform.node() or None,
             "app_version": __version__, "protocol_version": PROTOCOL_VERSION,
+            "machine_id": machine_id() or None,
         }
         self._start("login", self._manager.post(request, QByteArray(json.dumps(payload).encode("utf-8"))))
 

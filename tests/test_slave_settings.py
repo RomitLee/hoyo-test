@@ -6,6 +6,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from hoyo_analyzer.settings_dialog import SlaveSettingsDialog
+from hoyo_analyzer import slave_settings as settings_module
+from hoyo_analyzer import machine_identity
 from hoyo_analyzer.slave_settings import (
     CAPACITY_ALERT_HOST,
     CAPACITY_ALERT_LOCAL,
@@ -42,6 +44,30 @@ def test_slave_settings_are_saved_and_loaded(tmp_path) -> None:
         "installation_id",
         "pairing_code",
     }
+
+
+def test_install_directory_settings_migrate_to_local_app_data(tmp_path, monkeypatch) -> None:
+    legacy_root = tmp_path / "old-install"
+    legacy_file = legacy_root / "runtime" / "slave_settings.json"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_text(json.dumps({"device_id": "slave-001-005", "device_token": "secret",
+                                       "display_name": "宝石商人电脑", "installation_id": "old-install-id"}),
+                           encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-data"))
+    monkeypatch.setattr(settings_module, "application_root", lambda: legacy_root)
+    loaded = load_slave_settings()
+    assert loaded.device_id == "slave-001-005"
+    assert settings_module.settings_path().exists()
+    legacy_file.unlink()
+    assert load_slave_settings().display_name == "宝石商人电脑"
+
+
+def test_machine_identity_survives_install_directory_removal(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-data"))
+    monkeypatch.setattr(machine_identity, "_windows_machine_guid", lambda: "")
+    first = machine_identity.machine_id()
+    assert len(first) == 64
+    assert machine_identity.machine_id() == first
 
 
 def test_legacy_alert_modes_are_migrated_safely(tmp_path) -> None:

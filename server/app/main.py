@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.13.0"
+VERSION = "2.15.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -71,6 +71,13 @@ class DeviceLoginIn(CredentialsIn):
     hostname: str | None = Field(default=None, max_length=255)
     app_version: str | None = Field(default=None, max_length=64)
     protocol_version: int | None = Field(default=None, ge=1, le=65535, strict=True)
+    machine_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class DeviceMachineIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    machine_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    hostname: str | None = Field(default=None, max_length=255)
 
 
 class DeviceUpdateIn(BaseModel):
@@ -287,6 +294,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         database.initialize()
+        database.backfill_closed_windows()
         database.purge_acknowledged_events(app_settings.retention_days)
         database.purge_live_snapshot_history()
         reminder_task = asyncio.create_task(bark_reminder_loop())
@@ -552,8 +560,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             device_id = database.login_device(
                 int(account["id"]), payload.installation_id, _secret_hash(device_token),
-                payload.hostname, payload.app_version, payload.protocol_version,
+                payload.hostname, payload.app_version, payload.protocol_version, payload.machine_id,
             )
+            if payload.machine_id:
+                device_id = database.bind_machine(int(account["id"]), device_id,
+                                                  payload.machine_id, payload.hostname)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         profile = database.device_profile(int(account["id"]), device_id)
@@ -565,6 +576,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         account = database.account_by_id(identity.account_id)
         return {"device_id": identity.device_id, "account_username": account["username"] if account else "",
                 **database.device_profile(identity.account_id, identity.device_id)}
+
+    @app.post("/api/v1/slave/auth-state")
+    def bind_device_machine(payload: DeviceMachineIn,
+                            identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
+        try:
+            device_id = database.bind_machine(identity.account_id, identity.device_id,
+                                              payload.machine_id, payload.hostname)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        account = database.account_by_id(identity.account_id)
+        return {"device_id": device_id, "account_username": account["username"] if account else "",
+                **database.device_profile(identity.account_id, device_id)}
 
     @app.post("/api/v1/slave/profile")
     def rename_self(
@@ -850,7 +873,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = database.snapshot_window(account_id, device_id, payload.window_id)
         if not row:
             raise HTTPException(status_code=404, detail="该游戏窗口当前不在监控中")
-        if row["disabled"] or row["minimized"] or datetime.now(UTC) - datetime.fromisoformat(row["last_seen_at"]) > timedelta(seconds=45):
+        if row["disabled"] or row["minimized"] or not row["monitoring"] or datetime.now(UTC) - datetime.fromisoformat(row["last_seen_at"]) > timedelta(seconds=45):
             raise HTTPException(status_code=409, detail="从机离线或窗口已最小化，无法获取实时截图")
         request_id = secrets.token_urlsafe(18)
         database.create_snapshot_request(account_id, device_id, payload.window_id, request_id)

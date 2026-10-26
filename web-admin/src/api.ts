@@ -27,5 +27,5 @@ export function time(value?: string | null): string {
 
 export function online(value?: string | null): boolean {
   const at = Date.parse(value || '')
-  return Number.isFinite(at) && Date.now() - at < 90_000
+  return Number.isFinite(at) && Date.now() - at < 20_000
 }

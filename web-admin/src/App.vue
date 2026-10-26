@@ -18,7 +18,7 @@ const pages: { key: Page; label: string; hint: string }[] = [
   { key: 'logs', label: '监控日志', hint: '操作与截图' },
   { key: 'settings', label: '设置', hint: '上报与通知' },
 ]
-const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', waiting: '等待检测', unknown: '未知状态' }
+const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
 const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
 const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '摊位面板', stall_records: '摊位记录面板' }
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
@@ -431,7 +431,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer
 
         <template v-if="page === 'monitor'">
           <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
-          <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 每 ${snapshotInterval} 分钟自动截图`">
+          <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 状态约 5 秒刷新 · 截图每 ${snapshotInterval} 分钟`">
             <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
             <div v-else class="snapshot-grid">
               <article v-for="item in windows" :key="snapshotKey(item.device.device_id, item.window_id)" class="snapshot-card">
@@ -441,9 +441,9 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer
                   <span :class="online(item.device.last_seen_at) ? 'online' : 'offline'">· {{ online(item.device.last_seen_at) ? '在线' : '离线' }}</span>
                 </div>
                 <div class="snapshot-toolbar">
-                  <span :class="['badge', item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span>
-                  <span class="snapshot-occlusion">遮挡 {{ Number(item.occlusion_percent || 0).toFixed(1) }}%</span>
-                  <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] || item.minimized || !online(item.device.last_seen_at)" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] ? '获取中…' : '获取实时截图' }}</button>
+                  <span :class="['badge', item.status === 'window_closed' || !online(item.device.last_seen_at) || item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ item.status === 'window_closed' || !online(item.device.last_seen_at) ? '已掉线' : item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span>
+                  <span class="snapshot-occlusion">遮挡 {{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }}</span>
+                  <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] || !item.monitoring || item.minimized || !online(item.device.last_seen_at)" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item.device.device_id, item.window_id)] ? '获取中…' : '获取实时截图' }}</button>
                 </div>
                 <button class="snapshot-image" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" :src="thumbnails[snapshotKey(item.device.device_id, item.window_id)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>

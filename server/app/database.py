@@ -150,10 +150,13 @@ class RelayDatabase:
             self._ensure_column(connection, "devices", "note", "TEXT")
             self._ensure_column(connection, "devices", "credential_hash", "TEXT")
             self._ensure_column(connection, "devices", "installation_id", "TEXT")
+            self._ensure_column(connection, "devices", "machine_id", "TEXT")
             self._ensure_column(connection, "devices", "created_at", "TEXT")
             self._ensure_column(connection, "devices", "disabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "devices", "removed_at", "TEXT")
             self._ensure_column(connection, "devices", "protocol_version", "INTEGER")
+            connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_machine
+                ON devices(account_id,machine_id) WHERE machine_id IS NOT NULL AND removed_at IS NULL""")
             self._ensure_column(connection, "events", "account_id", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(connection, "events", "bark_last_sent_at", "TEXT")
             self._ensure_column(connection, "events", "bark_send_count", "INTEGER NOT NULL DEFAULT 0")
@@ -331,36 +334,101 @@ class RelayDatabase:
     def login_device(
         self, account_id: int, installation_id: str, credential_hash: str,
         hostname: str | None, app_version: str | None, protocol_version: int | None,
+        machine_id: str | None = None,
     ) -> str:
-        """Bind an installation to an account without changing its saved name."""
+        """Reuse the same physical machine across reinstallations."""
         now = utc_now()
         with self._connect() as connection:
-            existing = connection.execute(
-                """SELECT device_id,disabled,removed_at FROM devices
-                   WHERE account_id=? AND installation_id=? ORDER BY created_at DESC LIMIT 1""",
-                (account_id, installation_id),
-            ).fetchone()
+            existing = None
+            if machine_id:
+                existing = connection.execute(
+                    """SELECT device_id,disabled,removed_at FROM devices
+                       WHERE account_id=? AND machine_id=? AND removed_at IS NULL
+                       ORDER BY created_at LIMIT 1""", (account_id, machine_id),
+                ).fetchone()
+            if not existing:
+                existing = connection.execute(
+                    """SELECT device_id,disabled,removed_at FROM devices
+                       WHERE account_id=? AND installation_id=? ORDER BY created_at DESC LIMIT 1""",
+                    (account_id, installation_id),
+                ).fetchone()
+            if not existing and machine_id and hostname:
+                existing = self._named_legacy_machine(connection, account_id, hostname, now)
             if existing and not existing["removed_at"]:
                 if existing["disabled"]:
                     raise PermissionError("这台机器已在后台禁用，请联系账号管理员")
                 device_id = str(existing["device_id"])
                 connection.execute(
                     """UPDATE devices SET credential_hash=?,hostname=COALESCE(?,hostname),
-                       app_version=COALESCE(?,app_version),protocol_version=?,last_seen_at=?
+                       app_version=COALESCE(?,app_version),protocol_version=?,last_seen_at=?,
+                       installation_id=?
                        WHERE device_id=?""",
-                    (credential_hash, hostname, app_version, protocol_version, now, device_id),
+                    (credential_hash, hostname, app_version, protocol_version, now, installation_id, device_id),
                 )
             else:
                 device_id = self._new_device_id(connection, account_id)
                 default_name = (hostname or "").strip()[:64] or f"新从机 {device_id}"
                 connection.execute(
                     """INSERT INTO devices(device_id,account_id,display_name,hostname,app_version,
-                       protocol_version,last_seen_at,credential_hash,installation_id,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                       protocol_version,last_seen_at,credential_hash,installation_id,machine_id,created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (device_id, account_id, default_name, hostname, app_version,
-                     protocol_version, now, credential_hash, installation_id, now),
+                     protocol_version, now, credential_hash, installation_id, machine_id, now),
                 )
         return device_id
+
+    @staticmethod
+    def _named_legacy_machine(connection: sqlite3.Connection, account_id: int, hostname: str,
+                              now: str, exclude: str = "") -> sqlite3.Row | None:
+        cutoff = (datetime.fromisoformat(now) - timedelta(seconds=60)).isoformat()
+        rows = connection.execute(
+            """SELECT device_id,disabled,removed_at FROM devices
+               WHERE account_id=? AND hostname=? AND device_id<>? AND removed_at IS NULL
+               AND disabled=0 AND display_name<>hostname AND last_seen_at<?
+               AND machine_id IS NULL""",
+            (account_id, hostname, exclude, cutoff),
+        ).fetchall()
+        return rows[0] if len(rows) == 1 else None
+
+    def bind_machine(self, account_id: int, device_id: str, machine_id: str, hostname: str | None) -> str:
+        """Attach a stable machine identity and recover one unambiguous renamed legacy device."""
+        now = utc_now()
+        with self._connect() as connection:
+            current = connection.execute(
+                """SELECT * FROM devices WHERE account_id=? AND device_id=? AND removed_at IS NULL AND disabled=0""",
+                (account_id, device_id),
+            ).fetchone()
+            if current is None:
+                raise PermissionError("从机凭据已失效")
+            target = connection.execute(
+                """SELECT device_id,disabled FROM devices WHERE account_id=? AND machine_id=?
+                   AND removed_at IS NULL ORDER BY created_at LIMIT 1""",
+                (account_id, machine_id),
+            ).fetchone()
+            if target is None and hostname and current["display_name"] == current["hostname"]:
+                target = self._named_legacy_machine(connection, account_id, hostname, now, device_id)
+            if target is not None and target["disabled"]:
+                raise PermissionError("这台机器已在后台禁用，请联系账号管理员")
+            canonical = str(target["device_id"]) if target is not None else device_id
+            if canonical != device_id:
+                connection.execute(
+                    """UPDATE devices SET credential_hash=?,installation_id=?,machine_id=?,
+                       hostname=COALESCE(?,hostname),app_version=?,protocol_version=?,last_seen_at=?
+                       WHERE device_id=?""",
+                    (current["credential_hash"], current["installation_id"], machine_id,
+                     hostname, current["app_version"], current["protocol_version"], now, canonical),
+                )
+                connection.execute(
+                    "UPDATE devices SET removed_at=?,disabled=1,credential_hash=NULL WHERE device_id=?",
+                    (now, device_id),
+                )
+                connection.execute("DELETE FROM device_window_status WHERE device_id=?", (device_id,))
+            else:
+                connection.execute(
+                    "UPDATE devices SET machine_id=?,hostname=COALESCE(?,hostname) WHERE device_id=?",
+                    (machine_id, hostname, device_id),
+                )
+        return canonical
 
     def register_legacy_device(self, device_id: str, credential_hash: str) -> int:
         now = utc_now()
@@ -465,11 +533,39 @@ class RelayDatabase:
                             **window, "event_type": kind, "occurred_at": occurred,
                             "event_id": f"status:{reported_at or occurred}:{window['window_id']}:{kind}",
                         }, received_at)
-            connection.execute("DELETE FROM device_window_status WHERE device_id=?", (device_id,))
+            for previous in connection.execute(
+                "SELECT window_id FROM device_window_status WHERE device_id=? AND status<>'window_closed'",
+                (device_id,),
+            ).fetchall():
+                if previous["window_id"] not in active_ids:
+                    connection.execute(
+                        """UPDATE device_window_status SET status='window_closed',status_text='窗口已关闭',
+                           empty_slots=NULL,occupied_slots=NULL,confidence=NULL,occlusion_percent=NULL,
+                           minimized=0,monitoring=0,money_readable=0 WHERE device_id=? AND window_id=?""",
+                        (device_id, previous["window_id"]),
+                    )
+            for window in windows:
+                character_id = str(window.get("character_id") or "")
+                if character_id:
+                    connection.execute(
+                        """DELETE FROM device_window_status WHERE device_id=? AND character_id=?
+                           AND window_id<>? AND status='window_closed'""",
+                        (device_id, character_id, window["window_id"]),
+                    )
             connection.executemany(
                 """INSERT INTO device_window_status(device_id,window_id,title,server_name,role_name,character_id,
                    status,status_text,empty_slots,occupied_slots,confidence,occlusion_percent,minimized,monitoring,
-                   updated_at,received_at,cash,bank_money,money_confirmed_at,money_readable) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   updated_at,received_at,cash,bank_money,money_confirmed_at,money_readable)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(device_id,window_id) DO UPDATE SET
+                   title=excluded.title,server_name=excluded.server_name,role_name=excluded.role_name,
+                   character_id=excluded.character_id,status=excluded.status,status_text=excluded.status_text,
+                   empty_slots=excluded.empty_slots,occupied_slots=excluded.occupied_slots,
+                   confidence=excluded.confidence,occlusion_percent=excluded.occlusion_percent,
+                   minimized=excluded.minimized,monitoring=excluded.monitoring,
+                   updated_at=excluded.updated_at,received_at=excluded.received_at,
+                   cash=excluded.cash,bank_money=excluded.bank_money,
+                   money_confirmed_at=excluded.money_confirmed_at,money_readable=excluded.money_readable""",
                 [(
                     device_id, str(w.get("window_id", "")), w.get("title"), w.get("server_name"),
                     w.get("role_name"), w.get("character_id"), str(w.get("status") or "unknown"),
@@ -775,6 +871,47 @@ class RelayDatabase:
         for item in devices:
             item["windows"] = grouped.get(str(item["device_id"]), [])
         return devices
+
+    def backfill_closed_windows(self) -> int:
+        """Recover previously discarded window cards when a recent screenshot remains."""
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        restored = 0
+        with self._connect() as connection:
+            snapshots = connection.execute(
+                """SELECT l.device_id,l.window_id,l.captured_at FROM live_snapshots l
+                   JOIN devices d ON d.device_id=l.device_id
+                   LEFT JOIN device_window_status s ON s.device_id=l.device_id AND s.window_id=l.window_id
+                   WHERE d.removed_at IS NULL AND s.window_id IS NULL AND l.captured_at>=?
+                   ORDER BY l.captured_at DESC""", (cutoff,),
+            ).fetchall()
+            for shot in snapshots:
+                identity = connection.execute(
+                    """SELECT server_name,role_name,character_id FROM live_snapshot_history
+                       WHERE device_id=? AND window_id=? AND character_id IS NOT NULL
+                       ORDER BY id DESC LIMIT 1""", (shot["device_id"], shot["window_id"]),
+                ).fetchone()
+                if identity is None:
+                    identity = connection.execute(
+                        """SELECT server_name,role_name,character_id FROM monitor_logs
+                           WHERE device_id=? AND window_id=? AND character_id IS NOT NULL
+                           ORDER BY id DESC LIMIT 1""", (shot["device_id"], shot["window_id"]),
+                    ).fetchone()
+                character_id = identity["character_id"] if identity else None
+                if character_id and connection.execute(
+                    "SELECT 1 FROM device_window_status WHERE device_id=? AND character_id=? LIMIT 1",
+                    (shot["device_id"], character_id),
+                ).fetchone():
+                    continue
+                connection.execute(
+                    """INSERT OR IGNORE INTO device_window_status
+                       (device_id,window_id,server_name,role_name,character_id,status,status_text,
+                        minimized,monitoring,updated_at,received_at,money_readable)
+                       VALUES (?,?,?,?,?,'window_closed','窗口已关闭',0,0,?,?,0)""",
+                    (shot["device_id"], shot["window_id"], identity["server_name"] if identity else None,
+                     identity["role_name"] if identity else None, character_id, shot["captured_at"], utc_now()),
+                )
+                restored += 1
+        return restored
 
     def snapshot_interval(self, account_id: int) -> int:
         with self._connect() as connection:

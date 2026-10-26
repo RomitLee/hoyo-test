@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -93,18 +94,30 @@ class SlaveSettings:
 
 
 def settings_path() -> Path:
-    return application_root() / "runtime" / "slave_settings.json"
+    local_data = os.environ.get("LOCALAPPDATA")
+    if local_data:
+        return Path(local_data) / "HoyoInventoryMonitor" / "slave_settings.json"
+    return Path.home() / ".hoyo-inventory-monitor" / "slave_settings.json"
 
 
 def load_slave_settings(path: Path | None = None) -> SlaveSettings:
     target = path or settings_path()
+    legacy = application_root() / "runtime" / "slave_settings.json"
+    if path is None and not target.exists() and legacy.exists():
+        target = legacy
     if not target.exists():
         return SlaveSettings(installation_id=uuid4().hex)
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return SlaveSettings(installation_id=uuid4().hex)
-    return SlaveSettings.from_mapping(raw) if isinstance(raw, dict) else SlaveSettings()
+    settings = SlaveSettings.from_mapping(raw) if isinstance(raw, dict) else SlaveSettings(installation_id=uuid4().hex)
+    if path is None and target == legacy:
+        try:
+            save_slave_settings(settings)
+        except OSError:
+            pass  # Keep the valid legacy session available until a later save succeeds.
+    return settings
 
 
 def save_slave_settings(settings: SlaveSettings, path: Path | None = None) -> None:

@@ -1,6 +1,6 @@
 # 梦幻西游背包告警中转服务
 
-当前版本 **2.13.0**，配套从机 V2.5.0；历史 Windows 主机包保持 V2.3.0，通信协议 1。当前发布与下载见 [项目说明](../README.md)。
+当前版本 **2.15.0**，配套从机 V2.6.0；历史 Windows 主机包保持 V2.3.0，通信协议 1。当前发布与下载见 [项目说明](../README.md)。
 
 首页 `/` 是 Vue 网页管理界面，源码位于 `../web-admin/`，构建文件位于 `app/web-admin/` 并随服务端镜像提供。旧 H5 保留 `/legacy` 与 `/static/`。网页与桌面主机共用现有账号、设备和 API；静态资源不含凭据。修改前端后需在 `web-admin/` 执行 `npm ci`、`npm run build`，再构建服务端镜像。
 
@@ -30,8 +30,9 @@
 - `GET /healthz`：健康检查。
 - `POST /api/v1/auth/register`：注册主机账号。
 - `POST /api/v1/auth/login`：登录主机账号。
-- `POST /api/v1/slave/login`：从机使用账号密码首次登录，自动登记或重新取得设备凭据。
-- `GET /api/v1/slave/auth-state`：验证已保存的设备凭据并读取账号及设备名称。
+- `POST /api/v1/slave/login`：从机使用账号密码首次登录，按同账号机器摘要找回原设备或自动登记，并取得设备凭据。
+- `GET /api/v1/slave/auth-state`：兼容旧从机，验证已保存的设备凭据并读取账号及设备名称。
+- `POST /api/v1/slave/auth-state`：新版从机验证凭据并提交本机摘要；可将重装后的重复记录归并到唯一的已改名旧设备。
 - `GET /api/v1/master/account`：读取当前账号。
 - `POST /api/v1/master/pairing-codes`：生成新从机配对码。
 - `POST /api/v1/slave/pair`：从机使用配对码换取设备身份。

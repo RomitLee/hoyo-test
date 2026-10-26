@@ -89,6 +89,7 @@ class MonitorSession:
     output_occlusion: QLabel
     last_image: Any | None = None
     last_signal: dict[str, Any] | None = None
+    last_analysis_at: float | None = None
     last_stats: dict[str, Any] | None = None
     minimized: bool = False
     last_occlusion_percent: float = 0.0
@@ -468,6 +469,8 @@ class InventoryMonitorWindow(QMainWindow):
             session.occlusion_alert_active = False
             session.occlusion_candidate_since = None
             session.worker.set_paused(False)
+            session.last_signal = None
+            session.last_analysis_at = None
             if session.minimized:
                 session.minimized_since = monotonic()
                 session.minimized_alert_active = False
@@ -669,8 +672,9 @@ class InventoryMonitorWindow(QMainWindow):
         if success:
             previous = (self.slave_settings.device_id, self.slave_settings.device_token,
                         self.slave_settings.display_name, self.slave_settings.account_username)
+            if data.get("device_id"):
+                self.slave_settings.device_id = str(data["device_id"])
             if kind == "login":
-                self.slave_settings.device_id = str(data.get("device_id") or "")
                 self.slave_settings.device_token = str(data.get("device_token") or "")
                 self.slave_settings.pairing_code = ""
                 self.login_password.clear()
@@ -684,9 +688,13 @@ class InventoryMonitorWindow(QMainWindow):
                 except OSError as exc:
                     self._deactivate(f"无法保存本机登录状态：{exc}")
                     return
+            if current[0] != previous[0]:
+                self.relay_client.rebind_device(previous[0], current[0])
             if not self._authenticated:
                 self._activate_authenticated()
             else:
+                if current[0] != previous[0]:
+                    self._configure_relay()
                 self._refresh_host_status()
             return
         if kind == "verify" and int(data.get("http_status") or 0) in {401, 403}:
@@ -944,6 +952,7 @@ class InventoryMonitorWindow(QMainWindow):
     def _update_session_identity(self, session: MonitorSession, title: str) -> None:
         account = parse_account_info(title)
         session.last_signal = None
+        session.last_analysis_at = None
         session.title = title
         session.account = account
         session.worker.window_title = title
@@ -1005,6 +1014,7 @@ class InventoryMonitorWindow(QMainWindow):
         if "character_id" in signal and signal["character_id"] != session.account.role_id:
             return
         session.last_signal = signal
+        session.last_analysis_at = monotonic()
         reason = str(signal.get("money_reason") or "等待金额识别")
         cash = signal.get("cash")
         session.output_detail.setToolTip(
@@ -1215,6 +1225,8 @@ class InventoryMonitorWindow(QMainWindow):
                 self._show_minimized_status(session)
             elif not minimized and session.minimized:
                 session.minimized = False
+                session.last_signal = None
+                session.last_analysis_at = None
                 session.minimized_since = None
                 session.minimized_alert_active = False
                 self.log.appendPlainText(f"游戏窗口已恢复，检测继续：{account_label}")
@@ -1322,6 +1334,8 @@ class InventoryMonitorWindow(QMainWindow):
         now = datetime.now(UTC).isoformat(timespec="milliseconds")
         for session in tuple(self.sessions.values()):
             signal = session.last_signal or {}
+            if session.last_analysis_at is None or monotonic() - session.last_analysis_at > 15:
+                signal = {}
             money = {key: signal.get(key) for key in ("cash", "money_confirmed_at")}
             money_current = bool(signal.get("money_readable"))
             try:

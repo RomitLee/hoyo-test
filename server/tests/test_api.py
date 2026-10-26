@@ -385,7 +385,9 @@ def test_window_status_snapshot_is_visible_to_master(tmp_path: Path) -> None:
             },
         )
         assert replacement.status_code == 202
-        assert len(client.get("/api/v1/master/status", headers=master_headers()).json()["devices"][0]["windows"]) == 1
+        windows = client.get("/api/v1/master/status", headers=master_headers()).json()["devices"][0]["windows"]
+        assert len(windows) == 2
+        assert next(item for item in windows if item["window_id"] == "hwnd:1002")["status"] == "window_closed"
 
 
 def test_mobile_status_page_and_static_assets_are_available(tmp_path: Path) -> None:
