@@ -121,6 +121,59 @@ def test_capture_retry_and_initial_ocr_confirmation_share_one_screenshot(client)
     assert len(logs(client)) == 2 and len(client.app.state.screenshots.images) == 2
 
 
+def test_event_evidence_joins_role_history_without_changing_scheduled_capture(client):
+    base = datetime.now(UTC) - timedelta(minutes=20)
+    started = base.isoformat(timespec="milliseconds")
+    event_at = (base + timedelta(seconds=47)).isoformat(timespec="milliseconds")
+    next_periodic = (base + timedelta(minutes=10)).isoformat(timespec="milliseconds")
+    assert client.post("/api/v1/slave/status", headers=SLAVE, json={
+        "reported_at": started, "windows": [{"window_id": "hwnd:1", "character_id": "123",
+            "status": "not_full", "monitoring": True, "updated_at": started}],
+    }).status_code == 202
+    database = client.app.state.database
+    database.save_live_snapshot("slave", "hwnd:1", "screenshots/periodic-1.jpg", started, None, keep_history=True)
+    report(client, "trade-shot", panel_type="trade", occurred_at=event_at)
+    assert upload(client, "trade-shot").status_code == 200
+    role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
+    assert role["screenshot_at"] == event_at
+    view = client.get("/api/v1/master/live-screenshots/slave/view?window_id=hwnd:1", headers=MASTER)
+    assert "/screenshots/1/" in view.json()["url"]
+    history = client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]
+    assert [row["captured_at"] for row in history] == [event_at, started]
+    assert history[0]["event_type"] == "panel_opened:trade"
+    assert client.get(f"/api/v1/master/live-screenshots/history/{history[0]['id']}/view", headers=MASTER).status_code == 200
+
+    database.save_live_snapshot("slave", "hwnd:1", "screenshots/periodic-2.jpg", next_periodic, None, keep_history=True)
+    report(client, "late-shot", panel_type="trade",
+           occurred_at=(base + timedelta(seconds=100)).isoformat(timespec="milliseconds"))
+    assert upload(client, "late-shot").status_code == 200
+    role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
+    assert role["screenshot_at"] == next_periodic
+    view = client.get("/api/v1/master/live-screenshots/slave/view?window_id=hwnd:1", headers=MASTER)
+    assert "periodic-2.jpg" in view.json()["url"]
+    history = client.get("/api/v1/master/live-screenshots/history?character_id=123&limit=2", headers=MASTER).json()
+    assert history["has_more"] is True
+    assert history["items"][0]["captured_at"] == next_periodic
+    older = client.get(f"/api/v1/master/live-screenshots/history?character_id=123&before={history['items'][-1]['id']}", headers=MASTER).json()
+    assert [row["captured_at"] for row in older["items"]] == [event_at, started]
+
+
+def test_existing_event_evidence_is_backfilled_on_startup(client):
+    report(client, "older-trade", panel_type="trade",
+           occurred_at=(datetime.now(UTC) - timedelta(hours=1)).isoformat())
+    assert upload(client, "older-trade").status_code == 200
+    database = client.app.state.database
+    with database._connect() as connection:
+        connection.execute("DELETE FROM live_snapshot_history")
+        connection.execute("DELETE FROM live_snapshots")
+    database.initialize()
+    history = client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]
+    assert len(history) == 1 and history[0]["event_type"] == "panel_opened:trade"
+    assert client.get(f"/api/v1/master/live-screenshots/history/{history[0]['id']}/view", headers=MASTER).status_code == 200
+    database.initialize()
+    assert len(client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]) == 1
+
+
 def test_authentication_account_and_device_isolation(client):
     client.post("/api/v1/auth/register", json={"username": "first_owner", "password": "password123"})
     report(client)

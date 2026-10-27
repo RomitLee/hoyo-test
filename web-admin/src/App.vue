@@ -6,7 +6,7 @@ import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from '
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
-type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; device: Device }
+type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; device: Device }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
 type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; configured?: boolean; masked_key?: string }
@@ -81,7 +81,9 @@ async function refreshThumbnails() {
     .map(async item => {
       const key = snapshotKey(item)
       try {
-        const shot = await snapshotUrl(item.screenshot_device_id!, item.screenshot_window_id!)
+        const shot = item.screenshot_id
+          ? await api<{ url: string; captured_at: string }>(`/api/v1/master/live-screenshots/history/${item.screenshot_id}/view`)
+          : await snapshotUrl(item.screenshot_device_id!, item.screenshot_window_id!)
         if (new URL(shot.url).protocol !== 'https:') return
         thumbnails[key] = shot.url
         thumbnailDates[key] = item.screenshot_at || ''

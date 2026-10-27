@@ -76,7 +76,8 @@ class RelayDatabase:
                     role_name TEXT,
                     object_key TEXT NOT NULL UNIQUE,
                     captured_at TEXT NOT NULL,
-                    received_at TEXT NOT NULL
+                    received_at TEXT NOT NULL,
+                    event_type TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_live_history_character
                     ON live_snapshot_history(account_id,character_id,id DESC);
@@ -185,6 +186,7 @@ class RelayDatabase:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_logs_panel ON monitor_logs(account_id,panel_type,id DESC)")
             for name, kind in (("cash", "INTEGER"), ("bank_money", "INTEGER"), ("money_confirmed_at", "TEXT"), ("money_readable", "INTEGER NOT NULL DEFAULT 0")):
                 self._ensure_column(connection, "device_window_status", name, kind)
+            self._ensure_column(connection, "live_snapshot_history", "event_type", "TEXT")
             for name in ("last_device_id", "last_window_id", "last_seen_at"):
                 self._ensure_column(connection, "game_role_accounts", name, "TEXT")
             now = utc_now()
@@ -218,6 +220,36 @@ class RelayDatabase:
                 last_seen_at=(SELECT MAX(s.received_at) FROM device_window_status s JOIN devices d ON d.device_id=s.device_id
                     WHERE s.character_id=game_role_accounts.character_id AND d.account_id=game_role_accounts.account_id)
                 WHERE last_seen_at IS NULL""")
+            self._backfill_event_snapshots(connection)
+
+    @classmethod
+    def _backfill_event_snapshots(cls, connection: sqlite3.Connection) -> None:
+        """Make existing unexpired event evidence visible in role screenshot history."""
+        now = datetime.now(UTC)
+        rows = connection.execute("""SELECT s.object_key,s.expires_at,l.id,l.account_id,l.device_id,
+            l.window_id,l.character_id,l.server_name,l.role_name,l.event_type,l.panel_type,l.occurred_at,l.received_at
+            FROM monitor_screenshots s JOIN monitor_logs l ON l.id=s.log_id
+            WHERE s.ready=1 AND l.character_id IS NOT NULL AND l.character_id<>''
+            AND NOT EXISTS (SELECT 1 FROM live_snapshot_history h WHERE h.object_key=s.object_key)""").fetchall()
+        for row in rows:
+            try:
+                captured = datetime.fromisoformat(row["occurred_at"])
+                captured = captured.replace(tzinfo=UTC) if captured.tzinfo is None else captured.astimezone(UTC)
+                if captured < now - timedelta(days=30) or datetime.fromisoformat(row["expires_at"]) <= now:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            stamp = captured.isoformat(timespec="milliseconds")
+            window_id = row["window_id"] or f"event:{row['id']}"
+            cls._remember_game_role(connection, row["account_id"], row["device_id"], dict(row), row["received_at"])
+            connection.execute("""INSERT OR IGNORE INTO live_snapshot_history
+                (account_id,device_id,window_id,character_id,server_name,role_name,
+                 object_key,captured_at,received_at,event_type) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (row["account_id"], row["device_id"], window_id, row["character_id"],
+                 row["server_name"], row["role_name"], row["object_key"], stamp,
+                 row["received_at"], f"{row['event_type']}:{row['panel_type'] or ''}"))
+            cls._upsert_latest_snapshot(connection, row["device_id"], window_id,
+                                        row["object_key"], stamp, None, row["received_at"])
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -772,8 +804,30 @@ class RelayDatabase:
     def finish_screenshot(self, log_id: int, token: str, *, success: bool):
         with self._connect() as connection:
             if success:
+                screenshot = connection.execute("""SELECT s.object_key,l.account_id,l.device_id,l.window_id,
+                    l.character_id,l.server_name,l.role_name,l.event_type,l.panel_type,l.occurred_at
+                    FROM monitor_screenshots s JOIN monitor_logs l ON l.id=s.log_id
+                    WHERE s.log_id=? AND s.upload_token=?""", (log_id, token)).fetchone()
+                if screenshot is None:
+                    raise LookupError("截图上传记录不存在")
                 connection.execute("UPDATE monitor_screenshots SET ready=1 WHERE log_id=? AND upload_token=?",
                                    (log_id, token))
+                if screenshot["character_id"]:
+                    # Event evidence joins the same chronological role history as scheduled captures.
+                    captured_at = datetime.fromisoformat(screenshot["occurred_at"])
+                    if captured_at.tzinfo is None:
+                        captured_at = captured_at.replace(tzinfo=UTC)
+                    stamp = captured_at.astimezone(UTC).isoformat(timespec="milliseconds")
+                    window_id = screenshot["window_id"] or f"event:{log_id}"
+                    connection.execute("""INSERT OR IGNORE INTO live_snapshot_history
+                        (account_id,device_id,window_id,character_id,server_name,role_name,
+                         object_key,captured_at,received_at,event_type) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (screenshot["account_id"], screenshot["device_id"], window_id,
+                         screenshot["character_id"], screenshot["server_name"], screenshot["role_name"],
+                         screenshot["object_key"], stamp, utc_now(),
+                         f"{screenshot['event_type']}:{screenshot['panel_type'] or ''}"))
+                    self._upsert_latest_snapshot(connection, screenshot["device_id"], window_id,
+                                                 screenshot["object_key"], stamp, None)
             else:
                 connection.execute("DELETE FROM monitor_screenshots WHERE log_id=? AND upload_token=? AND ready=0",
                                    (log_id, token))
@@ -941,8 +995,8 @@ class RelayDatabase:
                 a.last_device_id,a.last_window_id,a.last_seen_at
                 FROM game_roles r JOIN game_role_accounts a ON a.character_id=r.character_id
                 WHERE a.account_id=?""", (account_id,)).fetchall()
-            shots = connection.execute("""SELECT character_id,device_id,window_id,captured_at FROM (
-                SELECT character_id,device_id,window_id,captured_at,
+            shots = connection.execute("""SELECT id,character_id,device_id,window_id,captured_at,event_type FROM (
+                SELECT id,character_id,device_id,window_id,captured_at,event_type,
                     ROW_NUMBER() OVER (PARTITION BY character_id ORDER BY captured_at DESC,id DESC) AS rank
                 FROM live_snapshot_history WHERE account_id=?
             ) WHERE rank=1""", (account_id,)).fetchall()
@@ -975,6 +1029,8 @@ class RelayDatabase:
                 "role_online": bool(window.get("role_online")),
                 "first_seen_at": role["first_seen_at"], "received_at": window.get("received_at") or role["last_seen_at"],
                 "screenshot_at": shot["captured_at"] if shot else window.get("screenshot_at"),
+                "screenshot_id": shot["id"] if shot else None,
+                "screenshot_event_type": shot["event_type"] if shot else None,
                 "screenshot_device_id": shot["device_id"] if shot else device.get("device_id"),
                 "screenshot_window_id": shot["window_id"] if shot else window.get("window_id")})
         result.sort(key=lambda role: (role["role_online"], role.get("received_at") or role["first_seen_at"]), reverse=True)
@@ -1076,15 +1132,22 @@ class RelayDatabase:
                         VALUES (?,?,?,?,?,?,?,?,?)""",
                         (window["account_id"], device_id, window_id, window["character_id"], window["server_name"],
                          window["role_name"], key, captured_at, now))
-            connection.execute("""INSERT INTO live_snapshots(device_id,window_id,object_key,captured_at,received_at,request_id)
-                VALUES (?,?,?,?,?,?) ON CONFLICT(device_id,window_id) DO UPDATE SET
-                object_key=excluded.object_key,captured_at=excluded.captured_at,
-                received_at=excluded.received_at,request_id=excluded.request_id""",
-                (device_id, window_id, key, captured_at, now, request_id))
+            self._upsert_latest_snapshot(connection, device_id, window_id, key, captured_at, request_id, now)
             if request_id:
                 connection.execute("""UPDATE live_snapshot_requests SET completed_at=?
                     WHERE request_id=? AND device_id=? AND window_id=? AND completed_at IS NULL""",
                     (now, request_id, device_id, window_id))
+
+    @staticmethod
+    def _upsert_latest_snapshot(connection: sqlite3.Connection, device_id: str, window_id: str,
+                                key: str, captured_at: str, request_id: str | None,
+                                received_at: str | None = None) -> None:
+        connection.execute("""INSERT INTO live_snapshots(device_id,window_id,object_key,captured_at,received_at,request_id)
+            VALUES (?,?,?,?,?,?) ON CONFLICT(device_id,window_id) DO UPDATE SET
+            object_key=excluded.object_key,captured_at=excluded.captured_at,
+            received_at=excluded.received_at,request_id=excluded.request_id
+            WHERE julianday(excluded.captured_at)>=julianday(live_snapshots.captured_at)""",
+            (device_id, window_id, key, captured_at, received_at or utc_now(), request_id))
 
     def live_snapshot(self, account_id: int, device_id: str, window_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1098,10 +1161,11 @@ class RelayDatabase:
                               limit: int) -> list[dict[str, Any]]:
         cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         with self._connect() as connection:
-            rows = connection.execute("""SELECT id,device_id,window_id,server_name,role_name,captured_at
+            rows = connection.execute("""SELECT id,device_id,window_id,server_name,role_name,captured_at,event_type
                 FROM live_snapshot_history WHERE account_id=? AND character_id=? AND captured_at>=?
-                AND (? IS NULL OR id<?) ORDER BY id DESC LIMIT ?""",
-                (account_id, character_id, cutoff, before, before, limit)).fetchall()
+                AND (? IS NULL OR (captured_at,id)<(SELECT captured_at,id FROM live_snapshot_history WHERE id=? AND account_id=?))
+                ORDER BY captured_at DESC,id DESC LIMIT ?""",
+                (account_id, character_id, cutoff, before, before, account_id, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def historical_snapshot(self, account_id: int, snapshot_id: int) -> dict[str, Any] | None:
