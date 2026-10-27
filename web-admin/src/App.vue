@@ -58,6 +58,9 @@ const historyBusy = ref(false)
 const snapshotInterval = ref(5)
 const thumbnails = reactive<Record<string, string>>({})
 const thumbnailDates = reactive<Record<string, string>>({})
+const thumbnailExpiresAt = reactive<Record<string, number>>({})
+const thumbnailRetryAt = reactive<Record<string, number>>({})
+const thumbnailLoading = new Set<string>()
 const pendingSnapshots = reactive<Record<string, boolean>>({})
 const webSound = ref(false)
 const ringing = ref(false)
@@ -73,22 +76,36 @@ const windows = computed<RoleStatus[]>(() => roles.value.map(role => ({ ...role,
 const snapshotKey = (item: RoleStatus) => item.character_id || `${item.device_id}:${item.window_id}`
 
 async function snapshotUrl(deviceId: string, windowId: string) {
-  return api<{ url: string; captured_at: string }>(`/api/v1/master/live-screenshots/${encodeURIComponent(deviceId)}/view?window_id=${encodeURIComponent(windowId)}`)
+  return api<{ url: string; captured_at: string; expires_in: number }>(`/api/v1/master/live-screenshots/${encodeURIComponent(deviceId)}/view?window_id=${encodeURIComponent(windowId)}`)
 }
 
 async function refreshThumbnails() {
-  await Promise.all(windows.value.filter(item => item.screenshot_at && item.screenshot_device_id && item.screenshot_window_id && thumbnailDates[snapshotKey(item)] !== item.screenshot_at)
+  const now = Date.now()
+  await Promise.all(windows.value.filter(item => item.screenshot_at && item.screenshot_device_id && item.screenshot_window_id &&
+    !thumbnailLoading.has(snapshotKey(item)) && now >= (thumbnailRetryAt[snapshotKey(item)] || 0) &&
+    (thumbnailDates[snapshotKey(item)] !== item.screenshot_at || now >= (thumbnailExpiresAt[snapshotKey(item)] || 0)))
     .map(async item => {
       const key = snapshotKey(item)
+      thumbnailLoading.add(key)
       try {
         const shot = item.screenshot_id
-          ? await api<{ url: string; captured_at: string }>(`/api/v1/master/live-screenshots/history/${item.screenshot_id}/view`)
+          ? await api<{ url: string; captured_at: string; expires_in: number }>(`/api/v1/master/live-screenshots/history/${item.screenshot_id}/view`)
           : await snapshotUrl(item.screenshot_device_id!, item.screenshot_window_id!)
         if (new URL(shot.url).protocol !== 'https:') return
         thumbnails[key] = shot.url
         thumbnailDates[key] = item.screenshot_at || ''
-      } catch { /* A thumbnail failure must not hide the status dashboard. */ }
+        thumbnailExpiresAt[key] = Date.now() + Math.max(30, (shot.expires_in || 300) - 60) * 1000
+      } catch { thumbnailRetryAt[key] = Date.now() + 15_000 }
+      finally { thumbnailLoading.delete(key) }
     }))
+}
+
+function thumbnailError(item: RoleStatus) {
+  const key = snapshotKey(item)
+  delete thumbnails[key]
+  delete thumbnailDates[key]
+  delete thumbnailExpiresAt[key]
+  thumbnailRetryAt[key] = Date.now() + 15_000
 }
 
 async function viewSnapshot(deviceId: string, windowId: string) {
@@ -295,6 +312,7 @@ function start() {
 function choose(next: Page) {
   page.value = next
   notice.value = ''
+  if (next === 'monitor') void refreshThumbnails()
   if (next === 'logs') void fetchLogs(0)
   if (next === 'settings') void loadSettings()
 }
@@ -451,7 +469,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer
                   <span class="snapshot-occlusion">遮挡 {{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }}</span>
                   <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item)] || !item.role_online || !item.monitoring || item.minimized" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item)] ? '获取中…' : '获取实时截图' }}</button>
                 </div>
-                <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
+                <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer" @error="thumbnailError(item)"><span v-else>截图加载中…</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
                 <div v-if="item.stamina_current != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
