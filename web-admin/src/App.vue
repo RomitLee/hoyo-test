@@ -449,7 +449,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer
                   <span class="snapshot-occlusion">遮挡 {{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }}</span>
                   <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item)] || !item.role_online || !item.monitoring || item.minimized" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item)] ? '获取中…' : '获取实时截图' }}</button>
                 </div>
-                <button class="snapshot-image" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
+                <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer"><span v-else>等待首次截图</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
               </article>
