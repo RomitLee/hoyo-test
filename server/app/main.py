@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.17.0"
+VERSION = "2.18.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -232,6 +232,9 @@ class BarkSettingsIn(BaseModel):
     device_key: str | None = Field(default=None, min_length=8, max_length=256, pattern=r"^[A-Za-z0-9_-]+$")
     call_enabled: bool = True
     repeat_minutes: Literal[0, 5, 10, 30, 60] = 10
+    local_alert_enabled: bool | None = None
+    web_sound_enabled: bool | None = None
+    capacity_threshold: int | None = Field(default=None, ge=0, le=20, strict=True)
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -508,6 +511,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings_data = database.update_bark_settings(
                 account_id, device_key=payload.device_key, enabled=payload.enabled,
                 call_enabled=payload.call_enabled, repeat_minutes=payload.repeat_minutes,
+                local_alert_enabled=payload.local_alert_enabled,
+                web_sound_enabled=payload.web_sound_enabled,
+                capacity_threshold=payload.capacity_threshold,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -601,7 +607,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def rename_self(
         payload: DeviceNameIn,
         identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         if not database.update_device(identity.account_id, identity.device_id, payload.model_dump()):
             raise HTTPException(status_code=404, detail="从机不存在")
         return database.device_profile(identity.account_id, identity.device_id)
@@ -610,7 +616,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def heartbeat(
         payload: HeartbeatIn, request: Request,
         identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         device_id = identity.device_id
         seen_at = database.upsert_device(
             device_id, hostname=payload.hostname, app_version=payload.app_version,

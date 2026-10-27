@@ -318,6 +318,38 @@ def test_bark_settings_test_and_new_event_push(tmp_path: Path, monkeypatch) -> N
         assert "清风知夏" in str(sent[1]["body"])
 
 
+def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_updates(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        saved = client.put(
+            "/api/v1/master/notifications/bark", headers=master_headers(),
+            json={"enabled": False, "local_alert_enabled": True,
+                  "web_sound_enabled": True, "capacity_threshold": 3},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["local_alert_enabled"] is True
+        assert saved.json()["web_sound_enabled"] is True
+        assert saved.json()["capacity_threshold"] == 3
+
+        heartbeat = client.post(
+            "/api/v1/slave/heartbeat", headers=device_headers(),
+            json={"hostname": "machine", "app_version": "V2.9.0"},
+        )
+        assert heartbeat.status_code == 200
+        assert heartbeat.json()["alert_settings"] == {
+            "local_alert_enabled": True, "capacity_threshold": 3,
+        }
+        assert "web_sound_enabled" not in heartbeat.json()["alert_settings"]
+
+        legacy = client.put(
+            "/api/v1/master/notifications/bark", headers=master_headers(),
+            json={"enabled": False, "repeat_minutes": 10},
+        )
+        assert legacy.status_code == 200
+        assert legacy.json()["local_alert_enabled"] is True
+        assert legacy.json()["web_sound_enabled"] is True
+        assert legacy.json()["capacity_threshold"] == 3
+
+
 def test_window_status_snapshot_is_visible_to_master(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         heartbeat = client.post(
@@ -404,6 +436,7 @@ def test_mobile_status_page_and_static_assets_are_available(tmp_path: Path) -> N
         assert "api/v1/master/monitor-log-settings" in script.text
         assert "api/v1/master/status" in script.text
         assert "api/v1/auth/login" in script.text
+        assert "告警方式" in script.text
 
         page = client.get("/legacy")
         assert page.status_code == 200

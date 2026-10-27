@@ -19,7 +19,7 @@ from hoyo_analyzer.inventory_app import (
 )
 from hoyo_analyzer.inventory_fullness import InventoryAnalysis, InventoryStatus, SlotResult, SlotState
 from hoyo_analyzer.multi_inventory_app import InventoryMonitorWindow
-from hoyo_analyzer.slave_settings import CAPACITY_ALERT_LOCAL, SlaveSettings
+from hoyo_analyzer.slave_settings import SlaveSettings
 from hoyo_analyzer.wgc import OccludingWindow, WindowInfo, WindowOcclusionStatus
 
 
@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.8.0"
+        assert __version__ == "V2.9.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -465,7 +465,6 @@ def test_enabled_capacity_alert_reports_full_inventory_to_host(monkeypatch) -> N
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
-    window.slave_settings.inventory_capacity_alert_enabled = True
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None)
     sent: list[tuple[str, dict[str, object]]] = []
@@ -484,7 +483,7 @@ def test_enabled_capacity_alert_reports_full_inventory_to_host(monkeypatch) -> N
         app.processEvents()
 
 
-def test_disabled_capacity_alert_does_not_report_full_inventory(monkeypatch) -> None:
+def test_capacity_alert_is_reported_even_when_local_sound_is_disabled(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
@@ -496,19 +495,37 @@ def test_disabled_capacity_alert_does_not_report_full_inventory(monkeypatch) -> 
         window._update_capacity_alert(session, {"status": "full", "empty_count": 0}, 0.0)
         window._update_capacity_alert(session, {"status": "full", "empty_count": 0}, 10.0)
 
-        assert sent == []
-        assert session.capacity_candidate_since is None
+        assert sent == ["sent"]
+        assert session.capacity_alert_active
     finally:
         window.close()
         app.processEvents()
 
 
-def test_local_capacity_level_only_plays_local_alarm_after_five_seconds(monkeypatch) -> None:
+def test_slave_applies_account_alert_settings_without_using_local_alert_mode(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
-    window.slave_settings.inventory_capacity_alert_level = CAPACITY_ALERT_LOCAL
-    window.slave_settings.inventory_capacity_threshold = 3
+    try:
+        window.slave_settings.inventory_capacity_alert_enabled = False
+        window._apply_alert_settings({"local_alert_enabled": True, "capacity_threshold": 4})
+        assert window._local_alert_enabled is True
+        assert window._capacity_threshold == 4
+        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 99})
+        assert window._local_alert_enabled is True and window._capacity_threshold == 4
+        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 0})
+        assert window._local_alert_enabled is False and window._capacity_threshold == 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_account_local_switch_plays_alarm_after_five_seconds(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window._local_alert_enabled = True
+    window._capacity_threshold = 3
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None)
     sent: list[tuple[str, dict[str, object]]] = []
@@ -527,7 +544,7 @@ def test_local_capacity_level_only_plays_local_alarm_after_five_seconds(monkeypa
             15.0,
         )
 
-        assert sent == []
+        assert len(sent) == 1 and sent[0][0] == "inventory_capacity"
         assert len(local) == 1
         assert local[0][1]["with_sound"] is True
     finally:

@@ -164,6 +164,9 @@ class RelayDatabase:
                     account_id INTEGER PRIMARY KEY, device_key TEXT NOT NULL DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 0, call_enabled INTEGER NOT NULL DEFAULT 1,
                     repeat_minutes INTEGER NOT NULL DEFAULT 10, notify_after TEXT,
+                    local_alert_enabled INTEGER NOT NULL DEFAULT 0,
+                    web_sound_enabled INTEGER NOT NULL DEFAULT 0,
+                    capacity_threshold INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
                 );
@@ -185,6 +188,9 @@ class RelayDatabase:
             self._ensure_column(connection, "events", "bark_last_sent_at", "TEXT")
             self._ensure_column(connection, "events", "bark_send_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "notify_after", "TEXT")
+            self._ensure_column(connection, "bark_settings", "local_alert_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "bark_settings", "web_sound_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "bark_settings", "capacity_threshold", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
             self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
             self._ensure_column(connection, "monitor_logs", "message", "TEXT")
@@ -916,22 +922,27 @@ class RelayDatabase:
     def get_bark_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,updated_at FROM bark_settings WHERE account_id=?",
+                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,updated_at FROM bark_settings WHERE account_id=?",
                 (account_id,),
             ).fetchone()
         if row is None:
             return {
                 "device_key": "", "enabled": False, "call_enabled": True,
                 "repeat_minutes": 10, "notify_after": None, "updated_at": None,
+                "local_alert_enabled": False, "web_sound_enabled": False, "capacity_threshold": 0,
             }
         item = dict(row)
         item["enabled"] = bool(item["enabled"])
         item["call_enabled"] = bool(item["call_enabled"])
+        item["local_alert_enabled"] = bool(item["local_alert_enabled"])
+        item["web_sound_enabled"] = bool(item["web_sound_enabled"])
         return item
 
     def update_bark_settings(
         self, account_id: int, *, device_key: str | None, enabled: bool,
         call_enabled: bool, repeat_minutes: int,
+        local_alert_enabled: bool | None = None, web_sound_enabled: bool | None = None,
+        capacity_threshold: int | None = None,
     ) -> dict[str, Any]:
         current = self.get_bark_settings(account_id)
         stored_key = current["device_key"] if device_key is None else device_key
@@ -941,14 +952,21 @@ class RelayDatabase:
         notify_after = current["notify_after"]
         if enabled and not current["enabled"]:
             notify_after = now
+        local_alert_enabled = current["local_alert_enabled"] if local_alert_enabled is None else local_alert_enabled
+        web_sound_enabled = current["web_sound_enabled"] if web_sound_enabled is None else web_sound_enabled
+        capacity_threshold = current["capacity_threshold"] if capacity_threshold is None else capacity_threshold
         with self._connect() as connection:
             connection.execute(
-                """INSERT INTO bark_settings(account_id,device_key,enabled,call_enabled,repeat_minutes,notify_after,updated_at)
-                   VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                """INSERT INTO bark_settings(account_id,device_key,enabled,call_enabled,repeat_minutes,notify_after,
+                   local_alert_enabled,web_sound_enabled,capacity_threshold,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
                    device_key=excluded.device_key,enabled=excluded.enabled,
                    call_enabled=excluded.call_enabled,repeat_minutes=excluded.repeat_minutes,
-                   notify_after=excluded.notify_after,updated_at=excluded.updated_at""",
-                (account_id, stored_key, int(enabled), int(call_enabled), repeat_minutes, notify_after, now),
+                   notify_after=excluded.notify_after,local_alert_enabled=excluded.local_alert_enabled,
+                   web_sound_enabled=excluded.web_sound_enabled,capacity_threshold=excluded.capacity_threshold,
+                   updated_at=excluded.updated_at""",
+                (account_id, stored_key, int(enabled), int(call_enabled), repeat_minutes, notify_after,
+                 int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, now),
             )
         return self.get_bark_settings(account_id)
 
@@ -992,13 +1010,22 @@ class RelayDatabase:
                 (utc_now(), event_id),
             )
 
-    def device_profile(self, account_id: int, device_id: str) -> dict[str, str]:
+    def device_profile(self, account_id: int, device_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT display_name,hostname FROM devices WHERE account_id=? AND device_id=? AND removed_at IS NULL",
                 (account_id, device_id),
             ).fetchone()
-        return {"display_name": str(row["display_name"] or row["hostname"] or device_id)} if row else {}
+        if row is None:
+            return {}
+        alerts = self.get_bark_settings(account_id)
+        return {
+            "display_name": str(row["display_name"] or row["hostname"] or device_id),
+            "alert_settings": {
+                "local_alert_enabled": alerts["local_alert_enabled"],
+                "capacity_threshold": alerts["capacity_threshold"],
+            },
+        }
 
     def list_devices(self, account_id: int) -> list[dict[str, Any]]:
         with self._connect() as connection:

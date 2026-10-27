@@ -9,7 +9,7 @@ type Device = { device_id: string; display_name?: string; hostname?: string; not
 type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; device: Device }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
-type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; configured?: boolean; masked_key?: string }
+type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; configured?: boolean; masked_key?: string }
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
 
 const pages: { key: Page; label: string; hint: string }[] = [
@@ -44,7 +44,7 @@ const logCursor = ref(0)
 const logNext = ref(0)
 const filter = reactive({ event_type: '', panel_type: '' })
 const policy = reactive<Policy>({ occlusion_enabled: true, occlusion_percent: 60, occlusion_seconds: 5 })
-const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10 })
+const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0 })
 const barkKey = ref('')
 const preview = ref('')
 const previewError = ref('')
@@ -63,9 +63,11 @@ const thumbnailRetryAt = reactive<Record<string, number>>({})
 const thumbnailLoading = new Set<string>()
 const pendingSnapshots = reactive<Record<string, boolean>>({})
 const webSound = ref(false)
+const soundReady = ref(false)
 const ringing = ref(false)
 let knownAlerts: Set<number> | undefined
 let audio: AudioContext | undefined
+let audioUnlockAttempted = false
 let soundTimer: number | undefined
 let timer: number | undefined
 let session = 0
@@ -234,11 +236,18 @@ function stopSound() {
   soundTimer = undefined
 }
 
-async function toggleWebSound() {
-  webSound.value = !webSound.value
-  if (!webSound.value) { stopSound(); return }
-  try { audio ||= new AudioContext(); await audio.resume(); beep(); notice.value = '电脑提示音已开启；请保持网页打开' }
-  catch { webSound.value = false; error.value = '浏览器未允许播放声音' }
+async function unlockWebSound(playSample = true) {
+  audioUnlockAttempted = true
+  try {
+    audio ||= new AudioContext()
+    await audio.resume()
+    soundReady.value = audio.state === 'running'
+    if (soundReady.value && playSample) { beep(); notice.value = '当前浏览器已允许播放提示音' }
+  } catch { soundReady.value = false; error.value = '浏览器未允许播放声音，请点击页面后重试' }
+}
+
+function onAudioGesture() {
+  if (webSound.value && !soundReady.value && !audioUnlockAttempted) void unlockWebSound(false)
 }
 
 async function login() {
@@ -260,19 +269,23 @@ async function refresh() {
   loading.value = true
   const current = session
   try {
-    const [status, events, pendingEvents] = await Promise.all([
+    const [status, events, pendingEvents, accountAlerts] = await Promise.all([
       api<{ devices: Device[]; roles: Omit<RoleStatus, 'device'>[] }>('/api/v1/master/status'),
       api<{ events: Alert[] }>('/api/v1/master/events?state=all&limit=200&latest=true'),
       api<{ events: Alert[] }>('/api/v1/master/events?state=pending&limit=500&latest=true'),
+      api<Bark>('/api/v1/master/notifications/bark'),
     ])
     if (current !== session) return
     devices.value = status.devices || []
     roles.value = status.roles || []
+    webSound.value = accountAlerts.web_sound_enabled
+    if (!webSound.value) stopSound()
+    if (page.value !== 'settings') Object.assign(bark, accountAlerts)
     if (page.value === 'monitor') void refreshThumbnails()
     alerts.value = Array.from(new Map([...(events.events || []), ...(pendingEvents.events || [])]
       .map(item => [item.server_event_id, item])).values()).sort((a, b) => b.server_event_id - a.server_event_id)
     const nextAlerts = new Set(alerts.value.filter(item => !item.acked_at).map(item => item.server_event_id))
-    if (knownAlerts && webSound.value && !ringing.value && [...nextAlerts].some(id => !knownAlerts?.has(id))) {
+    if (knownAlerts && webSound.value && soundReady.value && !ringing.value && [...nextAlerts].some(id => !knownAlerts?.has(id))) {
       ringing.value = true
       if (audio?.state === 'running') beep()
       soundTimer = window.setInterval(beep, 1800)
@@ -296,6 +309,9 @@ async function loadSettings() {
     ])
     Object.assign(policy, storedPolicy)
     Object.assign(bark, storedBark)
+    webSound.value = storedBark.web_sound_enabled
+    if (!webSound.value) stopSound()
+    else if (audio?.state === 'running') soundReady.value = true
     snapshotInterval.value = liveSettings.interval_minutes
     accountName.value = account.account?.display_name || account.account?.username || username.value
   } catch (cause) { fail(cause) }
@@ -401,15 +417,20 @@ async function saveSnapshotInterval() {
 async function saveBark() {
   busy.value = true
   try {
+    if (bark.web_sound_enabled && !soundReady.value) await unlockWebSound()
     let key = barkKey.value.trim()
     if (/^https?:\/\//i.test(key)) {
       const link = new URL(key)
       if (link.hostname !== 'api.day.app') throw new Error('请使用 Bark 官方测试地址')
       key = link.pathname.split('/').filter(Boolean)[0] || ''
     }
-    const data = { enabled: bark.enabled, call_enabled: bark.call_enabled, repeat_minutes: bark.repeat_minutes, ...(key ? { device_key: key } : {}) }
+    const data = { enabled: bark.enabled, call_enabled: bark.call_enabled, repeat_minutes: bark.repeat_minutes,
+      local_alert_enabled: bark.local_alert_enabled, web_sound_enabled: bark.web_sound_enabled,
+      capacity_threshold: bark.capacity_threshold, ...(key ? { device_key: key } : {}) }
     Object.assign(bark, await api<Bark>('/api/v1/master/notifications/bark', json('PUT', data)))
-    barkKey.value = ''; notice.value = 'Bark 设置已保存'
+    webSound.value = bark.web_sound_enabled
+    if (!webSound.value) stopSound()
+    barkKey.value = ''; notice.value = '账号告警设置已保存，从机将在约 30 秒内同步'
   } catch (cause) { fail(cause) }
   finally { busy.value = false }
 }
@@ -420,8 +441,8 @@ async function testBark() {
 }
 
 watch([() => filter.event_type, () => filter.panel_type], () => { if (page.value === 'logs') void fetchLogs(0) })
-onMounted(() => { window.addEventListener('keydown', previewKey); if (token.value) start() })
-onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer) window.clearInterval(timer); stopSound(); void audio?.close() })
+onMounted(() => { window.addEventListener('keydown', previewKey); window.addEventListener('pointerdown', onAudioGesture); if (token.value) start() })
+onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.removeEventListener('pointerdown', onAudioGesture); if (timer) window.clearInterval(timer); stopSound(); void audio?.close() })
 </script>
 
 <template>
@@ -487,7 +508,18 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); if (timer
 
         <template v-else-if="page === 'logs'"><Panel title="监控日志" :meta="`${logs.length} 条`"><template #tools><div class="filters"><select v-model="filter.event_type" aria-label="日志类型"><option v-for="[value, label] in eventTypes" :key="value" :value="value">{{ label }}</option></select><select v-model="filter.panel_type" aria-label="面板类型"><option value="">全部面板</option><option v-for="(name, key) in panelLabels" :key="key" :value="key">{{ name }}</option></select><button class="secondary" @click="fetchLogs(0)">最新</button></div></template><div v-if="!logs.length" class="empty">暂无符合条件的记录</div><div v-else class="table-wrap"><table><thead><tr><th>发生时间</th><th>从机 / 角色</th><th>类型与内容</th><th>遮挡 / 最小化</th><th>截图</th></tr></thead><tbody><tr v-for="item in logs" :key="item.id"><td>{{ time(item.occurred_at) }}</td><td>{{ item.display_name || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ logLabel(item) }}<small>{{ reasons[item.reason || ''] || '状态上报' }}</small></td><td>{{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }} / {{ item.minimized == null ? '—' : item.minimized ? '是' : '否' }}</td><td><button v-if="item.screenshot_ready && Date.parse(item.screenshot_expires_at || '') > Date.now()" class="secondary small" @click="screenshot(item)">查看截图</button><span v-else>{{ item.screenshot_ready ? '已过期' : '—' }}</span></td></tr></tbody></table></div><div class="pagination"><button class="secondary" :disabled="logCursor === 0" @click="fetchLogs(0)">返回最新</button><button class="secondary" :disabled="!logHasMore" @click="fetchLogs(logNext)">更早记录</button></div></Panel></template>
 
-        <template v-else><div class="settings-grid"><Panel title="窗口截图" meta="账号级设置"><form class="form-grid" @submit.prevent="saveSnapshotInterval"><label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label><p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p><button class="primary" :disabled="busy" type="submit">保存截图周期</button></form></Panel><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel><Panel title="Bark 手机通知" meta="服务端推送"><form class="form-grid" @submit.prevent="saveBark"><label class="check"><input v-model="bark.enabled" type="checkbox"> 启用手机告警</label><label class="check"><input v-model="bark.call_enabled" type="checkbox"> 连续呼叫</label><label>重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label><label>设备密钥或 Bark 测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label><div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存通知设置</button><button class="secondary" type="button" @click="testBark">发送测试</button></div></form></Panel><Panel title="电脑网页提示音" meta="仅网页打开时可用"><div class="form-grid"><p class="hint">启用后，新告警到达时网页会尝试循环播放提示音。浏览器休眠或关闭后请依靠 Bark 手机推送。</p><button class="secondary" @click="toggleWebSound">{{ webSound ? '关闭电脑提示音' : '开启电脑提示音' }}</button></div></Panel></div></template>
+        <template v-else><div class="settings-grid"><Panel title="窗口截图" meta="账号级设置"><form class="form-grid" @submit.prevent="saveSnapshotInterval"><label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label><p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p><button class="primary" :disabled="busy" type="submit">保存截图周期</button></form></Panel><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel>
+          <Panel title="告警方式" meta="账号级设置，所有从机共用"><form class="form-grid" @submit.prevent="saveBark">
+            <label class="check"><input v-model="bark.enabled" type="checkbox"> 手机是否推送</label>
+            <label class="check"><input v-model="bark.local_alert_enabled" type="checkbox"> 当前设备是否报警</label>
+            <label class="check"><input v-model="bark.web_sound_enabled" type="checkbox"> 电脑网页提示音</label>
+            <label>背包剩余空格提醒阈值<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required></label>
+            <p class="hint">达到阈值的告警始终记录在后台；上方三个开关只控制提醒送达方式。网页提示音需要保持网页打开，并允许当前浏览器播放声音。</p>
+            <label class="check"><input v-model="bark.call_enabled" type="checkbox"> 手机连续呼叫</label>
+            <label>手机重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label>
+            <label>Bark 设备密钥或测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label>
+            <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存告警设置</button><button class="secondary" type="button" @click="testBark">测试手机推送</button><button v-if="bark.web_sound_enabled && !soundReady" class="secondary" type="button" @click="unlockWebSound()">允许当前浏览器播放</button></div>
+          </form></Panel></div></template>
       </main>
       <footer>数据每 5 秒刷新 · 手机告警由服务端 Bark 推送</footer>
     </div>

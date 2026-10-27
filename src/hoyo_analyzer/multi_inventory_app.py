@@ -15,7 +15,6 @@ from PySide6.QtCore import Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -130,6 +129,8 @@ class InventoryMonitorWindow(QMainWindow):
         path = config_path or root / "configs" / "default.toml"
         self.config = load_config(path if path.exists() else None)
         self.slave_settings = load_slave_settings()
+        self._local_alert_enabled = False
+        self._capacity_threshold = 0
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
         self._sounding_alerts: set[QMessageBox] = set()
@@ -235,7 +236,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.minimize_all_button.clicked.connect(self._minimize_all_game_windows)
         heading_controls.addWidget(self.minimize_all_button, 0, 2)
         self.settings_button = QPushButton("设置")
-        self.settings_button.setToolTip("设置从机告警策略和云端连接")
+        self.settings_button.setToolTip("查看登录状态；告警方式请在后台统一设置")
         self.settings_button.clicked.connect(self._open_settings)
         heading_controls.addWidget(self.settings_button, 0, 3)
         self.logout_button = QPushButton("退出登录")
@@ -559,28 +560,7 @@ class InventoryMonitorWindow(QMainWindow):
     def _open_settings(self) -> None:
         if not self._authenticated:
             return
-        dialog = SlaveSettingsDialog(self.slave_settings, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        updated = dialog.settings()
-        try:
-            save_slave_settings(updated)
-        except OSError as exc:
-            QMessageBox.critical(self, "设置保存失败", f"无法保存从机设置：{exc}")
-            return
-        self.slave_settings = updated
-        for session in self.sessions.values():
-            session.capacity_alert_active = False
-            session.capacity_candidate_since = None
-            session.occlusion_alert_active = False
-            session.occlusion_candidate_since = None
-            session.minimized_alert_active = False
-            session.minimized_since = monotonic() if session.minimized else None
-        self._configure_relay()
-        self._refresh_host_status()
-        self.log.appendPlainText("从机设置已保存并生效。")
-        self.relay_client.connect_now()
-        self._poll_window_occlusion()
+        SlaveSettingsDialog(self.slave_settings, self).exec()
 
     def _refresh_host_status(self) -> None:
         online = hasattr(self, "relay_client") and self.relay_client.online
@@ -615,6 +595,7 @@ class InventoryMonitorWindow(QMainWindow):
 
     @Slot(object)
     def _on_device_profile(self, data: dict[str, Any]) -> None:
+        self._apply_alert_settings(data.get("alert_settings"))
         name = str(data.get("display_name") or "").strip()
         if name and name != self.slave_settings.display_name:
             self.slave_settings.display_name = name
@@ -623,6 +604,27 @@ class InventoryMonitorWindow(QMainWindow):
             except OSError as exc:
                 self.log.appendPlainText(f"名称已同步，但本地缓存保存失败：{exc}")
         self._refresh_host_status()
+
+    def _apply_alert_settings(self, raw: object) -> None:
+        if not isinstance(raw, dict):
+            return
+        local = raw.get("local_alert_enabled") is True
+        threshold = raw.get("capacity_threshold")
+        if not isinstance(threshold, int) or isinstance(threshold, bool) or not 0 <= threshold <= 20:
+            return
+        changed = (local, threshold) != (self._local_alert_enabled, self._capacity_threshold)
+        self._local_alert_enabled = local
+        self._capacity_threshold = threshold
+        if changed:
+            for session in self.sessions.values():
+                session.capacity_alert_active = False
+                session.capacity_candidate_since = None
+            if not local:
+                for alert in tuple(self.alerts):
+                    alert.close()
+                self._sounding_alerts.clear()
+                self._stop_alarm_sound()
+            self.log.appendPlainText(f"后台告警设置已同步：本机报警{'开启' if local else '关闭'}，空格阈值 {threshold}")
 
     @Slot(bool, str)
     def _on_profile_result(self, _success: bool, message: str) -> None:
@@ -671,6 +673,7 @@ class InventoryMonitorWindow(QMainWindow):
         if kind == "login":
             self.login_button.setEnabled(True)
         if success:
+            self._apply_alert_settings(data.get("alert_settings"))
             previous = (self.slave_settings.device_id, self.slave_settings.device_token,
                         self.slave_settings.display_name, self.slave_settings.account_username)
             if data.get("device_id"):
@@ -730,6 +733,8 @@ class InventoryMonitorWindow(QMainWindow):
 
     def _deactivate(self, message: str) -> None:
         self._authenticated = False
+        self._local_alert_enabled = False
+        self._capacity_threshold = 0
         self.scan_timer.stop()
         self.window_state_timer.stop()
         self.occlusion_timer.stop()
@@ -1056,16 +1061,12 @@ class InventoryMonitorWindow(QMainWindow):
     def _update_capacity_alert(
         self, session: MonitorSession, signal: dict[str, Any], observed_at: float | None = None
     ) -> None:
-        if not self.slave_settings.inventory_capacity_alert_enabled:
-            session.capacity_alert_active = False
-            session.capacity_candidate_since = None
-            return
         if str(signal.get("status", "")) not in {"full", "almost_full", "not_full"}:
             session.capacity_alert_active = False
             session.capacity_candidate_since = None
             return
         empty_count = max(0, int(signal.get("empty_count", 0)))
-        threshold = self.slave_settings.inventory_capacity_threshold
+        threshold = self._capacity_threshold
         reached = empty_count <= threshold
         if not reached:
             session.capacity_alert_active = False
@@ -1087,19 +1088,15 @@ class InventoryMonitorWindow(QMainWindow):
         else:
             title = "背包容量提醒"
             message = f"检测到背包剩余 {empty_count} 格，已达到提醒阈值（≤ {threshold} 格），请及时处理。"
-        host_alert = self.slave_settings.inventory_capacity_host_alert_enabled
-        local_alert = self.slave_settings.inventory_capacity_local_alert_enabled
-        action = "正在上报云端" if host_alert else "正在触发本机提醒"
-        self.log.appendPlainText(f"{title}：{account_label}，{action}")
-        if host_alert:
-            self._send_host_alert(
-                session,
-                "inventory_full" if threshold == 0 else "inventory_capacity",
-                empty_slots=empty_count,
-                confidence=float(signal.get("confidence", 0.0)),
-                details={"threshold": threshold, "message": message},
-            )
-        if local_alert:
+        self.log.appendPlainText(f"{title}：{account_label}，正在上报云端")
+        self._send_host_alert(
+            session,
+            "inventory_full" if threshold == 0 else "inventory_capacity",
+            empty_slots=empty_count,
+            confidence=float(signal.get("confidence", 0.0)),
+            details={"threshold": threshold, "message": message},
+        )
+        if self._local_alert_enabled:
             self._show_alert(
                 QMessageBox.Icon.Critical,
                 title,
@@ -1311,7 +1308,8 @@ class InventoryMonitorWindow(QMainWindow):
         )
         account_label = f"{session.account.secondary_region} / {session.account.role_name}"
         self.log.appendPlainText(f"监控失败：{account_label}：{summary}")
-        self._show_alert(QMessageBox.Icon.Critical, "背包监控失败", summary, account_label)
+        if self._local_alert_enabled:
+            self._show_alert(QMessageBox.Icon.Critical, "背包监控失败", summary, account_label)
 
     @Slot(int)
     def _on_worker_finished(self, hwnd: int) -> None:
