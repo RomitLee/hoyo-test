@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from uuid import uuid4
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -160,6 +161,13 @@ class RelayDatabase:
                     full_at TEXT NOT NULL,
                     PRIMARY KEY(character_id,account_id)
                 );
+                CREATE TABLE IF NOT EXISTS stamina_full_alert_state (
+                    account_id INTEGER NOT NULL, character_id TEXT NOT NULL,
+                    observed_at TEXT NOT NULL, last_checked_at TEXT NOT NULL,
+                    interrupted INTEGER NOT NULL DEFAULT 0,
+                    alerted INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(account_id,character_id)
+                );
                 CREATE TABLE IF NOT EXISTS bark_settings (
                     account_id INTEGER PRIMARY KEY, device_key TEXT NOT NULL DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 0, call_enabled INTEGER NOT NULL DEFAULT 1,
@@ -168,6 +176,7 @@ class RelayDatabase:
                     web_sound_enabled INTEGER NOT NULL DEFAULT 0,
                     capacity_threshold INTEGER NOT NULL DEFAULT 0,
                     cash_threshold_wan INTEGER NOT NULL DEFAULT 500,
+                    stamina_full_enabled INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
                 );
@@ -188,11 +197,13 @@ class RelayDatabase:
             self._ensure_column(connection, "events", "account_id", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(connection, "events", "bark_last_sent_at", "TEXT")
             self._ensure_column(connection, "events", "bark_send_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "events", "local_delivered_at", "TEXT")
             self._ensure_column(connection, "bark_settings", "notify_after", "TEXT")
             self._ensure_column(connection, "bark_settings", "local_alert_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "web_sound_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "capacity_threshold", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "cash_threshold_wan", "INTEGER NOT NULL DEFAULT 500")
+            self._ensure_column(connection, "bark_settings", "stamina_full_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
             self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
             self._ensure_column(connection, "monitor_logs", "message", "TEXT")
@@ -721,6 +732,83 @@ class RelayDatabase:
              observed.isoformat(timespec="milliseconds"),
              (observed + timedelta(minutes=ticks * 5)).isoformat(timespec="milliseconds")))
 
+    def check_stamina_full_alerts(self, now: datetime | None = None) -> int:
+        """Create one alert per recovery cycle, while the predicted interval stayed monitored."""
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        stamp = current_time.isoformat(timespec="milliseconds")
+        created = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            readings = connection.execute("""SELECT v.*,r.server_name,r.role_name,
+                COALESCE(b.stamina_full_enabled,0) AS alert_enabled,
+                COALESCE(b.local_alert_enabled,0) AS local_enabled
+                FROM game_role_vitals v JOIN game_roles r ON r.character_id=v.character_id
+                LEFT JOIN bark_settings b ON b.account_id=v.account_id""").fetchall()
+            for reading in readings:
+                key = (reading["account_id"], reading["character_id"])
+                observed = datetime.fromisoformat(reading["observed_at"]).astimezone(UTC)
+                recent_observation = -timedelta(minutes=2) <= current_time - observed <= timedelta(seconds=30)
+                state = connection.execute("""SELECT * FROM stamina_full_alert_state
+                    WHERE account_id=? AND character_id=?""", key).fetchone()
+                new_observation = state is None or state["observed_at"] != reading["observed_at"]
+                alerted = bool(state["alerted"]) if state else False
+                interrupted = bool(state["interrupted"]) if state else not recent_observation
+                last_checked = datetime.fromisoformat(state["last_checked_at"]) if state else current_time
+                if new_observation:
+                    if reading["stamina_current"] < reading["stamina_max"]:
+                        alerted = False
+                    interrupted = not recent_observation
+                    last_checked = current_time
+                device = connection.execute("""SELECT disabled,removed_at,last_seen_at FROM devices
+                    WHERE device_id=? AND account_id=?""", (reading["device_id"], reading["account_id"])).fetchone()
+                window = connection.execute("""SELECT monitoring,minimized,status,received_at
+                    FROM device_window_status WHERE device_id=? AND character_id=?
+                    ORDER BY received_at DESC LIMIT 1""", (reading["device_id"], reading["character_id"])).fetchone()
+                online = False
+                if device and window and not device["disabled"] and device["removed_at"] is None:
+                    try:
+                        online = (current_time - datetime.fromisoformat(device["last_seen_at"]) <= timedelta(seconds=35)
+                            and current_time - datetime.fromisoformat(window["received_at"]) <= timedelta(seconds=20)
+                            and bool(window["monitoring"]) and not window["minimized"]
+                            and window["status"] not in {"window_closed", "paused", "minimized", "removing"})
+                    except (ValueError, TypeError):
+                        online = False
+                if not interrupted and reading["stamina_current"] < reading["stamina_max"]:
+                    if online and current_time - last_checked <= timedelta(seconds=20):
+                        last_checked = current_time
+                    elif not online and current_time - observed > timedelta(seconds=20):
+                        interrupted = True
+                    elif current_time - last_checked > timedelta(seconds=20):
+                        interrupted = True
+                measured_full = reading["stamina_current"] >= reading["stamina_max"] and recent_observation
+                predicted_full = (reading["stamina_current"] < reading["stamina_max"]
+                    and current_time >= datetime.fromisoformat(reading["full_at"])
+                    and online and not interrupted)
+                if reading["alert_enabled"] and not alerted and (measured_full or predicted_full):
+                    source = "measured" if measured_full else "predicted"
+                    payload = {"event_id": uuid4().hex, "event_type": "stamina_full",
+                        "occurred_at": stamp, "server_name": reading["server_name"],
+                        "role_name": reading["role_name"], "character_id": reading["character_id"],
+                        "details": {"source": source, "stamina_current": reading["stamina_current"],
+                                    "stamina_max": reading["stamina_max"], "observed_at": reading["observed_at"]}}
+                    connection.execute("""INSERT INTO events(account_id,device_id,client_event_id,event_type,
+                        server_name,role_name,character_id,occurred_at,received_at,payload_json,local_delivered_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (reading["account_id"], reading["device_id"], payload["event_id"],
+                         "stamina_full", reading["server_name"], reading["role_name"], reading["character_id"],
+                         stamp, stamp, json.dumps(payload, ensure_ascii=False),
+                         None if reading["local_enabled"] else stamp))
+                    alerted = True
+                    created += 1
+                connection.execute("""INSERT INTO stamina_full_alert_state
+                    (account_id,character_id,observed_at,last_checked_at,interrupted,alerted)
+                    VALUES (?,?,?,?,?,?) ON CONFLICT(account_id,character_id) DO UPDATE SET
+                    observed_at=excluded.observed_at,last_checked_at=excluded.last_checked_at,
+                    interrupted=excluded.interrupted,alerted=excluded.alerted""",
+                    (*key, reading["observed_at"], last_checked.isoformat(timespec="milliseconds"),
+                     int(interrupted), int(alerted)))
+        return created
+
     @staticmethod
     def _log_settings(connection: sqlite3.Connection, account_id: int) -> dict[str, Any]:
         row = connection.execute("SELECT * FROM monitor_log_settings WHERE account_id=?", (account_id,)).fetchone()
@@ -924,7 +1012,7 @@ class RelayDatabase:
     def get_bark_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,updated_at FROM bark_settings WHERE account_id=?",
+                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,updated_at FROM bark_settings WHERE account_id=?",
                 (account_id,),
             ).fetchone()
         if row is None:
@@ -933,12 +1021,14 @@ class RelayDatabase:
                 "repeat_minutes": 10, "notify_after": None, "updated_at": None,
                 "local_alert_enabled": False, "web_sound_enabled": False, "capacity_threshold": 0,
                 "cash_threshold_wan": 500,
+                "stamina_full_enabled": False,
             }
         item = dict(row)
         item["enabled"] = bool(item["enabled"])
         item["call_enabled"] = bool(item["call_enabled"])
         item["local_alert_enabled"] = bool(item["local_alert_enabled"])
         item["web_sound_enabled"] = bool(item["web_sound_enabled"])
+        item["stamina_full_enabled"] = bool(item["stamina_full_enabled"])
         return item
 
     def update_bark_settings(
@@ -946,6 +1036,7 @@ class RelayDatabase:
         call_enabled: bool, repeat_minutes: int,
         local_alert_enabled: bool | None = None, web_sound_enabled: bool | None = None,
         capacity_threshold: int | None = None, cash_threshold_wan: int | None = None,
+        stamina_full_enabled: bool | None = None,
     ) -> dict[str, Any]:
         current = self.get_bark_settings(account_id)
         stored_key = current["device_key"] if device_key is None else device_key
@@ -959,19 +1050,22 @@ class RelayDatabase:
         web_sound_enabled = current["web_sound_enabled"] if web_sound_enabled is None else web_sound_enabled
         capacity_threshold = current["capacity_threshold"] if capacity_threshold is None else capacity_threshold
         cash_threshold_wan = current["cash_threshold_wan"] if cash_threshold_wan is None else cash_threshold_wan
+        stamina_full_enabled = current["stamina_full_enabled"] if stamina_full_enabled is None else stamina_full_enabled
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO bark_settings(account_id,device_key,enabled,call_enabled,repeat_minutes,notify_after,
-                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
                    device_key=excluded.device_key,enabled=excluded.enabled,
                    call_enabled=excluded.call_enabled,repeat_minutes=excluded.repeat_minutes,
                    notify_after=excluded.notify_after,local_alert_enabled=excluded.local_alert_enabled,
                    web_sound_enabled=excluded.web_sound_enabled,capacity_threshold=excluded.capacity_threshold,
                    cash_threshold_wan=excluded.cash_threshold_wan,
+                   stamina_full_enabled=excluded.stamina_full_enabled,
                    updated_at=excluded.updated_at""",
                 (account_id, stored_key, int(enabled), int(call_enabled), repeat_minutes, notify_after,
-                 int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, cash_threshold_wan, now),
+                 int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, cash_threshold_wan,
+                 int(stamina_full_enabled), now),
             )
         return self.get_bark_settings(account_id)
 
@@ -1015,6 +1109,24 @@ class RelayDatabase:
                 (utc_now(), event_id),
             )
 
+    def pending_local_stamina_alerts(self, account_id: int, device_id: str) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(UTC) - timedelta(minutes=5)).isoformat(timespec="milliseconds")
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT id,role_name,server_name,payload_json FROM events
+                WHERE account_id=? AND device_id=? AND event_type='stamina_full'
+                AND local_delivered_at IS NULL AND occurred_at>=?
+                ORDER BY id LIMIT 10""", (account_id, device_id, cutoff)).fetchall()
+        return [{"id": row["id"], "role_name": row["role_name"],
+                 "server_name": row["server_name"], "details": json.loads(row["payload_json"]).get("details", {})}
+                for row in rows]
+
+    def acknowledge_local_stamina_alert(self, account_id: int, device_id: str, event_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute("""UPDATE events SET local_delivered_at=COALESCE(local_delivered_at,?)
+                WHERE id=? AND account_id=? AND device_id=? AND event_type='stamina_full'""",
+                (utc_now(), event_id, account_id, device_id))
+        return cursor.rowcount > 0
+
     def device_profile(self, account_id: int, device_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
@@ -1030,7 +1142,10 @@ class RelayDatabase:
                 "local_alert_enabled": alerts["local_alert_enabled"],
                 "capacity_threshold": alerts["capacity_threshold"],
                 "cash_threshold_wan": alerts["cash_threshold_wan"],
+                "stamina_full_enabled": alerts["stamina_full_enabled"],
             },
+            "local_stamina_alerts": (self.pending_local_stamina_alerts(account_id, device_id)
+                                     if alerts["local_alert_enabled"] else []),
         }
 
     def list_devices(self, account_id: int) -> list[dict[str, Any]]:

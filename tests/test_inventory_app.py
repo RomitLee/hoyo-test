@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.10.0"
+        assert __version__ == "V2.11.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -546,6 +546,30 @@ def test_cash_low_alert_uses_fresh_confirmed_cash_and_rearms_after_recovery(monk
         window._local_alert_enabled = True
         window._update_cash_alert(session, {"cash": 4900000, "cash_readable": True})
         assert len(sent) == 2 and len(local) == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_server_stamina_alert_rings_current_device_once_and_acknowledges(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    shown = []
+    acknowledged = []
+    monkeypatch.setattr(window, "_show_alert", lambda *args, **kwargs: shown.append((args, kwargs)))
+    monkeypatch.setattr(window.relay_client, "acknowledge_local_alert", acknowledged.append)
+    window._authenticated = True
+    profile = {"alert_settings": {"local_alert_enabled": True, "capacity_threshold": 0,
+                                  "cash_threshold_wan": 500, "stamina_full_enabled": True},
+               "local_stamina_alerts": [{"id": 42, "server_name": "秦淮风光",
+                                         "role_name": "清风知夏", "details": {"source": "predicted"}}]}
+    try:
+        window._on_device_profile(profile)
+        window._on_device_profile(profile)
+        assert len(shown) == 1
+        assert "体力已满" in shown[0][0][1]
+        assert acknowledged == [42, 42]
     finally:
         window.close()
         app.processEvents()

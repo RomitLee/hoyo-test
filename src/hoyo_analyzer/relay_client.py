@@ -169,6 +169,10 @@ class SlaveRelayClient(QObject):
             return
         self._post("/api/v1/slave/events", payload, "event")
 
+    def acknowledge_local_alert(self, event_id: int) -> None:
+        if self.configured:
+            self._post(f"/api/v1/slave/local-alerts/{event_id}/ack", {}, "local_alert_ack")
+
     def send_monitor_log(self, event_type: str, reason: str) -> None:
         self.send_monitor_payload({
             "event_id": uuid4().hex, "event_type": event_type, "reason": reason,
@@ -359,7 +363,7 @@ class SlaveRelayClient(QObject):
                 self._save_log_outbox()
                 self._send_next_log()
         if success:
-            if kind in {"heartbeat", "profile"} and data.get("display_name"):
+            if kind in {"heartbeat", "profile", "status"} and data.get("display_name"):
                 self.profile_received.emit(data)
             if kind == "profile":
                 self.profile_result.emit(True, "从机名称已保存")

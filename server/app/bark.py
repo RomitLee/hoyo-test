@@ -12,6 +12,7 @@ EVENT_LABELS = {
     "inventory_full": "背包已满",
     "inventory_capacity": "背包容量不足",
     "cash_low": "游戏币不足",
+    "stamina_full": "体力已满",
     "inventory_closed": "背包未打开",
     "inventory_occluded": "背包被遮挡",
     "window_occluded": "窗口被遮挡",
@@ -37,6 +38,13 @@ def event_message(event: dict[str, Any]) -> tuple[str, str]:
             cash, threshold = int(money["cash"]), int(money["threshold_wan"])
             details[-1] += f"，当前 {cash:,}，低于 {threshold} 万"
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    if event.get("event_type") == "stamina_full":
+        try:
+            payload = json.loads(str(event.get("payload_json") or "{}"))
+            source = payload.get("details", {}).get("source")
+            details[-1] += "（实测）" if source == "measured" else "（预测）"
+        except (TypeError, ValueError, json.JSONDecodeError):
             pass
     return f"背包监控 · {event_name}", "\n".join(details)
 

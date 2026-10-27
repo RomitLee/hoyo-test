@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.19.0"
+VERSION = "2.20.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -236,6 +236,7 @@ class BarkSettingsIn(BaseModel):
     web_sound_enabled: bool | None = None
     capacity_threshold: int | None = Field(default=None, ge=0, le=20, strict=True)
     cash_threshold_wan: int | None = Field(default=None, ge=1, le=99999999, strict=True)
+    stamina_full_enabled: bool | None = None
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -303,6 +304,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.sleep(24 * 3600)
             await asyncio.to_thread(database.purge_live_snapshot_history)
 
+    async def stamina_alert_loop() -> None:
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await asyncio.to_thread(database.check_stamina_full_alerts)
+            except Exception:
+                logger.exception("Stamina alert evaluation failed")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         database.initialize()
@@ -311,15 +320,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.purge_live_snapshot_history()
         reminder_task = asyncio.create_task(bark_reminder_loop())
         cleanup_task = asyncio.create_task(history_cleanup_loop())
+        stamina_task = asyncio.create_task(stamina_alert_loop())
         try:
             yield
         finally:
             reminder_task.cancel()
             cleanup_task.cancel()
+            stamina_task.cancel()
             with suppress(asyncio.CancelledError):
                 await reminder_task
             with suppress(asyncio.CancelledError):
                 await cleanup_task
+            with suppress(asyncio.CancelledError):
+                await stamina_task
 
     app = FastAPI(
         title="Hoyo Inventory Alarm Relay", version=VERSION, docs_url=None,
@@ -516,6 +529,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 web_sound_enabled=payload.web_sound_enabled,
                 capacity_threshold=payload.capacity_threshold,
                 cash_threshold_wan=payload.cash_threshold_wan,
+                stamina_full_enabled=payload.stamina_full_enabled,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -628,6 +642,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"device_id": device_id, "server_time": seen_at,
                 **database.device_profile(identity.account_id, device_id)}
 
+    @app.post("/api/v1/slave/local-alerts/{event_id}/ack")
+    def acknowledge_local_alert(
+        event_id: int, identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
+    ) -> dict[str, bool]:
+        if not database.acknowledge_local_stamina_alert(identity.account_id, identity.device_id, event_id):
+            raise HTTPException(status_code=404, detail="告警不存在")
+        return {"acknowledged": True}
+
     @app.post("/api/v1/slave/cash-observations", status_code=status.HTTP_202_ACCEPTED)
     def cash_observation(
         payload: CashObservationIn,
@@ -656,7 +678,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             device_id, [window.model_dump(mode="json") for window in payload.windows],
             payload.reported_at.isoformat(timespec="milliseconds"),
         )
-        return {"accepted": True, "device_id": device_id, "window_count": len(payload.windows), "received_at": received_at}
+        return {"accepted": True, "device_id": device_id, "window_count": len(payload.windows),
+                "received_at": received_at, **database.device_profile(identity.account_id, device_id)}
 
     @app.post("/api/v1/slave/monitor-logs", status_code=status.HTTP_202_ACCEPTED)
     def create_monitor_log(

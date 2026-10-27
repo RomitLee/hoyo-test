@@ -134,6 +134,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._local_alert_enabled = False
         self._capacity_threshold = 0
         self._cash_threshold_wan = 500
+        self._shown_local_stamina_alerts: set[int] = set()
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
         self._sounding_alerts: set[QMessageBox] = set()
@@ -599,6 +600,19 @@ class InventoryMonitorWindow(QMainWindow):
     @Slot(object)
     def _on_device_profile(self, data: dict[str, Any]) -> None:
         self._apply_alert_settings(data.get("alert_settings"))
+        if self._authenticated and self._local_alert_enabled:
+            for alert in data.get("local_stamina_alerts") or []:
+                if not isinstance(alert, dict) or not isinstance(alert.get("id"), int):
+                    continue
+                event_id = alert["id"]
+                if event_id not in self._shown_local_stamina_alerts:
+                    self._shown_local_stamina_alerts.add(event_id)
+                    details = alert.get("details") or {}
+                    source = "属性面板实测" if details.get("source") == "measured" else "在线恢复预测"
+                    account_label = f"{alert.get('server_name') or ''} / {alert.get('role_name') or ''}"
+                    self._show_alert(QMessageBox.Icon.Warning, "体力已满", f"{source}：体力已满，请及时处理。",
+                                     account_label, with_sound=True)
+                self.relay_client.acknowledge_local_alert(event_id)
         name = str(data.get("display_name") or "").strip()
         if name and name != self.slave_settings.display_name:
             self.slave_settings.display_name = name
@@ -749,6 +763,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._local_alert_enabled = False
         self._capacity_threshold = 0
         self._cash_threshold_wan = 500
+        self._shown_local_stamina_alerts.clear()
         self.scan_timer.stop()
         self.window_state_timer.stop()
         self.occlusion_timer.stop()
