@@ -1,7 +1,17 @@
 import wave
+from pathlib import Path
 from types import SimpleNamespace
 
 from hoyo_analyzer import alarm_sound
+
+
+def test_browser_alarm_is_the_same_wav_as_the_slave_melody() -> None:
+    asset = Path(__file__).resolve().parents[1] / "web-admin/src/assets/inventory-alarm-loop-v1.wav"
+    with wave.open(str(asset), "rb") as source:
+        assert source.getframerate() == alarm_sound.SAMPLE_RATE
+        assert source.getnchannels() == 1
+        assert source.getsampwidth() == 2
+        assert source.readframes(source.getnframes()) == alarm_sound._melody_samples()
 
 
 def test_alarm_melody_is_written_as_a_real_wav(tmp_path, monkeypatch) -> None:

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import Panel from './components/Panel.vue'
 import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from './api'
 import { estimateStamina } from './stamina'
+import alarmSoundUrl from './assets/inventory-alarm-loop-v1.wav'
 
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
 type RoleMode = 'buy' | 'sell' | 'unknown'
@@ -71,9 +72,9 @@ const webSound = ref(false)
 const soundReady = ref(false)
 const ringing = ref(false)
 let knownAlerts: Set<number> | undefined
-let audio: AudioContext | undefined
+let alarmAudio: HTMLAudioElement | undefined
 let audioUnlockAttempted = false
-let soundTimer: number | undefined
+let sampleTimer: number | undefined
 let timer: number | undefined
 let session = 0
 
@@ -229,33 +230,35 @@ function logout(message = '') {
   timer = undefined
 }
 
-function beep() {
-  if (!audio) return
-  const oscillator = audio.createOscillator()
-  const gain = audio.createGain()
-  oscillator.type = 'sine'
-  oscillator.frequency.value = 760
-  gain.gain.setValueAtTime(0.0001, audio.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.12, audio.currentTime + 0.02)
-  gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.35)
-  oscillator.connect(gain).connect(audio.destination)
-  oscillator.start()
-  oscillator.stop(audio.currentTime + 0.36)
+function alarmPlayer(): HTMLAudioElement {
+  alarmAudio ||= new Audio(alarmSoundUrl)
+  alarmAudio.loop = true
+  alarmAudio.volume = 1
+  return alarmAudio
 }
 
 function stopSound() {
   ringing.value = false
-  if (soundTimer) window.clearInterval(soundTimer)
-  soundTimer = undefined
+  if (sampleTimer) window.clearTimeout(sampleTimer)
+  sampleTimer = undefined
+  alarmAudio?.pause()
+  if (alarmAudio) alarmAudio.currentTime = 0
 }
 
 async function unlockWebSound(playSample = true) {
   audioUnlockAttempted = true
   try {
-    audio ||= new AudioContext()
-    await audio.resume()
-    soundReady.value = audio.state === 'running'
-    if (soundReady.value && playSample) { beep(); notice.value = '当前浏览器已允许播放提示音' }
+    const player = alarmPlayer()
+    await player.play()
+    soundReady.value = true
+    if (playSample) {
+      notice.value = '当前浏览器已允许播放从机告警音'
+      if (sampleTimer) window.clearTimeout(sampleTimer)
+      sampleTimer = window.setTimeout(() => {
+        sampleTimer = undefined
+        if (!ringing.value) { player.pause(); player.currentTime = 0 }
+      }, 1900)
+    } else if (!ringing.value) { player.pause(); player.currentTime = 0 }
   } catch { soundReady.value = false; error.value = '浏览器未允许播放声音，请点击页面后重试' }
 }
 
@@ -301,8 +304,7 @@ async function refresh() {
     const nextAlerts = new Set(alerts.value.filter(item => !item.acked_at).map(item => item.server_event_id))
     if (knownAlerts && webSound.value && soundReady.value && !ringing.value && [...nextAlerts].some(id => !knownAlerts?.has(id))) {
       ringing.value = true
-      if (audio?.state === 'running') beep()
-      soundTimer = window.setInterval(beep, 1800)
+      void alarmPlayer().play().catch(() => { ringing.value = false; soundReady.value = false })
     }
     knownAlerts = nextAlerts
     if (!nextAlerts.size) stopSound()
@@ -325,7 +327,7 @@ async function loadSettings() {
     Object.assign(bark, storedBark)
     webSound.value = storedBark.web_sound_enabled
     if (!webSound.value) stopSound()
-    else if (audio?.state === 'running') soundReady.value = true
+    else if (alarmAudio && !alarmAudio.paused) soundReady.value = true
     snapshotInterval.value = liveSettings.interval_minutes
     accountName.value = account.account?.display_name || account.account?.username || username.value
   } catch (cause) { fail(cause) }
@@ -479,7 +481,7 @@ async function testBark() {
 
 watch([() => filter.event_type, () => filter.panel_type], () => { if (page.value === 'logs') void fetchLogs(0) })
 onMounted(() => { window.addEventListener('keydown', previewKey); window.addEventListener('pointerdown', onAudioGesture); if (token.value) start() })
-onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.removeEventListener('pointerdown', onAudioGesture); if (timer) window.clearInterval(timer); stopSound(); void audio?.close() })
+onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.removeEventListener('pointerdown', onAudioGesture); if (timer) window.clearInterval(timer); stopSound() })
 </script>
 
 <template>
