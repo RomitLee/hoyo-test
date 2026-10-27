@@ -190,6 +190,7 @@ def test_event_round_trip_and_duplicate_is_idempotent(tmp_path: Path) -> None:
             "confidence": 0.98,
             "occlusion_percent": 0,
             "minimized": False,
+            "details": {"stall_mode": "buy"},
         }
 
         created = client.post("/api/v1/slave/events", headers=device_headers(), json=payload)
@@ -310,6 +311,7 @@ def test_bark_settings_test_and_new_event_push(tmp_path: Path, monkeypatch) -> N
                 "server_name": "秦淮风光",
                 "role_name": "清风知夏",
                 "empty_slots": 0,
+                "details": {"stall_mode": "buy"},
             },
         )
         assert created.status_code == 202
@@ -329,7 +331,7 @@ def test_cash_low_event_push_contains_amount_and_rejects_non_low_amount(tmp_path
         event = {
             "event_id": "cash-low-001", "event_type": "cash_low",
             "occurred_at": "2026-10-27T18:00:00+08:00", "server_name": "秦淮风光",
-            "role_name": "清风知夏", "details": {"cash": 4999999, "threshold_wan": 500},
+            "role_name": "清风知夏", "details": {"cash": 4999999, "threshold_wan": 500, "stall_mode": "buy"},
         }
         assert client.post("/api/v1/slave/events", headers=device_headers(), json=event).status_code == 202
         assert len(sent) == 1
@@ -339,13 +341,60 @@ def test_cash_low_event_push_contains_amount_and_rejects_non_low_amount(tmp_path
         assert client.post("/api/v1/slave/events", headers=device_headers(), json=event).status_code == 422
 
 
+def test_capacity_and_cash_alert_switches_filter_role_modes(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        settings = client.get("/api/v1/master/notifications/bark", headers=master_headers()).json()
+        assert settings["capacity_enabled"] is True and settings["cash_low_enabled"] is True
+        assert settings["capacity_modes"] == settings["cash_low_modes"] == ["buy"]
+
+        def report(kind: str, mode: str, number: int) -> dict:
+            details = {"stall_mode": mode}
+            if kind == "cash_low":
+                details.update(cash=4_000_000, threshold_wan=500)
+            response = client.post("/api/v1/slave/events", headers=device_headers(), json={
+                "event_id": f"role-filter-{number}", "event_type": kind,
+                "character_id": "123456", "occurred_at": "2026-10-27T18:00:00+08:00",
+                "empty_slots": 0 if kind == "inventory_full" else None, "details": details,
+            })
+            assert response.status_code == 202
+            return response.json()
+
+        assert report("inventory_full", "sell", 1)["ignored"] is True
+        assert report("cash_low", "unknown", 2)["ignored"] is True
+        status = client.post("/api/v1/slave/status", headers=device_headers(), json={
+            "reported_at": "2026-10-27T18:00:00+08:00",
+            "windows": [{"window_id": "hwnd:1", "character_id": "123456", "status": "not_full",
+                         "monitoring": True, "monitor_session_id": "1234567890abcdef1234567890abcdef",
+                         "stall_panel_type": "stall", "updated_at": "2026-10-27T18:00:00+08:00"}],
+        })
+        assert status.status_code == 202
+        legacy = client.post("/api/v1/slave/events", headers=device_headers(), json={
+            "event_id": "role-filter-legacy", "event_type": "inventory_full",
+            "character_id": "123456", "occurred_at": "2026-10-27T18:00:00+08:00",
+            "empty_slots": 0,
+        })
+        assert legacy.status_code == 202 and legacy.json()["ignored"] is True
+        assert report("inventory_full", "buy", 3)["duplicate"] is False
+        assert report("cash_low", "buy", 4)["duplicate"] is False
+
+        updated = client.put("/api/v1/master/notifications/bark", headers=master_headers(),
+                             json={"enabled": False, "capacity_enabled": False,
+                                   "cash_low_modes": ["buy", "sell"]})
+        assert updated.status_code == 200
+        assert report("inventory_full", "buy", 5)["ignored"] is True
+        assert report("cash_low", "sell", 6)["duplicate"] is False
+        assert len(client.get("/api/v1/master/events?state=all", headers=master_headers()).json()["events"]) == 3
+
+
 def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_updates(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         saved = client.put(
             "/api/v1/master/notifications/bark", headers=master_headers(),
             json={"enabled": False, "local_alert_enabled": True,
                   "web_sound_enabled": True, "capacity_threshold": 3,
-                  "stamina_full_enabled": True, "stall_sold_enabled": True},
+                  "stamina_full_enabled": True, "stall_sold_enabled": True,
+                  "capacity_enabled": True, "cash_low_enabled": False,
+                  "capacity_modes": ["buy", "unknown"], "cash_low_modes": ["buy"]},
         )
         assert saved.status_code == 200
         assert saved.json()["local_alert_enabled"] is True
@@ -354,6 +403,8 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert saved.json()["stamina_full_enabled"] is True
         assert saved.json()["stall_sold_enabled"] is True
         assert saved.json()["cash_threshold_wan"] == 500
+        assert saved.json()["capacity_modes"] == ["buy", "unknown"]
+        assert saved.json()["cash_low_enabled"] is False
 
         heartbeat = client.post(
             "/api/v1/slave/heartbeat", headers=device_headers(),
@@ -362,6 +413,8 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert heartbeat.status_code == 200
         assert heartbeat.json()["alert_settings"] == {
             "local_alert_enabled": True, "capacity_threshold": 3, "cash_threshold_wan": 500,
+            "capacity_enabled": True, "cash_low_enabled": False,
+            "capacity_modes": ["buy", "unknown"], "cash_low_modes": ["buy"],
             "stamina_full_enabled": True,
             "stall_sold_enabled": True,
         }
@@ -376,6 +429,8 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert legacy.json()["web_sound_enabled"] is True
         assert legacy.json()["capacity_threshold"] == 3
         assert legacy.json()["cash_threshold_wan"] == 500
+        assert legacy.json()["cash_low_enabled"] is False
+        assert legacy.json()["capacity_modes"] == ["buy", "unknown"]
         assert legacy.json()["stamina_full_enabled"] is True
         assert legacy.json()["stall_sold_enabled"] is True
 
@@ -514,7 +569,7 @@ def test_recent_alert_order_for_web_dashboard(tmp_path: Path) -> None:
             created = client.post(
                 "/api/v1/slave/events", headers=device_headers(),
                 json={"event_id": f"web-alert-{index}", "event_type": "inventory_full",
-                      "occurred_at": "2026-09-29T08:30:00+08:00"},
+                      "occurred_at": "2026-09-29T08:30:00+08:00", "details": {"stall_mode": "buy"}},
             )
             assert created.status_code == 202
         recent = client.get("/api/v1/master/events?state=all&limit=2&latest=true", headers=master_headers())
@@ -635,6 +690,7 @@ def test_accounts_pairing_and_data_are_tenant_isolated(tmp_path: Path) -> None:
                     "occurred_at": "2026-09-30T08:30:00+08:00",
                     "role_name": role,
                     "empty_slots": 0,
+                    "details": {"stall_mode": "buy"},
                 },
             )
             assert created.status_code == 202

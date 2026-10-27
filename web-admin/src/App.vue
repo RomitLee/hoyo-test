@@ -5,13 +5,14 @@ import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from '
 import { estimateStamina } from './stamina'
 
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
+type RoleMode = 'buy' | 'sell' | 'unknown'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
 type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_count?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; stall_mode?: 'buy' | 'sell' | 'unknown'; sell_stock_count?: number | null; device: Device }
 type RoleCard = RoleStatus & { stamina_estimate: number | null }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number; payload?: { details?: { cash?: number; threshold_wan?: number; source?: string; previous_count?: number; current_count?: number; sold_count?: number } } }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
-type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; stamina_full_enabled: boolean; stall_sold_enabled: boolean; configured?: boolean; masked_key?: string }
+type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; capacity_enabled: boolean; cash_low_enabled: boolean; capacity_modes: RoleMode[]; cash_low_modes: RoleMode[]; stamina_full_enabled: boolean; stall_sold_enabled: boolean; configured?: boolean; masked_key?: string }
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
 
 const pages: { key: Page; label: string; hint: string }[] = [
@@ -47,7 +48,7 @@ const logCursor = ref(0)
 const logNext = ref(0)
 const filter = reactive({ event_type: '', panel_type: '' })
 const policy = reactive<Policy>({ occlusion_enabled: true, occlusion_percent: 60, occlusion_seconds: 5 })
-const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0, cash_threshold_wan: 500, stamina_full_enabled: false, stall_sold_enabled: false })
+const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0, cash_threshold_wan: 500, capacity_enabled: true, cash_low_enabled: true, capacity_modes: ['buy'], cash_low_modes: ['buy'], stamina_full_enabled: false, stall_sold_enabled: false })
 const barkKey = ref('')
 const preview = ref('')
 const previewError = ref('')
@@ -446,6 +447,8 @@ async function saveSnapshotInterval() {
 async function saveBark() {
   busy.value = true
   try {
+    if (bark.capacity_enabled && !bark.capacity_modes.length) throw new Error('请为背包空格告警至少选择一种角色状态')
+    if (bark.cash_low_enabled && !bark.cash_low_modes.length) throw new Error('请为游戏币告警至少选择一种角色状态')
     if (bark.web_sound_enabled && !soundReady.value) await unlockWebSound()
     let key = barkKey.value.trim()
     if (/^https?:\/\//i.test(key)) {
@@ -456,6 +459,8 @@ async function saveBark() {
     const data = { enabled: bark.enabled, call_enabled: bark.call_enabled, repeat_minutes: bark.repeat_minutes,
       local_alert_enabled: bark.local_alert_enabled, web_sound_enabled: bark.web_sound_enabled,
       capacity_threshold: bark.capacity_threshold, cash_threshold_wan: bark.cash_threshold_wan,
+      capacity_enabled: bark.capacity_enabled, cash_low_enabled: bark.cash_low_enabled,
+      capacity_modes: bark.capacity_modes, cash_low_modes: bark.cash_low_modes,
       stamina_full_enabled: bark.stamina_full_enabled,
       stall_sold_enabled: bark.stall_sold_enabled,
       ...(key ? { device_key: key } : {}) }
@@ -547,11 +552,11 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
             <label class="check"><input v-model="bark.enabled" type="checkbox"> 手机是否推送</label>
             <label class="check"><input v-model="bark.local_alert_enabled" type="checkbox"> 当前设备是否报警</label>
             <label class="check"><input v-model="bark.web_sound_enabled" type="checkbox"> 电脑网页提示音</label>
-            <label>背包剩余空格提醒阈值<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required></label>
-            <label>游戏币低于（万）<input v-model.number="bark.cash_threshold_wan" type="number" min="1" max="99999999" step="1" required></label>
+            <div class="alert-rule"><label class="check"><input v-model="bark.capacity_enabled" type="checkbox"> 背包剩余空格告警</label><label>剩余空格不超过<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required></label><div class="role-mode-choices" aria-label="背包空格告警适用角色状态"><span>适用状态</span><label class="check"><input v-model="bark.capacity_modes" type="checkbox" value="buy"> 收货</label><label class="check"><input v-model="bark.capacity_modes" type="checkbox" value="sell"> 出货</label><label class="check"><input v-model="bark.capacity_modes" type="checkbox" value="unknown"> 未知</label></div></div>
+            <div class="alert-rule"><label class="check"><input v-model="bark.cash_low_enabled" type="checkbox"> 游戏币低于告警</label><label>低于（万）<input v-model.number="bark.cash_threshold_wan" type="number" min="1" max="99999999" step="1" required></label><div class="role-mode-choices" aria-label="游戏币告警适用角色状态"><span>适用状态</span><label class="check"><input v-model="bark.cash_low_modes" type="checkbox" value="buy"> 收货</label><label class="check"><input v-model="bark.cash_low_modes" type="checkbox" value="sell"> 出货</label><label class="check"><input v-model="bark.cash_low_modes" type="checkbox" value="unknown"> 未知</label></div></div>
             <label class="check"><input v-model="bark.stamina_full_enabled" type="checkbox"> 体力满提醒（实测已满或持续监控下预测满）</label>
             <label class="check"><input v-model="bark.stall_sold_enabled" type="checkbox"> 商品售出提醒（已确认在售数量减少）</label>
-            <p class="hint">达到阈值的告警始终记录在后台；上方三个开关只控制提醒送达方式。网页提示音需要保持网页打开，并允许当前浏览器播放声音。</p>
+            <p class="hint">两类阈值告警默认只对收货角色生效；关闭类型或未选中角色状态时不会产生该告警。上方三个开关控制已产生告警的送达方式。网页提示音需要保持网页打开，并允许当前浏览器播放声音。</p>
             <label class="check"><input v-model="bark.call_enabled" type="checkbox"> 手机连续呼叫</label>
             <label>手机重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label>
             <label>Bark 设备密钥或测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label>

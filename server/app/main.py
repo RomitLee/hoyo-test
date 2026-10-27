@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.22.0"
+VERSION = "2.23.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -240,6 +240,10 @@ class BarkSettingsIn(BaseModel):
     web_sound_enabled: bool | None = None
     capacity_threshold: int | None = Field(default=None, ge=0, le=20, strict=True)
     cash_threshold_wan: int | None = Field(default=None, ge=1, le=99999999, strict=True)
+    capacity_enabled: bool | None = None
+    cash_low_enabled: bool | None = None
+    capacity_modes: list[Literal["buy", "sell", "unknown"]] | None = None
+    cash_low_modes: list[Literal["buy", "sell", "unknown"]] | None = None
     stamina_full_enabled: bool | None = None
     stall_sold_enabled: bool | None = None
 
@@ -534,6 +538,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 web_sound_enabled=payload.web_sound_enabled,
                 capacity_threshold=payload.capacity_threshold,
                 cash_threshold_wan=payload.cash_threshold_wan,
+                capacity_enabled=payload.capacity_enabled,
+                cash_low_enabled=payload.cash_low_enabled,
+                capacity_modes=payload.capacity_modes,
+                cash_low_modes=payload.cash_low_modes,
                 stamina_full_enabled=payload.stamina_full_enabled,
                 stall_sold_enabled=payload.stall_sold_enabled,
             )
@@ -810,6 +818,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     or not isinstance(threshold_wan, int) or isinstance(threshold_wan, bool)
                     or not 1 <= threshold_wan <= 99999999 or cash >= threshold_wan * 10000):
                 raise HTTPException(status_code=422, detail="游戏币低额告警数据无效")
+        if payload.event_type in {"inventory_full", "inventory_capacity", "cash_low"}:
+            if not database.threshold_alert_allowed(
+                account_id, payload.event_type, payload.character_id,
+                payload.details.get("stall_mode"),
+            ):
+                return {"accepted": True, "ignored": True, "server_event_id": None}
         database.upsert_device(device_id, hostname=None, app_version=None,
                                ip_address=request.client.host if request.client else None)
         event_id, duplicate, received_at = database.insert_event(

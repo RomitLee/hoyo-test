@@ -176,6 +176,10 @@ class RelayDatabase:
                     web_sound_enabled INTEGER NOT NULL DEFAULT 0,
                     capacity_threshold INTEGER NOT NULL DEFAULT 0,
                     cash_threshold_wan INTEGER NOT NULL DEFAULT 500,
+                    capacity_enabled INTEGER NOT NULL DEFAULT 1,
+                    cash_low_enabled INTEGER NOT NULL DEFAULT 1,
+                    capacity_modes_json TEXT NOT NULL DEFAULT '["buy"]',
+                    cash_low_modes_json TEXT NOT NULL DEFAULT '["buy"]',
                     stamina_full_enabled INTEGER NOT NULL DEFAULT 0,
                     stall_sold_enabled INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL,
@@ -204,6 +208,10 @@ class RelayDatabase:
             self._ensure_column(connection, "bark_settings", "web_sound_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "capacity_threshold", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "cash_threshold_wan", "INTEGER NOT NULL DEFAULT 500")
+            self._ensure_column(connection, "bark_settings", "capacity_enabled", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "bark_settings", "cash_low_enabled", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "bark_settings", "capacity_modes_json", "TEXT NOT NULL DEFAULT '[\"buy\"]'")
+            self._ensure_column(connection, "bark_settings", "cash_low_modes_json", "TEXT NOT NULL DEFAULT '[\"buy\"]'")
             self._ensure_column(connection, "bark_settings", "stamina_full_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "stall_sold_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
@@ -1078,7 +1086,7 @@ class RelayDatabase:
     def get_bark_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,stall_sold_enabled,updated_at FROM bark_settings WHERE account_id=?",
+                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,capacity_enabled,cash_low_enabled,capacity_modes_json,cash_low_modes_json,stamina_full_enabled,stall_sold_enabled,updated_at FROM bark_settings WHERE account_id=?",
                 (account_id,),
             ).fetchone()
         if row is None:
@@ -1087,6 +1095,8 @@ class RelayDatabase:
                 "repeat_minutes": 10, "notify_after": None, "updated_at": None,
                 "local_alert_enabled": False, "web_sound_enabled": False, "capacity_threshold": 0,
                 "cash_threshold_wan": 500,
+                "capacity_enabled": True, "cash_low_enabled": True,
+                "capacity_modes": ["buy"], "cash_low_modes": ["buy"],
                 "stamina_full_enabled": False,
                 "stall_sold_enabled": False,
             }
@@ -1097,6 +1107,10 @@ class RelayDatabase:
         item["web_sound_enabled"] = bool(item["web_sound_enabled"])
         item["stamina_full_enabled"] = bool(item["stamina_full_enabled"])
         item["stall_sold_enabled"] = bool(item["stall_sold_enabled"])
+        item["capacity_enabled"] = bool(item["capacity_enabled"])
+        item["cash_low_enabled"] = bool(item["cash_low_enabled"])
+        item["capacity_modes"] = json.loads(item.pop("capacity_modes_json"))
+        item["cash_low_modes"] = json.loads(item.pop("cash_low_modes_json"))
         return item
 
     def update_bark_settings(
@@ -1104,6 +1118,8 @@ class RelayDatabase:
         call_enabled: bool, repeat_minutes: int,
         local_alert_enabled: bool | None = None, web_sound_enabled: bool | None = None,
         capacity_threshold: int | None = None, cash_threshold_wan: int | None = None,
+        capacity_enabled: bool | None = None, cash_low_enabled: bool | None = None,
+        capacity_modes: list[str] | None = None, cash_low_modes: list[str] | None = None,
         stamina_full_enabled: bool | None = None,
         stall_sold_enabled: bool | None = None,
     ) -> dict[str, Any]:
@@ -1119,27 +1135,61 @@ class RelayDatabase:
         web_sound_enabled = current["web_sound_enabled"] if web_sound_enabled is None else web_sound_enabled
         capacity_threshold = current["capacity_threshold"] if capacity_threshold is None else capacity_threshold
         cash_threshold_wan = current["cash_threshold_wan"] if cash_threshold_wan is None else cash_threshold_wan
+        capacity_enabled = current["capacity_enabled"] if capacity_enabled is None else capacity_enabled
+        cash_low_enabled = current["cash_low_enabled"] if cash_low_enabled is None else cash_low_enabled
+        capacity_modes = current["capacity_modes"] if capacity_modes is None else capacity_modes
+        cash_low_modes = current["cash_low_modes"] if cash_low_modes is None else cash_low_modes
+        valid_modes = {"buy", "sell", "unknown"}
+        if ((capacity_enabled and not capacity_modes) or (cash_low_enabled and not cash_low_modes)
+                or len(set(capacity_modes)) != len(capacity_modes)
+                or len(set(cash_low_modes)) != len(cash_low_modes)
+                or not set(capacity_modes) <= valid_modes or not set(cash_low_modes) <= valid_modes):
+            raise ValueError("告警适用状态至少选择一项，且不能重复")
         stamina_full_enabled = current["stamina_full_enabled"] if stamina_full_enabled is None else stamina_full_enabled
         stall_sold_enabled = current["stall_sold_enabled"] if stall_sold_enabled is None else stall_sold_enabled
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO bark_settings(account_id,device_key,enabled,call_enabled,repeat_minutes,notify_after,
-                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,
-                   stall_sold_enabled,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,
+                   capacity_enabled,cash_low_enabled,capacity_modes_json,cash_low_modes_json,
+                   stamina_full_enabled,stall_sold_enabled,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
                    device_key=excluded.device_key,enabled=excluded.enabled,
                    call_enabled=excluded.call_enabled,repeat_minutes=excluded.repeat_minutes,
                    notify_after=excluded.notify_after,local_alert_enabled=excluded.local_alert_enabled,
                    web_sound_enabled=excluded.web_sound_enabled,capacity_threshold=excluded.capacity_threshold,
                    cash_threshold_wan=excluded.cash_threshold_wan,
+                   capacity_enabled=excluded.capacity_enabled,cash_low_enabled=excluded.cash_low_enabled,
+                   capacity_modes_json=excluded.capacity_modes_json,
+                   cash_low_modes_json=excluded.cash_low_modes_json,
                    stamina_full_enabled=excluded.stamina_full_enabled,
                    stall_sold_enabled=excluded.stall_sold_enabled,
                    updated_at=excluded.updated_at""",
                 (account_id, stored_key, int(enabled), int(call_enabled), repeat_minutes, notify_after,
                  int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, cash_threshold_wan,
-                 int(stamina_full_enabled), int(stall_sold_enabled), now),
+                 int(capacity_enabled), int(cash_low_enabled), json.dumps(capacity_modes),
+                 json.dumps(cash_low_modes), int(stamina_full_enabled), int(stall_sold_enabled), now),
             )
         return self.get_bark_settings(account_id)
+
+    def threshold_alert_allowed(self, account_id: int, event_type: str,
+                                character_id: str | None, reported_mode: str | None) -> bool:
+        settings = self.get_bark_settings(account_id)
+        if event_type in {"inventory_full", "inventory_capacity"}:
+            enabled, modes = settings["capacity_enabled"], settings["capacity_modes"]
+        elif event_type == "cash_low":
+            enabled, modes = settings["cash_low_enabled"], settings["cash_low_modes"]
+        else:
+            return True
+        if not enabled:
+            return False
+        mode = reported_mode if isinstance(reported_mode, str) and reported_mode in {"buy", "sell", "unknown"} else None
+        if mode is None and character_id:
+            with self._connect() as connection:
+                role = connection.execute("""SELECT stall_mode FROM game_role_accounts
+                    WHERE account_id=? AND character_id=?""", (account_id, character_id)).fetchone()
+            mode = str(role["stall_mode"]) if role else None
+        return (mode or "unknown") in modes
 
     def bark_notification_for_event(self, account_id: int, event_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1215,6 +1265,10 @@ class RelayDatabase:
                 "local_alert_enabled": alerts["local_alert_enabled"],
                 "capacity_threshold": alerts["capacity_threshold"],
                 "cash_threshold_wan": alerts["cash_threshold_wan"],
+                "capacity_enabled": alerts["capacity_enabled"],
+                "cash_low_enabled": alerts["cash_low_enabled"],
+                "capacity_modes": alerts["capacity_modes"],
+                "cash_low_modes": alerts["cash_low_modes"],
                 "stamina_full_enabled": alerts["stamina_full_enabled"],
                 "stall_sold_enabled": alerts["stall_sold_enabled"],
             },

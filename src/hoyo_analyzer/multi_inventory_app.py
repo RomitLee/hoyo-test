@@ -89,6 +89,7 @@ class MonitorSession:
     output_detail: QLabel
     output_occlusion: QLabel
     monitor_session_id: str = field(default_factory=lambda: uuid4().hex)
+    stall_mode: str = "unknown"
     last_image: Any | None = None
     last_signal: dict[str, Any] | None = None
     last_analysis_at: float | None = None
@@ -135,6 +136,10 @@ class InventoryMonitorWindow(QMainWindow):
         self._local_alert_enabled = False
         self._capacity_threshold = 0
         self._cash_threshold_wan = 500
+        self._capacity_enabled = True
+        self._cash_low_enabled = True
+        self._capacity_modes = frozenset({"buy"})
+        self._cash_low_modes = frozenset({"buy"})
         self._shown_local_alerts: set[int] = set()
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
@@ -472,8 +477,10 @@ class InventoryMonitorWindow(QMainWindow):
         self.monitoring_button.setStyleSheet("")
         for session in self.sessions.values():
             session.monitor_session_id = uuid4().hex
+            session.stall_mode = "unknown"
             session.capacity_alert_active = False
             session.capacity_candidate_since = None
+            session.cash_alert_active = False
             session.occlusion_alert_active = False
             session.occlusion_candidate_since = None
             session.worker.set_paused(False)
@@ -640,17 +647,35 @@ class InventoryMonitorWindow(QMainWindow):
         cash_threshold = raw.get("cash_threshold_wan")
         if not isinstance(cash_threshold, int) or isinstance(cash_threshold, bool) or not 1 <= cash_threshold <= 99999999:
             return
-        cash_threshold_changed = cash_threshold != self._cash_threshold_wan
-        changed = (local, threshold, cash_threshold) != (
-            self._local_alert_enabled, self._capacity_threshold, self._cash_threshold_wan)
+        valid_modes = {"buy", "sell", "unknown"}
+        capacity_modes = raw.get("capacity_modes", list(self._capacity_modes))
+        cash_low_modes = raw.get("cash_low_modes", list(self._cash_low_modes))
+        if (not isinstance(capacity_modes, list)
+                or not isinstance(cash_low_modes, list)
+                or any(not isinstance(mode, str) or mode not in valid_modes for mode in capacity_modes + cash_low_modes)):
+            return
+        capacity_enabled = raw.get("capacity_enabled", self._capacity_enabled) is True
+        cash_low_enabled = raw.get("cash_low_enabled", self._cash_low_enabled) is True
+        new_capacity_modes = frozenset(capacity_modes)
+        new_cash_low_modes = frozenset(cash_low_modes)
+        capacity_changed = (threshold, capacity_enabled, new_capacity_modes) != (
+            self._capacity_threshold, self._capacity_enabled, self._capacity_modes)
+        cash_changed = (cash_threshold, cash_low_enabled, new_cash_low_modes) != (
+            self._cash_threshold_wan, self._cash_low_enabled, self._cash_low_modes)
+        changed = local != self._local_alert_enabled or capacity_changed or cash_changed
         self._local_alert_enabled = local
         self._capacity_threshold = threshold
         self._cash_threshold_wan = cash_threshold
+        self._capacity_enabled = capacity_enabled
+        self._cash_low_enabled = cash_low_enabled
+        self._capacity_modes = new_capacity_modes
+        self._cash_low_modes = new_cash_low_modes
         if changed:
             for session in self.sessions.values():
-                session.capacity_alert_active = False
-                session.capacity_candidate_since = None
-                if cash_threshold_changed:
+                if capacity_changed:
+                    session.capacity_alert_active = False
+                    session.capacity_candidate_since = None
+                if cash_changed:
                     session.cash_alert_active = False
             if not local:
                 for alert in tuple(self.alerts):
@@ -771,6 +796,10 @@ class InventoryMonitorWindow(QMainWindow):
         self._local_alert_enabled = False
         self._capacity_threshold = 0
         self._cash_threshold_wan = 500
+        self._capacity_enabled = True
+        self._cash_low_enabled = True
+        self._capacity_modes = frozenset({"buy"})
+        self._cash_low_modes = frozenset({"buy"})
         self._shown_local_alerts.clear()
         self.scan_timer.stop()
         self.window_state_timer.stop()
@@ -854,7 +883,8 @@ class InventoryMonitorWindow(QMainWindow):
                 confidence=confidence,
                 occlusion_percent=occlusion_percent,
                 minimized=minimized,
-                details=details,
+                details=({**(details or {}), "stall_mode": session.stall_mode}
+                         if event_type in {"inventory_full", "inventory_capacity", "cash_low"} else details),
             )
         )
         self.log.appendPlainText(f"正在发送云端告警：{session.account.secondary_region} / {session.account.role_name}")
@@ -1066,6 +1096,13 @@ class InventoryMonitorWindow(QMainWindow):
             return
         session.last_signal = signal
         session.last_analysis_at = monotonic()
+        observed_stall = signal.get("stall_panel_type")
+        new_mode = "buy" if observed_stall == "stall_buy" else "sell" if observed_stall == "stall" else None
+        if new_mode and new_mode != session.stall_mode:
+            session.stall_mode = new_mode
+            session.capacity_alert_active = False
+            session.capacity_candidate_since = None
+            session.cash_alert_active = False
         reason = str(signal.get("money_reason") or "等待金额识别")
         cash = signal.get("cash")
         session.output_detail.setToolTip(
@@ -1099,6 +1136,10 @@ class InventoryMonitorWindow(QMainWindow):
     def _update_capacity_alert(
         self, session: MonitorSession, signal: dict[str, Any], observed_at: float | None = None
     ) -> None:
+        if not self._capacity_enabled or session.stall_mode not in self._capacity_modes:
+            session.capacity_alert_active = False
+            session.capacity_candidate_since = None
+            return
         if str(signal.get("status", "")) not in {"full", "almost_full", "not_full"}:
             session.capacity_alert_active = False
             session.capacity_candidate_since = None
@@ -1144,6 +1185,9 @@ class InventoryMonitorWindow(QMainWindow):
             )
 
     def _update_cash_alert(self, session: MonitorSession, signal: dict[str, Any]) -> None:
+        if not self._cash_low_enabled or session.stall_mode not in self._cash_low_modes:
+            session.cash_alert_active = False
+            return
         # MoneyTracker retains old confirmed values while the amount is unreadable.
         # Only a freshly readable value may start or clear a low-cash alert.
         cash = signal.get("cash")
