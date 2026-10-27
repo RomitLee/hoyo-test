@@ -509,7 +509,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
                 <div v-if="item.stamina_estimate != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
-                  <span>预计体力 {{ item.stamina_estimate }}/{{ item.stamina_max }} <small>上次实测 {{ item.stamina_current }}/{{ item.stamina_max }} · 每 5 分钟 +{{ item.stamina_recovery_per_5m }} · 观测于 {{ time(item.stamina_observed_at) }} · {{ item.role_online ? '假设持续在线' : '离线后暂停估算，需复核' }}</small></span>
+                  <span>预计体力 {{ item.stamina_estimate }}/{{ item.stamina_max }} <small>上次实测 {{ item.stamina_current }}/{{ item.stamina_max }} · 观测于 {{ time(item.stamina_observed_at) }}<template v-if="!item.role_online"> · 离线后暂停估算，需复核</template></small></span>
                   <strong :class="{ full: item.stamina_estimate >= item.stamina_max }">{{ item.stamina_estimate >= item.stamina_max ? '体力已满（预测）' : `预计满体力：${time(item.stamina_full_at)}` }}</strong>
                 </div>
               </article>
