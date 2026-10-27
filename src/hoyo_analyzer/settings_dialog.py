@@ -31,7 +31,7 @@ class SlaveSettingsDialog(QDialog):
         form.addRow("当前状态：", self.binding_status_label)
         root.addWidget(group)
 
-        note = QLabel("手机推送、本机报警、电脑网页提示音、背包空格、游戏币和体力满提醒，统一在后台管理系统的设置页面配置。")
+        note = QLabel("手机推送、本机报警、电脑网页提示音、背包空格、游戏币、体力满与商品售出提醒，统一在后台设置。")
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{MUTED};padding:4px 0;")
         root.addWidget(note)

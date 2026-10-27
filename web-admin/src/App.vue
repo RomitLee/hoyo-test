@@ -7,11 +7,11 @@ import { estimateStamina } from './stamina'
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
-type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; device: Device }
+type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; stall_mode?: 'buy' | 'sell' | 'unknown'; sell_stock_count?: number | null; device: Device }
 type RoleCard = RoleStatus & { stamina_estimate: number | null }
-type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number; payload?: { details?: { cash?: number; threshold_wan?: number; source?: string } } }
+type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number; payload?: { details?: { cash?: number; threshold_wan?: number; source?: string; previous_count?: number; current_count?: number; sold_count?: number } } }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
-type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; stamina_full_enabled: boolean; configured?: boolean; masked_key?: string }
+type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; stamina_full_enabled: boolean; stall_sold_enabled: boolean; configured?: boolean; masked_key?: string }
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
 
 const pages: { key: Page; label: string; hint: string }[] = [
@@ -22,8 +22,8 @@ const pages: { key: Page; label: string; hint: string }[] = [
   { key: 'settings', label: '设置', hint: '上报与通知' },
 ]
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
-const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
-const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '摊位面板', stall_records: '摊位记录面板' }
+const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', stall_sold: '商品售出', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
+const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '卖货摊位', stall_buy: '收货摊位', stall_records: '摊位记录面板' }
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
 
 const page = ref<Page>('monitor')
@@ -47,7 +47,7 @@ const logCursor = ref(0)
 const logNext = ref(0)
 const filter = reactive({ event_type: '', panel_type: '' })
 const policy = reactive<Policy>({ occlusion_enabled: true, occlusion_percent: 60, occlusion_seconds: 5 })
-const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0, cash_threshold_wan: 500, stamina_full_enabled: false })
+const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0, cash_threshold_wan: 500, stamina_full_enabled: false, stall_sold_enabled: false })
 const barkKey = ref('')
 const preview = ref('')
 const previewError = ref('')
@@ -79,6 +79,11 @@ const windows = computed<RoleCard[]>(() => roles.value.map(role => ({ ...role,
   device: devices.value.find(device => device.device_id === role.device_id) || { device_id: role.device_id || '' },
   stamina_estimate: estimateStamina(role, nowMs.value),
 })).sort((a, b) => Number(b.role_online) - Number(a.role_online) || (b.received_at || b.first_seen_at || '').localeCompare(a.received_at || a.first_seen_at || '')))
+const stallGroups = computed(() => [
+  { key: 'buy', title: '收货', items: windows.value.filter(item => item.stall_mode === 'buy') },
+  { key: 'sell', title: '出货', items: windows.value.filter(item => item.stall_mode === 'sell') },
+  { key: 'unknown', title: '未知状态', items: windows.value.filter(item => !item.stall_mode || item.stall_mode === 'unknown') },
+])
 const snapshotKey = (item: RoleStatus) => item.character_id || `${item.device_id}:${item.window_id}`
 
 async function snapshotUrl(deviceId: string, windowId: string) {
@@ -369,6 +374,12 @@ function logLabel(item: Log): string {
 
 function alertLabel(item: Alert): string {
   if (item.event_type === 'stamina_full') return `体力已满（${item.payload?.details?.source === 'measured' ? '实测' : '预测'}）`
+  if (item.event_type === 'stall_sold') {
+    const details = item.payload?.details
+    return details?.previous_count != null && details.current_count != null
+      ? `商品售出：在售 ${details.previous_count}→${details.current_count} 件，减少 ${details.sold_count ?? '—'} 件`
+      : '商品售出'
+  }
   if (item.event_type !== 'cash_low') return alertLabels[item.event_type] || item.event_type
   const cash = item.payload?.details?.cash
   const threshold = item.payload?.details?.threshold_wan
@@ -443,6 +454,7 @@ async function saveBark() {
       local_alert_enabled: bark.local_alert_enabled, web_sound_enabled: bark.web_sound_enabled,
       capacity_threshold: bark.capacity_threshold, cash_threshold_wan: bark.cash_threshold_wan,
       stamina_full_enabled: bark.stamina_full_enabled,
+      stall_sold_enabled: bark.stall_sold_enabled,
       ...(key ? { device_key: key } : {}) }
     Object.assign(bark, await api<Bark>('/api/v1/master/notifications/bark', json('PUT', data)))
     webSound.value = bark.web_sound_enabled
@@ -494,10 +506,11 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
 
         <template v-if="page === 'monitor'">
           <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
-          <Panel title="窗口画面" :meta="`${windows.length} 个窗口 · 状态约 5 秒刷新 · 截图每 ${snapshotInterval} 分钟`">
-            <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
+          <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
+          <Panel v-for="group in stallGroups" :key="group.key" :title="group.title" :meta="`${group.items.length} 个角色 · 截图每 ${snapshotInterval} 分钟`">
+            <div v-if="!group.items.length" class="empty">暂无{{ group.title }}角色</div>
             <div v-else class="snapshot-grid">
-              <article v-for="item in windows" :key="snapshotKey(item)" class="snapshot-card">
+              <article v-for="item in group.items" :key="snapshotKey(item)" class="snapshot-card">
                 <div class="snapshot-identity" :title="`${item.server_name || '未知区服'} / ${item.role_name || '未知角色'} · ${item.device_name || item.device.device_id}`">
                   <strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong>
                   <span>· {{ item.device_name || item.device.display_name || item.device.hostname || item.device.device_id }}</span>
@@ -510,6 +523,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
                 <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer" @error="thumbnailError(item)"><span v-else>截图加载中…</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
+                <div v-if="item.stall_mode === 'sell'" class="snapshot-details"><span>在售商品 {{ item.sell_stock_count == null ? '待识别' : `${item.sell_stock_count} 件` }}</span><small>卖货摊位第一页</small></div>
                 <div v-if="item.stamina_estimate != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
                   <span>预计体力 {{ item.stamina_estimate }}/{{ item.stamina_max }} <small>上次实测 {{ item.stamina_current }}/{{ item.stamina_max }} · 观测于 {{ time(item.stamina_observed_at) }}<template v-if="!item.role_online"> · 离线后暂停估算，需复核</template></small></span>
                   <strong :class="{ full: item.stamina_estimate >= item.stamina_max }">{{ item.stamina_estimate >= item.stamina_max ? '体力已满（预测）' : `预计满体力：${time(item.stamina_full_at)}` }}</strong>
@@ -533,6 +547,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
             <label>背包剩余空格提醒阈值<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required></label>
             <label>游戏币低于（万）<input v-model.number="bark.cash_threshold_wan" type="number" min="1" max="99999999" step="1" required></label>
             <label class="check"><input v-model="bark.stamina_full_enabled" type="checkbox"> 体力满提醒（实测已满或持续监控下预测满）</label>
+            <label class="check"><input v-model="bark.stall_sold_enabled" type="checkbox"> 商品售出提醒（已确认在售数量减少）</label>
             <p class="hint">达到阈值的告警始终记录在后台；上方三个开关只控制提醒送达方式。网页提示音需要保持网页打开，并允许当前浏览器播放声音。</p>
             <label class="check"><input v-model="bark.call_enabled" type="checkbox"> 手机连续呼叫</label>
             <label>手机重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label>

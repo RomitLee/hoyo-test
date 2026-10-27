@@ -29,6 +29,7 @@ from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
 from .screenshots import capture_panel_screenshot
 from .stamina import StaminaDetector, StaminaTracker
+from .stall_stock import StallStockDetector, StallStockTracker
 from .storage import JsonlEventSink
 from .wgc import is_window_available, is_window_minimized, list_capturable_windows
 
@@ -193,6 +194,8 @@ class InventoryMonitorWorker(QObject):
             money_tracker = MoneyTracker()
             stamina_detector = StaminaDetector()
             stamina_tracker = StaminaTracker()
+            stall_stock_detector = StallStockDetector()
+            stall_stock_tracker = StallStockTracker()
             money_character_id = parse_account_info(self.window_title).role_id
             last_panel_frame_ms: int | None = None
             sampler = AdaptiveSampler(
@@ -237,6 +240,7 @@ class InventoryMonitorWorker(QObject):
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
                     target_tracker.reset()
+                    stall_stock_tracker.reset()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
                     sampler = AdaptiveSampler(
@@ -257,6 +261,7 @@ class InventoryMonitorWorker(QObject):
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
                     target_tracker.reset()
+                    stall_stock_tracker.reset()
                     continue
                 now = monotonic()
                 if now - last_preview >= self.PREVIEW_INTERVAL_SECONDS:
@@ -270,21 +275,30 @@ class InventoryMonitorWorker(QObject):
                     if last_panel_frame_ms is not None and packet.timestamp_ms - last_panel_frame_ms > 1500:
                         panel_tracker.reset_pending()
                         target_tracker.reset()
+                        stall_stock_tracker.reset()
                     last_panel_frame_ms = packet.timestamp_ms
                     panel_events = panel_tracker.update(panel, packet.timestamp_ms, packet.frame_index)
+                    stall_panel = (panel.panel_type if panel.panel_type == panel_tracker.stable
+                                   and panel.panel_type in {"stall", "stall_buy"} else None)
                     if panel.panel_type not in {"inventory", "unknown"}:
                         analysis = InventoryAnalysis(InventoryStatus.CLOSED, panel.confidence, "another panel is foreground")
                     else:
                         analysis = detector.analyze(packet.image)
-                    signal = _analysis_signal(analysis)
-                    signal["panel_type"] = panel.panel_type
                     current_character_id = parse_account_info(self.window_title).role_id
-                    signal["character_id"] = current_character_id
                     if money_character_id != current_character_id:
                         money_tracker = MoneyTracker()
                         stamina_tracker = StaminaTracker()
                         target_tracker.reset()
+                        stall_stock_tracker.reset()
                         money_character_id = current_character_id
+                    signal = _analysis_signal(analysis)
+                    signal["panel_type"] = panel.panel_type
+                    signal["stall_panel_type"] = stall_panel
+                    signal["sell_stock_count"] = stall_stock_tracker.update(
+                        stall_stock_detector.count(packet.image, panel) if stall_panel == "stall" else None,
+                        packet.timestamp_ms,
+                    )
+                    signal["character_id"] = current_character_id
                     stamina = stamina_detector.analyze(packet.image, panel)
                     signal.update(stamina_tracker.update(stamina, packet.timestamp_ms))
                     reading = target_detector.analyze(packet.image, panel)

@@ -345,13 +345,14 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
             "/api/v1/master/notifications/bark", headers=master_headers(),
             json={"enabled": False, "local_alert_enabled": True,
                   "web_sound_enabled": True, "capacity_threshold": 3,
-                  "stamina_full_enabled": True},
+                  "stamina_full_enabled": True, "stall_sold_enabled": True},
         )
         assert saved.status_code == 200
         assert saved.json()["local_alert_enabled"] is True
         assert saved.json()["web_sound_enabled"] is True
         assert saved.json()["capacity_threshold"] == 3
         assert saved.json()["stamina_full_enabled"] is True
+        assert saved.json()["stall_sold_enabled"] is True
         assert saved.json()["cash_threshold_wan"] == 500
 
         heartbeat = client.post(
@@ -362,6 +363,7 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert heartbeat.json()["alert_settings"] == {
             "local_alert_enabled": True, "capacity_threshold": 3, "cash_threshold_wan": 500,
             "stamina_full_enabled": True,
+            "stall_sold_enabled": True,
         }
         assert "web_sound_enabled" not in heartbeat.json()["alert_settings"]
 
@@ -375,6 +377,7 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert legacy.json()["capacity_threshold"] == 3
         assert legacy.json()["cash_threshold_wan"] == 500
         assert legacy.json()["stamina_full_enabled"] is True
+        assert legacy.json()["stall_sold_enabled"] is True
 
         changed = client.put(
             "/api/v1/master/notifications/bark", headers=master_headers(),

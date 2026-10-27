@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
@@ -88,6 +88,7 @@ class MonitorSession:
     output_status: QLabel
     output_detail: QLabel
     output_occlusion: QLabel
+    monitor_session_id: str = field(default_factory=lambda: uuid4().hex)
     last_image: Any | None = None
     last_signal: dict[str, Any] | None = None
     last_analysis_at: float | None = None
@@ -134,7 +135,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._local_alert_enabled = False
         self._capacity_threshold = 0
         self._cash_threshold_wan = 500
-        self._shown_local_stamina_alerts: set[int] = set()
+        self._shown_local_alerts: set[int] = set()
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
         self._sounding_alerts: set[QMessageBox] = set()
@@ -470,6 +471,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.monitoring_button.setToolTip("暂停所有窗口的背包分析和告警")
         self.monitoring_button.setStyleSheet("")
         for session in self.sessions.values():
+            session.monitor_session_id = uuid4().hex
             session.capacity_alert_active = False
             session.capacity_candidate_since = None
             session.occlusion_alert_active = False
@@ -601,17 +603,23 @@ class InventoryMonitorWindow(QMainWindow):
     def _on_device_profile(self, data: dict[str, Any]) -> None:
         self._apply_alert_settings(data.get("alert_settings"))
         if self._authenticated and self._local_alert_enabled:
-            for alert in data.get("local_stamina_alerts") or []:
+            for alert in data.get("local_alerts", data.get("local_stamina_alerts")) or []:
                 if not isinstance(alert, dict) or not isinstance(alert.get("id"), int):
                     continue
                 event_id = alert["id"]
-                if event_id not in self._shown_local_stamina_alerts:
-                    self._shown_local_stamina_alerts.add(event_id)
+                if event_id not in self._shown_local_alerts:
+                    self._shown_local_alerts.add(event_id)
                     details = alert.get("details") or {}
-                    source = "属性面板实测" if details.get("source") == "measured" else "在线恢复预测"
                     account_label = f"{alert.get('server_name') or ''} / {alert.get('role_name') or ''}"
-                    self._show_alert(QMessageBox.Icon.Warning, "体力已满", f"{source}：体力已满，请及时处理。",
-                                     account_label, with_sound=True)
+                    if alert.get("event_type") == "stall_sold":
+                        sold = details.get("sold_count")
+                        message = f"在售商品由 {details.get('previous_count')} 件减至 {details.get('current_count')} 件，减少 {sold} 件。"
+                        self._show_alert(QMessageBox.Icon.Information, "商品售出", message,
+                                         account_label, with_sound=True)
+                    else:
+                        source = "属性面板实测" if details.get("source") == "measured" else "在线恢复预测"
+                        self._show_alert(QMessageBox.Icon.Warning, "体力已满", f"{source}：体力已满，请及时处理。",
+                                         account_label, with_sound=True)
                 self.relay_client.acknowledge_local_alert(event_id)
         name = str(data.get("display_name") or "").strip()
         if name and name != self.slave_settings.display_name:
@@ -763,7 +771,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._local_alert_enabled = False
         self._capacity_threshold = 0
         self._cash_threshold_wan = 500
-        self._shown_local_stamina_alerts.clear()
+        self._shown_local_alerts.clear()
         self.scan_timer.stop()
         self.window_state_timer.stop()
         self.occlusion_timer.stop()
@@ -1173,6 +1181,7 @@ class InventoryMonitorWindow(QMainWindow):
                 "occurred_at": event.payload["occurred_at"],
                 "window_id": f"hwnd:{hwnd}", "server_name": session.account.secondary_region,
                 "role_name": session.account.role_name, "character_id": session.account.role_id or None,
+                "monitor_session_id": session.monitor_session_id,
                 "panel_type": event.payload.get("panel_type"), "confidence": event.confidence,
                 "message": event.display_name,
                 **{key: event.payload[key] for key in ("target_name", "target_level", "target_confidence", "target_status")
@@ -1436,6 +1445,9 @@ class InventoryMonitorWindow(QMainWindow):
                     "server_name": session.account.secondary_region,
                     "role_name": session.account.role_name,
                     "character_id": session.account.role_id or None,
+                    "monitor_session_id": session.monitor_session_id,
+                    "stall_panel_type": signal.get("stall_panel_type"),
+                    "sell_stock_count": signal.get("sell_stock_count"),
                     "status": status,
                     "status_text": status_text,
                     "empty_slots": signal.get("empty_count"),

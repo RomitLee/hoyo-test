@@ -2,7 +2,8 @@
 
 PANEL_NAMES = {
     "inventory": "背包", "give": "给予面板", "trade": "交易面板",
-    "attributes": "属性面板", "stall": "摊位面板", "stall_records": "摊位记录面板",
+    "attributes": "属性面板", "stall": "卖货摊位", "stall_buy": "收货摊位",
+    "stall_records": "摊位记录面板",
 }
 
 

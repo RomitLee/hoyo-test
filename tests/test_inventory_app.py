@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.11.0"
+        assert __version__ == "V2.12.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -570,6 +570,32 @@ def test_server_stamina_alert_rings_current_device_once_and_acknowledges(monkeyp
         assert len(shown) == 1
         assert "体力已满" in shown[0][0][1]
         assert acknowledged == [42, 42]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_server_sold_alert_rings_current_device_once(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    shown = []
+    acknowledged = []
+    monkeypatch.setattr(window, "_show_alert", lambda *args, **kwargs: shown.append((args, kwargs)))
+    monkeypatch.setattr(window.relay_client, "acknowledge_local_alert", acknowledged.append)
+    window._authenticated = True
+    profile = {"alert_settings": {"local_alert_enabled": True, "capacity_threshold": 0,
+                                  "cash_threshold_wan": 500},
+               "local_alerts": [{"id": 43, "event_type": "stall_sold", "server_name": "秦淮风光",
+                                 "role_name": "清风知夏", "details": {"previous_count": 20,
+                                                                       "current_count": 19, "sold_count": 1}}]}
+    try:
+        window._on_device_profile(profile)
+        window._on_device_profile(profile)
+        assert len(shown) == 1
+        assert shown[0][0][1] == "商品售出"
+        assert "20" in shown[0][0][2] and "19" in shown[0][0][2]
+        assert acknowledged == [43, 43]
     finally:
         window.close()
         app.processEvents()

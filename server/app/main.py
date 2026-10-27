@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.20.0"
+VERSION = "2.21.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -151,6 +151,9 @@ class WindowStatusIn(BaseModel):
     server_name: str | None = Field(default=None, max_length=128)
     role_name: str | None = Field(default=None, max_length=128)
     character_id: str | None = Field(default=None, max_length=64)
+    monitor_session_id: str | None = Field(default=None, min_length=16, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
+    stall_panel_type: Literal["stall", "stall_buy"] | None = None
+    sell_stock_count: int | None = Field(default=None, ge=0, le=20, strict=True)
     status: str = Field(default="unknown", min_length=1, max_length=64)
     status_text: str | None = Field(default=None, max_length=128)
     empty_slots: int | None = Field(default=None, ge=0, le=20)
@@ -213,7 +216,8 @@ class MonitorLogIn(BaseModel):
     server_name: str | None = Field(default=None, max_length=128)
     role_name: str | None = Field(default=None, max_length=128)
     character_id: str | None = Field(default=None, max_length=64)
-    panel_type: Literal["inventory", "give", "trade", "attributes", "stall", "stall_records"] | None = None
+    monitor_session_id: str | None = Field(default=None, min_length=16, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
+    panel_type: Literal["inventory", "give", "trade", "attributes", "stall", "stall_buy", "stall_records"] | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     message: str | None = Field(default=None, max_length=128)
     target_name: str | None = Field(default=None, min_length=1, max_length=16)
@@ -237,6 +241,7 @@ class BarkSettingsIn(BaseModel):
     capacity_threshold: int | None = Field(default=None, ge=0, le=20, strict=True)
     cash_threshold_wan: int | None = Field(default=None, ge=1, le=99999999, strict=True)
     stamina_full_enabled: bool | None = None
+    stall_sold_enabled: bool | None = None
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -530,6 +535,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 capacity_threshold=payload.capacity_threshold,
                 cash_threshold_wan=payload.cash_threshold_wan,
                 stamina_full_enabled=payload.stamina_full_enabled,
+                stall_sold_enabled=payload.stall_sold_enabled,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -646,7 +652,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def acknowledge_local_alert(
         event_id: int, identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
     ) -> dict[str, bool]:
-        if not database.acknowledge_local_stamina_alert(identity.account_id, identity.device_id, event_id):
+        if not database.acknowledge_local_alert(identity.account_id, identity.device_id, event_id):
             raise HTTPException(status_code=404, detail="告警不存在")
         return {"acknowledged": True}
 
@@ -672,6 +678,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
     ) -> dict[str, Any]:
         device_id = identity.device_id
+        for window in payload.windows:
+            if (window.sell_stock_count is not None and window.stall_panel_type != "stall"
+                    or window.stall_panel_type is not None and window.monitor_session_id is None):
+                raise HTTPException(status_code=422, detail="摊位商品状态缺少有效监控会话或卖货面板")
         database.upsert_device(device_id, hostname=None, app_version=None,
                                ip_address=request.client.host if request.client else None)
         received_at = database.replace_window_status(
@@ -716,9 +726,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = database.screenshot_log(identity.account_id, identity.device_id, event_id)
         if not row:
             raise HTTPException(status_code=404, detail="对应监控日志尚未接收")
-        if (row["panel_type"] not in {"give", "trade", "attributes"}
+        if (row["panel_type"] not in {"give", "trade", "attributes", "stall", "stall_buy"}
                 or row["event_type"] not in {"panel_opened", "panel_target_changed"}
-                or row["panel_type"] == "attributes" and row["event_type"] != "panel_opened"):
+                or row["panel_type"] in {"attributes", "stall", "stall_buy"} and row["event_type"] != "panel_opened"):
             raise HTTPException(status_code=422, detail="该面板日志不支持上传截图")
         if not app.state.screenshots.configured:
             raise HTTPException(status_code=503, detail="截图存储暂未配置")

@@ -177,6 +177,7 @@ class RelayDatabase:
                     capacity_threshold INTEGER NOT NULL DEFAULT 0,
                     cash_threshold_wan INTEGER NOT NULL DEFAULT 500,
                     stamina_full_enabled INTEGER NOT NULL DEFAULT 0,
+                    stall_sold_enabled INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
                 );
@@ -204,6 +205,7 @@ class RelayDatabase:
             self._ensure_column(connection, "bark_settings", "capacity_threshold", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "cash_threshold_wan", "INTEGER NOT NULL DEFAULT 500")
             self._ensure_column(connection, "bark_settings", "stamina_full_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "bark_settings", "stall_sold_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
             self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
             self._ensure_column(connection, "monitor_logs", "message", "TEXT")
@@ -220,6 +222,10 @@ class RelayDatabase:
             self._ensure_column(connection, "live_snapshot_history", "event_type", "TEXT")
             for name in ("last_device_id", "last_window_id", "last_seen_at"):
                 self._ensure_column(connection, "game_role_accounts", name, "TEXT")
+            self._ensure_column(connection, "game_role_accounts", "monitor_session_id", "TEXT")
+            self._ensure_column(connection, "game_role_accounts", "stall_mode", "TEXT NOT NULL DEFAULT 'unknown'")
+            self._ensure_column(connection, "game_role_accounts", "sell_stock_count", "INTEGER")
+            self._ensure_column(connection, "game_role_accounts", "sell_stock_observed_at", "TEXT")
             now = utc_now()
             cash_ledger.initialize(connection)
             connection.execute(
@@ -699,6 +705,66 @@ class RelayDatabase:
             last_window_id=CASE WHEN excluded.last_seen_at>=COALESCE(game_role_accounts.last_seen_at,'') THEN excluded.last_window_id ELSE game_role_accounts.last_window_id END,
             last_seen_at=MAX(COALESCE(game_role_accounts.last_seen_at,''),excluded.last_seen_at)""",
             (character_id, account_id, device_id, payload.get("window_id"), seen_at))
+        RelayDatabase._update_stall_role_state(connection, account_id, device_id, payload, seen_at)
+
+    @staticmethod
+    def _update_stall_role_state(connection: sqlite3.Connection, account_id: int, device_id: str,
+                                 payload: dict[str, Any], seen_at: str) -> None:
+        session_id = str(payload.get("monitor_session_id") or "")
+        character_id = str(payload.get("character_id") or "")
+        if (not session_id or not character_id or payload.get("monitoring") is False
+                or payload.get("minimized") is True
+                or payload.get("status") in {"paused", "minimized", "window_closed", "removing"}):
+            return
+        panel = payload.get("stall_panel_type")
+        if payload.get("event_type") == "panel_opened":
+            panel = payload.get("panel_type") if payload.get("panel_type") in {"stall", "stall_buy"} else None
+            try:
+                event_time = datetime.fromisoformat(str(payload["occurred_at"]))
+                if event_time.tzinfo is None or not -120 <= (datetime.fromisoformat(seen_at) - event_time).total_seconds() <= 30:
+                    return  # Delayed outbox entries may add history, never change the current role state.
+            except (KeyError, ValueError, TypeError):
+                return
+        if panel not in {"stall", "stall_buy"}:
+            panel = None
+        amount = payload.get("sell_stock_count") if panel == "stall" else None
+        if isinstance(amount, bool) or not isinstance(amount, int) or not 0 <= amount <= 20:
+            amount = None
+        previous = connection.execute("""SELECT monitor_session_id,stall_mode,sell_stock_count
+            FROM game_role_accounts WHERE account_id=? AND character_id=?""",
+            (account_id, character_id)).fetchone()
+        if previous is None:
+            return
+        new_session = previous["monitor_session_id"] != session_id
+        previous_mode = "unknown" if new_session else previous["stall_mode"]
+        previous_count = None if new_session or previous_mode != "sell" else previous["sell_stock_count"]
+        mode = "buy" if panel == "stall_buy" else "sell" if panel == "stall" else previous_mode
+        current_count = (None if mode != "sell" else amount if amount is not None
+                         else previous_count if previous_mode == "sell" else None)
+        connection.execute("""UPDATE game_role_accounts SET monitor_session_id=?,stall_mode=?,
+            sell_stock_count=?,sell_stock_observed_at=CASE WHEN ? IS NOT NULL THEN ?
+                WHEN ? THEN NULL ELSE sell_stock_observed_at END
+            WHERE account_id=? AND character_id=?""",
+            (session_id, mode, current_count, amount, seen_at,
+             int(new_session or mode != "sell" or previous_mode != "sell"), account_id, character_id))
+        if (panel != "stall" or amount is None or previous_count is None or previous_mode != "sell"
+                or amount >= previous_count):
+            return
+        settings = connection.execute("""SELECT stall_sold_enabled,local_alert_enabled
+            FROM bark_settings WHERE account_id=?""", (account_id,)).fetchone()
+        if settings is None or not settings["stall_sold_enabled"]:
+            return
+        details = {"previous_count": previous_count, "current_count": amount,
+                   "sold_count": previous_count - amount}
+        event = {"event_id": uuid4().hex, "event_type": "stall_sold", "occurred_at": seen_at,
+                 "server_name": payload.get("server_name"), "role_name": payload.get("role_name"),
+                 "character_id": character_id, "details": details}
+        connection.execute("""INSERT INTO events(account_id,device_id,client_event_id,event_type,
+            server_name,role_name,character_id,occurred_at,received_at,payload_json,local_delivered_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (account_id, device_id, event["event_id"], "stall_sold", event["server_name"],
+             event["role_name"], character_id, seen_at, seen_at, json.dumps(event, ensure_ascii=False),
+             None if settings["local_alert_enabled"] else seen_at))
 
     @staticmethod
     def _upsert_role_vitals(connection: sqlite3.Connection, account_id: int, device_id: str,
@@ -1012,7 +1078,7 @@ class RelayDatabase:
     def get_bark_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,updated_at FROM bark_settings WHERE account_id=?",
+                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,stall_sold_enabled,updated_at FROM bark_settings WHERE account_id=?",
                 (account_id,),
             ).fetchone()
         if row is None:
@@ -1022,6 +1088,7 @@ class RelayDatabase:
                 "local_alert_enabled": False, "web_sound_enabled": False, "capacity_threshold": 0,
                 "cash_threshold_wan": 500,
                 "stamina_full_enabled": False,
+                "stall_sold_enabled": False,
             }
         item = dict(row)
         item["enabled"] = bool(item["enabled"])
@@ -1029,6 +1096,7 @@ class RelayDatabase:
         item["local_alert_enabled"] = bool(item["local_alert_enabled"])
         item["web_sound_enabled"] = bool(item["web_sound_enabled"])
         item["stamina_full_enabled"] = bool(item["stamina_full_enabled"])
+        item["stall_sold_enabled"] = bool(item["stall_sold_enabled"])
         return item
 
     def update_bark_settings(
@@ -1037,6 +1105,7 @@ class RelayDatabase:
         local_alert_enabled: bool | None = None, web_sound_enabled: bool | None = None,
         capacity_threshold: int | None = None, cash_threshold_wan: int | None = None,
         stamina_full_enabled: bool | None = None,
+        stall_sold_enabled: bool | None = None,
     ) -> dict[str, Any]:
         current = self.get_bark_settings(account_id)
         stored_key = current["device_key"] if device_key is None else device_key
@@ -1051,21 +1120,24 @@ class RelayDatabase:
         capacity_threshold = current["capacity_threshold"] if capacity_threshold is None else capacity_threshold
         cash_threshold_wan = current["cash_threshold_wan"] if cash_threshold_wan is None else cash_threshold_wan
         stamina_full_enabled = current["stamina_full_enabled"] if stamina_full_enabled is None else stamina_full_enabled
+        stall_sold_enabled = current["stall_sold_enabled"] if stall_sold_enabled is None else stall_sold_enabled
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO bark_settings(account_id,device_key,enabled,call_enabled,repeat_minutes,notify_after,
-                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,stamina_full_enabled,
+                   stall_sold_enabled,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
                    device_key=excluded.device_key,enabled=excluded.enabled,
                    call_enabled=excluded.call_enabled,repeat_minutes=excluded.repeat_minutes,
                    notify_after=excluded.notify_after,local_alert_enabled=excluded.local_alert_enabled,
                    web_sound_enabled=excluded.web_sound_enabled,capacity_threshold=excluded.capacity_threshold,
                    cash_threshold_wan=excluded.cash_threshold_wan,
                    stamina_full_enabled=excluded.stamina_full_enabled,
+                   stall_sold_enabled=excluded.stall_sold_enabled,
                    updated_at=excluded.updated_at""",
                 (account_id, stored_key, int(enabled), int(call_enabled), repeat_minutes, notify_after,
                  int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, cash_threshold_wan,
-                 int(stamina_full_enabled), now),
+                 int(stamina_full_enabled), int(stall_sold_enabled), now),
             )
         return self.get_bark_settings(account_id)
 
@@ -1109,21 +1181,21 @@ class RelayDatabase:
                 (utc_now(), event_id),
             )
 
-    def pending_local_stamina_alerts(self, account_id: int, device_id: str) -> list[dict[str, Any]]:
+    def pending_local_alerts(self, account_id: int, device_id: str) -> list[dict[str, Any]]:
         cutoff = (datetime.now(UTC) - timedelta(minutes=5)).isoformat(timespec="milliseconds")
         with self._connect() as connection:
-            rows = connection.execute("""SELECT id,role_name,server_name,payload_json FROM events
-                WHERE account_id=? AND device_id=? AND event_type='stamina_full'
+            rows = connection.execute("""SELECT id,event_type,role_name,server_name,payload_json FROM events
+                WHERE account_id=? AND device_id=? AND event_type IN ('stamina_full','stall_sold')
                 AND local_delivered_at IS NULL AND occurred_at>=?
                 ORDER BY id LIMIT 10""", (account_id, device_id, cutoff)).fetchall()
-        return [{"id": row["id"], "role_name": row["role_name"],
+        return [{"id": row["id"], "event_type": row["event_type"], "role_name": row["role_name"],
                  "server_name": row["server_name"], "details": json.loads(row["payload_json"]).get("details", {})}
                 for row in rows]
 
-    def acknowledge_local_stamina_alert(self, account_id: int, device_id: str, event_id: int) -> bool:
+    def acknowledge_local_alert(self, account_id: int, device_id: str, event_id: int) -> bool:
         with self._connect() as connection:
             cursor = connection.execute("""UPDATE events SET local_delivered_at=COALESCE(local_delivered_at,?)
-                WHERE id=? AND account_id=? AND device_id=? AND event_type='stamina_full'""",
+                WHERE id=? AND account_id=? AND device_id=? AND event_type IN ('stamina_full','stall_sold')""",
                 (utc_now(), event_id, account_id, device_id))
         return cursor.rowcount > 0
 
@@ -1136,6 +1208,7 @@ class RelayDatabase:
         if row is None:
             return {}
         alerts = self.get_bark_settings(account_id)
+        local_alerts = self.pending_local_alerts(account_id, device_id) if alerts["local_alert_enabled"] else []
         return {
             "display_name": str(row["display_name"] or row["hostname"] or device_id),
             "alert_settings": {
@@ -1143,9 +1216,10 @@ class RelayDatabase:
                 "capacity_threshold": alerts["capacity_threshold"],
                 "cash_threshold_wan": alerts["cash_threshold_wan"],
                 "stamina_full_enabled": alerts["stamina_full_enabled"],
+                "stall_sold_enabled": alerts["stall_sold_enabled"],
             },
-            "local_stamina_alerts": (self.pending_local_stamina_alerts(account_id, device_id)
-                                     if alerts["local_alert_enabled"] else []),
+            "local_stamina_alerts": [item for item in local_alerts if item["event_type"] == "stamina_full"],
+            "local_alerts": local_alerts,
         }
 
     def list_devices(self, account_id: int) -> list[dict[str, Any]]:
@@ -1186,7 +1260,8 @@ class RelayDatabase:
         """One account-visible card per globally unique game ID, across all devices."""
         with self._connect() as connection:
             registered = connection.execute("""SELECT r.character_id,r.server_name,r.role_name,r.first_seen_at,
-                a.last_device_id,a.last_window_id,a.last_seen_at
+                a.last_device_id,a.last_window_id,a.last_seen_at,a.stall_mode,a.sell_stock_count,
+                a.sell_stock_observed_at
                 FROM game_roles r JOIN game_role_accounts a ON a.character_id=r.character_id
                 WHERE a.account_id=?""", (account_id,)).fetchall()
             shots = connection.execute("""SELECT id,character_id,device_id,window_id,captured_at,event_type FROM (
@@ -1227,6 +1302,9 @@ class RelayDatabase:
                 "device_name": device.get("display_name") or device.get("hostname") or "曾监控的从机",
                 "role_online": bool(window.get("role_online")),
                 "first_seen_at": role["first_seen_at"], "received_at": window.get("received_at") or role["last_seen_at"],
+                "stall_mode": role["stall_mode"] or "unknown",
+                "sell_stock_count": role["sell_stock_count"] if role["stall_mode"] == "sell" else None,
+                "sell_stock_observed_at": role["sell_stock_observed_at"] if role["stall_mode"] == "sell" else None,
                 "screenshot_at": shot["captured_at"] if shot else window.get("screenshot_at"),
                 "screenshot_id": shot["id"] if shot else None,
                 "screenshot_event_type": shot["event_type"] if shot else None,

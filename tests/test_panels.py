@@ -25,7 +25,7 @@ def test_panel_transition_records_beijing_time_once_and_retains_identity():
     assert event_to_dict(opened[0])["event_type"] == "panel_opened"
     assert confirm(tracker, "inventory", 600, 20) == []
     switched = confirm(tracker, "stall", 5000)
-    assert [event.display_name for event in switched] == ["打开摊位面板"]
+    assert [event.display_name for event in switched] == ["打开卖货摊位"]
     assert switched[0].event_id != opened[0].event_id
 
 
