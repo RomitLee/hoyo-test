@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from PIL import Image, UnidentifiedImageError
 
 MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
+VIEW_URL_EXPIRES_SECONDS = 60 * 60
 
 
 def validate_jpeg(data: bytes) -> None:
@@ -66,7 +67,7 @@ class ScreenshotStore:
 
     def signed_url(self, key: str):
         return self._client(custom=True).get_presigned_url(
-            Bucket=self.settings.cos_bucket, Key=key, Method="GET", Expired=300
+            Bucket=self.settings.cos_bucket, Key=key, Method="GET", Expired=VIEW_URL_EXPIRES_SECONDS
         )
 
     def signed_put_url(self, key: str):

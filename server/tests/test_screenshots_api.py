@@ -107,7 +107,7 @@ def test_capture_retry_and_initial_ocr_confirmation_share_one_screenshot(client)
     assert len(rows) == 1 and rows[0]["screenshot_ready"] == 1
     assert len(client.app.state.screenshots.images) == 1
     response = client.get(f"/api/v1/master/monitor-logs/{rows[0]['id']}/screenshot", headers=MASTER)
-    assert response.status_code == 200 and response.json()["expires_in"] == 300
+    assert response.status_code == 200 and response.json()["expires_in"] == 3600
     report(
         client,
         "changed",

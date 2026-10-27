@@ -25,7 +25,7 @@ from .bark import BarkPushError, event_message, send_bark_notification
 from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
-from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
+from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
 VERSION = "2.17.0"
 WEB_ROOT = Path(__file__).parent / "web"
@@ -730,7 +730,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not app.state.screenshots.configured:
             raise HTTPException(status_code=503, detail="截图存储暂未配置")
         try:
-            return JSONResponse({"url": app.state.screenshots.signed_url(row["object_key"]), "expires_in": 300},
+            return JSONResponse({"url": app.state.screenshots.signed_url(row["object_key"]), "expires_in": VIEW_URL_EXPIRES_SECONDS},
                                 headers={"Cache-Control": "no-store"})
         except Exception:  # noqa: BLE001 - prevent SDK request credentials from reaching responses
             raise HTTPException(status_code=503, detail="暂时无法读取截图，请稍后重试") from None
@@ -913,7 +913,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             url = app.state.screenshots.signed_url(row["object_key"])
         except Exception:  # noqa: BLE001 - do not expose signing credentials
             raise HTTPException(status_code=503, detail="暂时无法读取截图") from None
-        return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": 300}, headers={"Cache-Control": "no-store"})
+        return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": VIEW_URL_EXPIRES_SECONDS}, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/master/live-screenshots/history")
     def live_history(character_id: str = Query(pattern=r"^\d{1,64}$"), before: int | None = Query(default=None, ge=1),
@@ -931,7 +931,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             url = app.state.screenshots.signed_url(row["object_key"])
         except Exception:  # noqa: BLE001 - do not expose COS signing details
             raise HTTPException(status_code=503, detail="暂时无法读取截图") from None
-        return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": 300},
+        return JSONResponse({"url": url, "captured_at": row["captured_at"], "expires_in": VIEW_URL_EXPIRES_SECONDS},
                             headers={"Cache-Control": "no-store"})
 
     return app
