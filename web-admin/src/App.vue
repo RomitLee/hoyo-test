@@ -2,11 +2,13 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import Panel from './components/Panel.vue'
 import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from './api'
+import { estimateStamina } from './stamina'
 
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
 type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; device: Device }
+type RoleCard = RoleStatus & { stamina_estimate: number | null }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
 type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; configured?: boolean; masked_key?: string }
@@ -35,6 +37,7 @@ const error = ref('')
 const notice = ref('')
 const connected = ref(false)
 const updatedAt = ref('')
+const nowMs = ref(Date.now())
 const devices = ref<Device[]>([])
 const roles = ref<Omit<RoleStatus, 'device'>[]>([])
 const alerts = ref<Alert[]>([])
@@ -72,8 +75,9 @@ let soundTimer: number | undefined
 let timer: number | undefined
 let session = 0
 
-const windows = computed<RoleStatus[]>(() => roles.value.map(role => ({ ...role,
+const windows = computed<RoleCard[]>(() => roles.value.map(role => ({ ...role,
   device: devices.value.find(device => device.device_id === role.device_id) || { device_id: role.device_id || '' },
+  stamina_estimate: estimateStamina(role, nowMs.value),
 })).sort((a, b) => Number(b.role_online) - Number(a.role_online) || (b.received_at || b.first_seen_at || '').localeCompare(a.received_at || a.first_seen_at || '')))
 const snapshotKey = (item: RoleStatus) => item.character_id || `${item.device_id}:${item.window_id}`
 
@@ -265,6 +269,7 @@ async function login() {
 }
 
 async function refresh() {
+  nowMs.value = Date.now()
   if (!token.value || loading.value) return
   loading.value = true
   const current = session
@@ -493,9 +498,9 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
                 <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer" @error="thumbnailError(item)"><span v-else>截图加载中…</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
-                <div v-if="item.stamina_current != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
-                  <span>体力 {{ item.stamina_current }}/{{ item.stamina_max }} <small>每 5 分钟 +{{ item.stamina_recovery_per_5m }} · 观测于 {{ time(item.stamina_observed_at) }} · {{ item.role_online ? '按持续在线估算' : '离线后需复核' }}</small></span>
-                  <strong :class="{ full: Date.now() >= Date.parse(item.stamina_full_at) }">{{ Date.now() >= Date.parse(item.stamina_full_at) ? '体力已满（预测）' : `预计满体力：${time(item.stamina_full_at)}` }}</strong>
+                <div v-if="item.stamina_estimate != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
+                  <span>预计体力 {{ item.stamina_estimate }}/{{ item.stamina_max }} <small>上次实测 {{ item.stamina_current }}/{{ item.stamina_max }} · 每 5 分钟 +{{ item.stamina_recovery_per_5m }} · 观测于 {{ time(item.stamina_observed_at) }} · {{ item.role_online ? '假设持续在线' : '离线后暂停估算，需复核' }}</small></span>
+                  <strong :class="{ full: item.stamina_estimate >= item.stamina_max }">{{ item.stamina_estimate >= item.stamina_max ? '体力已满（预测）' : `预计满体力：${time(item.stamina_full_at)}` }}</strong>
                 </div>
               </article>
             </div>
