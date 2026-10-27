@@ -28,6 +28,7 @@ from .panels import PanelDetector, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
 from .screenshots import capture_panel_screenshot
+from .stamina import StaminaDetector, StaminaTracker
 from .storage import JsonlEventSink
 from .wgc import is_window_available, is_window_minimized, list_capturable_windows
 
@@ -190,6 +191,8 @@ class InventoryMonitorWorker(QObject):
             target_tracker = PanelTargetTracker()
             money_detector = MoneyDetector()
             money_tracker = MoneyTracker()
+            stamina_detector = StaminaDetector()
+            stamina_tracker = StaminaTracker()
             money_character_id = parse_account_info(self.window_title).role_id
             last_panel_frame_ms: int | None = None
             sampler = AdaptiveSampler(
@@ -279,8 +282,11 @@ class InventoryMonitorWorker(QObject):
                     signal["character_id"] = current_character_id
                     if money_character_id != current_character_id:
                         money_tracker = MoneyTracker()
+                        stamina_tracker = StaminaTracker()
                         target_tracker.reset()
                         money_character_id = current_character_id
+                    stamina = stamina_detector.analyze(packet.image, panel)
+                    signal.update(stamina_tracker.update(stamina, packet.timestamp_ms))
                     reading = target_detector.analyze(packet.image, panel)
                     target_events = target_tracker.update(panel.panel_type, reading, packet.timestamp_ms, packet.frame_index)
                     signal.update(target_payload(target_tracker.current))
@@ -313,6 +319,8 @@ class InventoryMonitorWorker(QObject):
                         event.payload.setdefault("secondary_region", account.secondary_region)
                         event.payload.setdefault("role_name", account.role_name)
                         event.payload.setdefault("role_id", account.role_id)
+                        if event.type == "panel_opened" and event.payload.get("panel_type") == "attributes":
+                            event.payload.update(stamina_tracker.confirmed)
                         capture_panel_screenshot(event, packet.image)
                         sink.write(event)
                         if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:

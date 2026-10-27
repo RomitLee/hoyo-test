@@ -46,6 +46,9 @@ def test_original_game_frame_saved_only_for_open_or_confirmed_target_change(tmp_
         "changed", 200, "panel_target_changed", payload={"panel_type": "trade", "target_status": "recognized"}
     )
     assert capture_panel_screenshot(changed, image)
+    attributes = Event("attributes", 300, "panel_opened", payload={"panel_type": "attributes"})
+    assert capture_panel_screenshot(attributes, image)
+    assert attributes.evidence_path is not None
 
 
 def test_capture_disk_failure_does_not_interrupt_recognition(tmp_path, monkeypatch):

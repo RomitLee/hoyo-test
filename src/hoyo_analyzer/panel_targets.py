@@ -24,6 +24,15 @@ _engine_lock = Lock()
 _engine = None
 
 
+def recognize_shared_text(mask: np.ndarray) -> tuple[str, float] | None:
+    """Reuse the installed local OCR model across recipient and attributes panels."""
+    global _engine
+    with _engine_lock:
+        if _engine is None:
+            _engine = LocalTextRecognizer()
+        return _engine.recognize(mask)
+
+
 @dataclass(frozen=True)
 class TargetReading:
     name: str | None = None

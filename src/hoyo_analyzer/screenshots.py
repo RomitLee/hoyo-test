@@ -20,10 +20,11 @@ MAX_BYTES = 2 * 1024 * 1024
 
 
 def capture_panel_screenshot(event, image) -> str | None:
-    if event.payload.get("panel_type") not in {"give", "trade"}:
+    if event.payload.get("panel_type") not in {"give", "trade", "attributes"}:
         return None
     if event.type != "panel_opened" and not (
-        event.type == "panel_target_changed" and event.payload.get("target_status") == "recognized"
+        event.type == "panel_target_changed" and event.payload.get("panel_type") in {"give", "trade"}
+        and event.payload.get("target_status") == "recognized"
     ):
         return None
     # Master packages omit OpenCV; only the slave's capture path needs it.

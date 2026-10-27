@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, ScreenshotStore, validate_jpeg
 
-VERSION = "2.16.1"
+VERSION = "2.17.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -159,6 +159,10 @@ class WindowStatusIn(BaseModel):
     bank_money: int | None = Field(default=None, ge=0, le=999999999999)
     money_confirmed_at: datetime | None = None
     money_readable: bool = False
+    stamina_current: int | None = Field(default=None, ge=0, le=99999, strict=True)
+    stamina_max: int | None = Field(default=None, ge=1, le=99999, strict=True)
+    character_level: int | None = Field(default=None, ge=1, le=175, strict=True)
+    stamina_observed_at: datetime | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     occlusion_percent: float | None = Field(default=None, ge=0, le=100)
     minimized: bool = False
@@ -216,6 +220,10 @@ class MonitorLogIn(BaseModel):
     target_level: int | None = Field(default=None, ge=1, le=175, strict=True)
     target_confidence: float | None = Field(default=None, ge=0, le=1)
     target_status: Literal["recognized", "unrecognized"] | None = None
+    stamina_current: int | None = Field(default=None, ge=0, le=99999, strict=True)
+    stamina_max: int | None = Field(default=None, ge=1, le=99999, strict=True)
+    character_level: int | None = Field(default=None, ge=1, le=175, strict=True)
+    stamina_observed_at: datetime | None = None
 
 
 class BarkSettingsIn(BaseModel):
@@ -662,6 +670,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             elif (payload.target_status != "unrecognized" or payload.target_name is not None
                   or payload.target_level is not None or payload.target_confidence is not None):
                 raise HTTPException(status_code=422, detail="未识别对象不能携带旧昵称或等级")
+        stamina_fields = (payload.stamina_current, payload.stamina_max, payload.character_level, payload.stamina_observed_at)
+        if any(value is not None for value in stamina_fields):
+            if payload.event_type != "panel_opened" or payload.panel_type != "attributes" or any(value is None for value in stamina_fields):
+                raise HTTPException(status_code=422, detail="体力信息仅支持完整的属性面板观测")
+            if payload.stamina_current > payload.stamina_max:
+                raise HTTPException(status_code=422, detail="当前体力不能超过体力上限")
         database.insert_monitor_log(identity.account_id, identity.device_id, payload.model_dump(mode="json"))
         return {"accepted": True}
 
@@ -671,8 +685,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = database.screenshot_log(identity.account_id, identity.device_id, event_id)
         if not row:
             raise HTTPException(status_code=404, detail="对应监控日志尚未接收")
-        if row["panel_type"] not in {"give", "trade"} or row["event_type"] not in {"panel_opened", "panel_target_changed"}:
-            raise HTTPException(status_code=422, detail="仅给予或交易日志可以上传截图")
+        if (row["panel_type"] not in {"give", "trade", "attributes"}
+                or row["event_type"] not in {"panel_opened", "panel_target_changed"}
+                or row["panel_type"] == "attributes" and row["event_type"] != "panel_opened"):
+            raise HTTPException(status_code=422, detail="该面板日志不支持上传截图")
         if not app.state.screenshots.configured:
             raise HTTPException(status_code=503, detail="截图存储暂未配置")
         if request.headers.get("content-type", "").split(";")[0] != "image/jpeg":

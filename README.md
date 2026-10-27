@@ -9,16 +9,18 @@
 | 组件 | 当前版本 | 获取方式 |
 | --- | --- | --- |
 | Windows 主机 | V2.3.0 | [下载主机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/master/V2.3.0) |
-| Windows 从机 | V2.7.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.7.0) |
-| 云端服务 | 2.16.1 | [网页管理界面](https://jiankong.maipi.top/) |
+| Windows 从机 | V2.8.0 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.8.0) |
+| 云端服务 | 2.17.0 | [网页管理界面](https://jiankong.maipi.top/) |
 
 网页管理界面覆盖监控、现金、告警、从机管理、监控日志、截图、遮挡日志规则和 Bark 设置，可在电脑与手机浏览器使用。监控页宽屏每行展示五个窗口，状态、遮挡和实时截图操作集中在画面上方；点击画面可按账号 ID 翻看历史。设置页按账号配置 1～60 分钟自动截图周期，默认 5 分钟。截图从从机直传私有 COS，新版每张截图使用独立对象；查看时提供 5 分钟读取链接。旧版 H5 暂保留在 `/legacy`。浏览器提示音需在每次打开网页时主动开启；关闭或休眠浏览器后，持续告警依靠服务端 Bark。Windows 主机程序的 V2.3.0 历史包继续保留。
 
-本次正式安装包位于 `dist-master-v230-slave-v270/`。监控页按游戏 ID 汇总角色，跨从机浏览同一角色的截图；在线角色优先显示。角色首次被添加时会先在从机本地可靠登记，随后上报云端。截图仍只向所属后台账号开放。
+本次正式安装包位于 `dist-master-v230-slave-v280/`。监控页按游戏 ID 汇总角色，跨从机浏览同一角色的截图；在线角色优先显示。角色首次被添加时会先在从机本地可靠登记，随后上报云端。截图仍只向所属后台账号开放。
 
 上线与验证见 [游戏 ID 唯一角色卡片发布记录](docs/37-game-role-cards-release.md)。
 
 事件触发的给予、交易截图现与周期截图合并展示在角色历史中，原监控日志截图入口保留；详见 [事件截图进入角色历史](docs/38-event-screenshots-in-role-history.md)。
+
+从机 V2.8.0 可在打开属性面板时截图，并识别等级和体力值；网页按持续在线的恢复规则预测满体力时间。详见 [属性面板体力监控](docs/39-attributes-stamina-release.md)。
 
 ## 主要功能
 

@@ -174,6 +174,43 @@ def test_existing_event_evidence_is_backfilled_on_startup(client):
     assert len(client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]) == 1
 
 
+def test_attributes_screenshot_and_stamina_forecast_share_role_card(client):
+    observed = datetime.now(UTC).replace(microsecond=0)
+    report(client, "attributes-open", panel_type="attributes", target_status=None,
+           occurred_at=observed.isoformat(), character_level=141,
+           stamina_current=314, stamina_max=863, stamina_observed_at=observed.isoformat())
+    assert upload(client, "attributes-open").status_code == 200
+    role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
+    assert (role["character_level"], role["stamina_current"], role["stamina_max"]) == (141, 314, 863)
+    assert role["stamina_recovery_per_5m"] == 12
+    assert datetime.fromisoformat(role["stamina_full_at"]) == observed + timedelta(minutes=230)
+    history = client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]
+    assert history[0]["event_type"] == "panel_opened:attributes"
+    assert logs(client)[0]["screenshot_ready"] == 1
+
+    newer = observed + timedelta(seconds=1)
+    status = {"reported_at": newer.isoformat(), "windows": [{
+        "window_id": "hwnd:1", "character_id": "123", "status": "inventory_closed",
+        "monitoring": True, "updated_at": newer.isoformat(), "character_level": 141,
+        "stamina_current": 326, "stamina_max": 863, "stamina_observed_at": newer.isoformat(),
+    }]}
+    assert client.post("/api/v1/slave/status", headers=SLAVE, json=status).status_code == 202
+    role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
+    assert role["stamina_current"] == 326
+    status["windows"][0]["stamina_current"] = 100
+    status["windows"][0]["stamina_observed_at"] = observed.isoformat()
+    assert client.post("/api/v1/slave/status", headers=SLAVE, json=status).status_code == 202
+    assert client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]["stamina_current"] == 326
+
+    bad = client.post("/api/v1/slave/monitor-logs", headers=SLAVE, json={
+        "event_id": "bad-attributes", "event_type": "panel_opened", "panel_type": "attributes",
+        "reason": "recognition", "occurred_at": observed.isoformat(), "character_id": "123",
+        "stamina_current": 999, "stamina_max": 863, "character_level": 141,
+        "stamina_observed_at": observed.isoformat(),
+    })
+    assert bad.status_code == 422
+
+
 def test_authentication_account_and_device_isolation(client):
     client.post("/api/v1/auth/register", json={"username": "first_owner", "password": "password123"})
     report(client)

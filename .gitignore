@@ -64,3 +64,4 @@ assets/sounds/inventory_alert.wav
 !assets/
 !assets/templates/
 !assets/templates/*.png
+!tests/fixtures/stamina/*.png

@@ -148,6 +148,18 @@ class RelayDatabase:
                     last_device_id TEXT, last_window_id TEXT, last_seen_at TEXT,
                     PRIMARY KEY(character_id,account_id)
                 );
+                CREATE TABLE IF NOT EXISTS game_role_vitals (
+                    character_id TEXT NOT NULL REFERENCES game_roles(character_id),
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    device_id TEXT NOT NULL,
+                    character_level INTEGER NOT NULL,
+                    stamina_current INTEGER NOT NULL,
+                    stamina_max INTEGER NOT NULL,
+                    recovery_per_5m INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    full_at TEXT NOT NULL,
+                    PRIMARY KEY(character_id,account_id)
+                );
                 CREATE TABLE IF NOT EXISTS bark_settings (
                     account_id INTEGER PRIMARY KEY, device_key TEXT NOT NULL DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 0, call_enabled INTEGER NOT NULL DEFAULT 1,
@@ -617,6 +629,7 @@ class RelayDatabase:
                 character_id = str(window.get("character_id") or "")
                 if character_id:
                     self._remember_game_role(connection, int(device["account_id"]), device_id, window, received_at)
+                    self._upsert_role_vitals(connection, int(device["account_id"]), device_id, window)
                     connection.execute(
                         """DELETE FROM device_window_status WHERE device_id=? AND character_id=?
                            AND window_id<>? AND status='window_closed'""",
@@ -667,6 +680,38 @@ class RelayDatabase:
             last_window_id=CASE WHEN excluded.last_seen_at>=COALESCE(game_role_accounts.last_seen_at,'') THEN excluded.last_window_id ELSE game_role_accounts.last_window_id END,
             last_seen_at=MAX(COALESCE(game_role_accounts.last_seen_at,''),excluded.last_seen_at)""",
             (character_id, account_id, device_id, payload.get("window_id"), seen_at))
+
+    @staticmethod
+    def _upsert_role_vitals(connection: sqlite3.Connection, account_id: int, device_id: str,
+                            payload: dict[str, Any]) -> None:
+        character_id = str(payload.get("character_id") or "").strip()
+        try:
+            level = int(payload["character_level"])
+            current = int(payload["stamina_current"])
+            maximum = int(payload["stamina_max"])
+            observed = datetime.fromisoformat(str(payload["stamina_observed_at"]))
+        except (KeyError, ValueError, TypeError):
+            return
+        if (not character_id or observed.tzinfo is None or not 1 <= level <= 175
+                or not 1 <= maximum <= 99999 or not 0 <= current <= maximum):
+            return
+        observed = observed.astimezone(UTC)
+        if observed > datetime.now(UTC) + timedelta(minutes=2):
+            return
+        recovery = maximum // 100 + level // 50 + 2
+        ticks = (maximum - current + recovery - 1) // recovery
+        connection.execute("""INSERT INTO game_role_vitals
+            (character_id,account_id,device_id,character_level,stamina_current,stamina_max,
+             recovery_per_5m,observed_at,full_at) VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(character_id,account_id) DO UPDATE SET
+            device_id=excluded.device_id,character_level=excluded.character_level,
+            stamina_current=excluded.stamina_current,stamina_max=excluded.stamina_max,
+            recovery_per_5m=excluded.recovery_per_5m,observed_at=excluded.observed_at,
+            full_at=excluded.full_at
+            WHERE julianday(excluded.observed_at)>julianday(game_role_vitals.observed_at)""",
+            (character_id, account_id, device_id, level, current, maximum, recovery,
+             observed.isoformat(timespec="milliseconds"),
+             (observed + timedelta(minutes=ticks * 5)).isoformat(timespec="milliseconds")))
 
     @staticmethod
     def _log_settings(connection: sqlite3.Connection, account_id: int) -> dict[str, Any]:
@@ -739,6 +784,7 @@ class RelayDatabase:
 
         if cursor.rowcount and payload.get("character_id"):
             RelayDatabase._remember_game_role(connection, account_id, device_id, payload, received_at)
+            RelayDatabase._upsert_role_vitals(connection, account_id, device_id, payload)
 
         if payload["event_type"] == "panel_target_changed" and cursor.rowcount:
             remember_confirmation(connection, account_id, device_id, payload, received_at, int(cursor.lastrowid))
@@ -1000,7 +1046,11 @@ class RelayDatabase:
                     ROW_NUMBER() OVER (PARTITION BY character_id ORDER BY captured_at DESC,id DESC) AS rank
                 FROM live_snapshot_history WHERE account_id=?
             ) WHERE rank=1""", (account_id,)).fetchall()
+            vitals = connection.execute("""SELECT character_id,character_level,stamina_current,
+                stamina_max,recovery_per_5m,observed_at,full_at FROM game_role_vitals
+                WHERE account_id=?""", (account_id,)).fetchall()
         latest_shots = {str(row["character_id"]): dict(row) for row in shots}
+        latest_vitals = {str(row["character_id"]): dict(row) for row in vitals}
         candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
         now = datetime.now(UTC)
         for device in devices:
@@ -1021,6 +1071,7 @@ class RelayDatabase:
             options.sort(key=lambda pair: (pair[1]["role_online"], pair[1].get("received_at") or ""), reverse=True)
             device, window = options[0] if options else (next((d for d in devices if d["device_id"] == role["last_device_id"]), {}), {})
             shot = latest_shots.get(character_id)
+            stamina = latest_vitals.get(character_id)
             result.append({**window, "character_id": character_id,
                 "server_name": window.get("server_name") or role["server_name"],
                 "role_name": window.get("role_name") or role["role_name"],
@@ -1032,7 +1083,13 @@ class RelayDatabase:
                 "screenshot_id": shot["id"] if shot else None,
                 "screenshot_event_type": shot["event_type"] if shot else None,
                 "screenshot_device_id": shot["device_id"] if shot else device.get("device_id"),
-                "screenshot_window_id": shot["window_id"] if shot else window.get("window_id")})
+                "screenshot_window_id": shot["window_id"] if shot else window.get("window_id"),
+                "stamina_current": stamina["stamina_current"] if stamina else None,
+                "stamina_max": stamina["stamina_max"] if stamina else None,
+                "character_level": stamina["character_level"] if stamina else None,
+                "stamina_recovery_per_5m": stamina["recovery_per_5m"] if stamina else None,
+                "stamina_observed_at": stamina["observed_at"] if stamina else None,
+                "stamina_full_at": stamina["full_at"] if stamina else None})
         result.sort(key=lambda role: (role["role_online"], role.get("received_at") or role["first_seen_at"]), reverse=True)
         return result
 

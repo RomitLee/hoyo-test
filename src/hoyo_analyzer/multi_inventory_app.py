@@ -1130,6 +1130,8 @@ class InventoryMonitorWindow(QMainWindow):
                 "message": event.display_name,
                 **{key: event.payload[key] for key in ("target_name", "target_level", "target_confidence", "target_status")
                    if key in event.payload},
+                **{key: event.payload[key] for key in ("stamina_current", "stamina_max", "character_level", "stamina_observed_at")
+                   if key in event.payload},
             }
             if event.evidence_path:
                 self.relay_client.send_monitor_payload(payload, screenshot_path=event.evidence_path)
@@ -1346,6 +1348,8 @@ class InventoryMonitorWindow(QMainWindow):
             if session.last_analysis_at is None or monotonic() - session.last_analysis_at > 15:
                 signal = {}
             money = {key: signal.get(key) for key in ("cash", "money_confirmed_at")}
+            stamina = {key: signal.get(key) for key in
+                       ("stamina_current", "stamina_max", "character_level", "stamina_observed_at")}
             money_current = bool(signal.get("money_readable"))
             try:
                 money_current = money_current and (datetime.now(UTC) - datetime.fromisoformat(str(money["money_confirmed_at"]))).total_seconds() <= 5
@@ -1377,6 +1381,7 @@ class InventoryMonitorWindow(QMainWindow):
             windows.append(
                 {
                     **money,
+                    **stamina,
                     "money_readable": money_current and not (self.monitoring_paused or minimized or session.removing) and occlusion_percent == 0,
                     "window_id": f"hwnd:{session.hwnd}",
                     "title": session.title,
