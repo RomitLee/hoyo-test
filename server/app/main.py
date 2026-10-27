@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.21.0"
+VERSION = "2.22.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -968,7 +968,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                      limit: int = Query(default=30, ge=1, le=100),
                      account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
         rows = database.live_snapshot_history(account_id, character_id, before=before, limit=limit + 1)
-        return {"items": rows[:limit], "has_more": len(rows) > limit}
+        return {"items": rows[:limit], "has_more": len(rows) > limit,
+                "total": database.count_live_snapshot_history(account_id, character_id)}
 
     @app.get("/api/v1/master/live-screenshots/history/{snapshot_id}/view")
     def view_historical_snapshot(snapshot_id: int, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:

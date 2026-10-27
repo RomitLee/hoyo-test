@@ -136,9 +136,12 @@ def test_event_evidence_joins_role_history_without_changing_scheduled_capture(cl
     assert upload(client, "trade-shot").status_code == 200
     role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
     assert role["screenshot_at"] == event_at
+    assert role["screenshot_count"] == 2
     view = client.get("/api/v1/master/live-screenshots/slave/view?window_id=hwnd:1", headers=MASTER)
     assert "/screenshots/1/" in view.json()["url"]
-    history = client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]
+    first_history = client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()
+    assert first_history["total"] == 2
+    history = first_history["items"]
     assert [row["captured_at"] for row in history] == [event_at, started]
     assert history[0]["event_type"] == "panel_opened:trade"
     assert client.get(f"/api/v1/master/live-screenshots/history/{history[0]['id']}/view", headers=MASTER).status_code == 200
@@ -149,12 +152,15 @@ def test_event_evidence_joins_role_history_without_changing_scheduled_capture(cl
     assert upload(client, "late-shot").status_code == 200
     role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
     assert role["screenshot_at"] == next_periodic
+    assert role["screenshot_count"] == 4
     view = client.get("/api/v1/master/live-screenshots/slave/view?window_id=hwnd:1", headers=MASTER)
     assert "periodic-2.jpg" in view.json()["url"]
     history = client.get("/api/v1/master/live-screenshots/history?character_id=123&limit=2", headers=MASTER).json()
+    assert history["total"] == 4
     assert history["has_more"] is True
     assert history["items"][0]["captured_at"] == next_periodic
     older = client.get(f"/api/v1/master/live-screenshots/history?character_id=123&before={history['items'][-1]['id']}", headers=MASTER).json()
+    assert older["total"] == 4
     assert [row["captured_at"] for row in older["items"]] == [event_at, started]
 
 

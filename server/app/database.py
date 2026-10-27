@@ -1269,10 +1269,15 @@ class RelayDatabase:
                     ROW_NUMBER() OVER (PARTITION BY character_id ORDER BY captured_at DESC,id DESC) AS rank
                 FROM live_snapshot_history WHERE account_id=?
             ) WHERE rank=1""", (account_id,)).fetchall()
+            snapshot_counts = connection.execute("""SELECT character_id,COUNT(*) AS total
+                FROM live_snapshot_history WHERE account_id=? AND captured_at>=?
+                GROUP BY character_id""",
+                (account_id, (datetime.now(UTC) - timedelta(days=30)).isoformat())).fetchall()
             vitals = connection.execute("""SELECT character_id,character_level,stamina_current,
                 stamina_max,recovery_per_5m,observed_at,full_at FROM game_role_vitals
                 WHERE account_id=?""", (account_id,)).fetchall()
         latest_shots = {str(row["character_id"]): dict(row) for row in shots}
+        shot_counts = {str(row["character_id"]): row["total"] for row in snapshot_counts}
         latest_vitals = {str(row["character_id"]): dict(row) for row in vitals}
         candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
         now = datetime.now(UTC)
@@ -1306,6 +1311,7 @@ class RelayDatabase:
                 "sell_stock_count": role["sell_stock_count"] if role["stall_mode"] == "sell" else None,
                 "sell_stock_observed_at": role["sell_stock_observed_at"] if role["stall_mode"] == "sell" else None,
                 "screenshot_at": shot["captured_at"] if shot else window.get("screenshot_at"),
+                "screenshot_count": shot_counts.get(character_id, 0),
                 "screenshot_id": shot["id"] if shot else None,
                 "screenshot_event_type": shot["event_type"] if shot else None,
                 "screenshot_device_id": shot["device_id"] if shot else device.get("device_id"),
@@ -1450,6 +1456,14 @@ class RelayDatabase:
                 ORDER BY captured_at DESC,id DESC LIMIT ?""",
                 (account_id, character_id, cutoff, before, before, account_id, limit)).fetchall()
         return [dict(row) for row in rows]
+
+    def count_live_snapshot_history(self, account_id: int, character_id: str) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        with self._connect() as connection:
+            row = connection.execute("""SELECT COUNT(*) FROM live_snapshot_history
+                WHERE account_id=? AND character_id=? AND captured_at>=?""",
+                (account_id, character_id, cutoff)).fetchone()
+        return int(row[0])
 
     def historical_snapshot(self, account_id: int, snapshot_id: int) -> dict[str, Any] | None:
         cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()

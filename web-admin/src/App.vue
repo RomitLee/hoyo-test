@@ -7,7 +7,7 @@ import { estimateStamina } from './stamina'
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
-type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; stall_mode?: 'buy' | 'sell' | 'unknown'; sell_stock_count?: number | null; device: Device }
+type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_count?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; stall_mode?: 'buy' | 'sell' | 'unknown'; sell_stock_count?: number | null; device: Device }
 type RoleCard = RoleStatus & { stamina_estimate: number | null }
 type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number; payload?: { details?: { cash?: number; threshold_wan?: number; source?: string; previous_count?: number; current_count?: number; sold_count?: number } } }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
@@ -55,6 +55,7 @@ const previewTime = ref('')
 type HistoricalShot = { id: number; device_id: string; window_id: string; captured_at: string; server_name?: string; role_name?: string }
 const history = ref<HistoricalShot[]>([])
 const historyIndex = ref(0)
+const historyTotal = ref(0)
 const historyCharacter = ref('')
 const historyHasMore = ref(false)
 const historyBusy = ref(false)
@@ -120,7 +121,7 @@ function thumbnailError(item: RoleStatus) {
 }
 
 async function viewSnapshot(deviceId: string, windowId: string) {
-  history.value = []; historyCharacter.value = ''; historyHasMore.value = false
+  history.value = []; historyCharacter.value = ''; historyHasMore.value = false; historyTotal.value = 0
   preview.value = ''; previewError.value = ''
   const shot = await snapshotUrl(deviceId, windowId)
   if (new URL(shot.url).protocol !== 'https:') throw new Error('截图地址无效')
@@ -132,9 +133,10 @@ async function openHistory(item: RoleStatus) {
   if (!item.character_id) { await viewSnapshot(item.screenshot_device_id || item.device.device_id, item.screenshot_window_id || item.window_id); return }
   preview.value = ''; previewError.value = ''
   historyCharacter.value = item.character_id
-  const result = await api<{ items: HistoricalShot[]; has_more: boolean }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(item.character_id)}&limit=30`)
+  const result = await api<{ items: HistoricalShot[]; has_more: boolean; total: number }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(item.character_id)}&limit=30`)
   history.value = result.items
   historyHasMore.value = result.has_more
+  historyTotal.value = result.total
   historyIndex.value = 0
   if (history.value.length) await showHistorical(0)
   else if (item.screenshot_device_id && item.screenshot_window_id) await viewSnapshot(item.screenshot_device_id, item.screenshot_window_id)
@@ -160,9 +162,10 @@ async function navigateHistory(direction: number) {
   if (next < 0) return
   if (next >= history.value.length && historyHasMore.value) {
     const before = history.value.at(-1)?.id
-    const result = await api<{ items: HistoricalShot[]; has_more: boolean }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(historyCharacter.value)}&before=${before}&limit=30`)
+    const result = await api<{ items: HistoricalShot[]; has_more: boolean; total: number }>(`/api/v1/master/live-screenshots/history?character_id=${encodeURIComponent(historyCharacter.value)}&before=${before}&limit=30`)
     history.value.push(...result.items)
     historyHasMore.value = result.has_more
+    historyTotal.value = result.total
   }
   if (next < history.value.length) await showHistorical(next)
 }
@@ -170,8 +173,8 @@ async function navigateHistory(direction: number) {
 function previewKey(event: KeyboardEvent) {
   if (!preview.value) return
   if (event.key === 'Escape') preview.value = ''
-  if (event.key === 'ArrowLeft') void navigateHistory(1).catch(fail)
-  if (event.key === 'ArrowRight') void navigateHistory(-1).catch(fail)
+  if (event.key === 'ArrowLeft') void navigateHistory(-1).catch(fail)
+  if (event.key === 'ArrowRight') void navigateHistory(1).catch(fail)
 }
 
 async function requestSnapshot(item: RoleStatus) {
@@ -521,7 +524,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
                   <button class="primary small" :disabled="!!pendingSnapshots[snapshotKey(item)] || !item.role_online || !item.monitoring || item.minimized" @click="requestSnapshot(item)">{{ pendingSnapshots[snapshotKey(item)] ? '获取中…' : '获取实时截图' }}</button>
                 </div>
                 <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer" @error="thumbnailError(item)"><span v-else>截图加载中…</span></button>
-                <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
+                <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><button class="snapshot-count" :disabled="!item.screenshot_count" :aria-label="`查看${item.role_name || '角色'}的 ${item.screenshot_count || 0} 张历史截图`" @click="openHistory(item).catch(fail)">共 {{ item.screenshot_count || 0 }} 张</button><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
                 <div v-if="item.stall_mode === 'sell'" class="snapshot-details"><span>在售商品 {{ item.sell_stock_count == null ? '待识别' : `${item.sell_stock_count} 件` }}</span><small>卖货摊位第一页</small></div>
                 <div v-if="item.stamina_estimate != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
@@ -558,5 +561,5 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
       <footer>数据每 5 秒刷新 · 手机告警由服务端 Bark 推送</footer>
     </div>
   </div>
-  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><div class="preview-bar"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><span v-if="historyCharacter" class="preview-time">账号 ID：{{ historyCharacter }}</span></div><div class="preview-image-row"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || (!historyHasMore && historyIndex >= history.length - 1)" aria-label="上一张历史截图" @click="navigateHistory(1).catch(fail)">‹</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || historyIndex === 0" aria-label="下一张历史截图" @click="navigateHistory(-1).catch(fail)">›</button></div><p v-if="historyCharacter" class="preview-counter">第 {{ historyIndex + 1 }} 张 · 左右方向键可翻看 · 保留最近 30 天</p><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
+  <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><div class="preview-bar"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><span v-if="historyCharacter" class="preview-time">账号 ID：{{ historyCharacter }}</span></div><div class="preview-image-row"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || historyIndex === 0" aria-label="更新一张历史截图" @click="navigateHistory(-1).catch(fail)">‹</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || (!historyHasMore && historyIndex >= history.length - 1)" aria-label="更早一张历史截图" @click="navigateHistory(1).catch(fail)">›</button></div><p v-if="historyCharacter" class="preview-counter">第 {{ historyIndex + 1 }} / {{ historyTotal }} 张 · 从新到旧 · 左右方向键可翻看 · 保留最近 30 天</p><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
 </template>
