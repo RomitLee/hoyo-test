@@ -9,9 +9,9 @@ type WindowStatus = { window_id: string; server_name?: string; role_name?: strin
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
 type RoleStatus = WindowStatus & { device_id?: string; device_name?: string; role_online: boolean; screenshot_id?: number; screenshot_device_id?: string; screenshot_window_id?: string; received_at?: string; first_seen_at?: string; stamina_current?: number | null; stamina_max?: number | null; character_level?: number | null; stamina_recovery_per_5m?: number | null; stamina_observed_at?: string | null; stamina_full_at?: string | null; device: Device }
 type RoleCard = RoleStatus & { stamina_estimate: number | null }
-type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number }
+type Alert = { server_event_id: number; event_type: string; display_name?: string; hostname?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; acked_at?: string | null; empty_slots?: number; confidence?: number; payload?: { details?: { cash?: number; threshold_wan?: number } } }
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
-type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; configured?: boolean; masked_key?: string }
+type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; configured?: boolean; masked_key?: string }
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
 
 const pages: { key: Page; label: string; hint: string }[] = [
@@ -22,7 +22,7 @@ const pages: { key: Page; label: string; hint: string }[] = [
   { key: 'settings', label: '设置', hint: '上报与通知' },
 ]
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
-const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
+const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
 const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '摊位面板', stall_records: '摊位记录面板' }
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
 
@@ -47,7 +47,7 @@ const logCursor = ref(0)
 const logNext = ref(0)
 const filter = reactive({ event_type: '', panel_type: '' })
 const policy = reactive<Policy>({ occlusion_enabled: true, occlusion_percent: 60, occlusion_seconds: 5 })
-const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0 })
+const bark = reactive<Bark>({ enabled: false, call_enabled: true, repeat_minutes: 10, local_alert_enabled: false, web_sound_enabled: false, capacity_threshold: 0, cash_threshold_wan: 500 })
 const barkKey = ref('')
 const preview = ref('')
 const previewError = ref('')
@@ -367,6 +367,15 @@ function logLabel(item: Log): string {
   return item.message || base
 }
 
+function alertLabel(item: Alert): string {
+  if (item.event_type !== 'cash_low') return alertLabels[item.event_type] || item.event_type
+  const cash = item.payload?.details?.cash
+  const threshold = item.payload?.details?.threshold_wan
+  return cash != null && threshold != null
+    ? `游戏币不足：当前 ${Number(cash).toLocaleString('zh-CN')}，低于 ${threshold} 万`
+    : '游戏币不足'
+}
+
 async function screenshot(item: Log) {
   preview.value = ''; previewError.value = ''; previewTime.value = ''
   try {
@@ -431,7 +440,8 @@ async function saveBark() {
     }
     const data = { enabled: bark.enabled, call_enabled: bark.call_enabled, repeat_minutes: bark.repeat_minutes,
       local_alert_enabled: bark.local_alert_enabled, web_sound_enabled: bark.web_sound_enabled,
-      capacity_threshold: bark.capacity_threshold, ...(key ? { device_key: key } : {}) }
+      capacity_threshold: bark.capacity_threshold, cash_threshold_wan: bark.cash_threshold_wan,
+      ...(key ? { device_key: key } : {}) }
     Object.assign(bark, await api<Bark>('/api/v1/master/notifications/bark', json('PUT', data)))
     webSound.value = bark.web_sound_enabled
     if (!webSound.value) stopSound()
@@ -507,7 +517,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
           </Panel>
         </template>
 
-        <template v-else-if="page === 'alerts'"><Panel title="告警记录" :meta="`待处理 ${pending} 条`"><div v-if="!alerts.length" class="empty">暂无告警记录</div><div v-else class="table-wrap"><table><thead><tr><th>状态</th><th>从机 / 角色</th><th>告警</th><th>发生时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.server_event_id"><td><span :class="['badge', item.acked_at ? 'good' : 'danger']">{{ item.acked_at ? '已处理' : '未处理' }}</span></td><td>{{ item.display_name || item.hostname || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ alertLabels[item.event_type] || item.event_type }}</td><td>{{ time(item.occurred_at) }}</td><td><button v-if="!item.acked_at" class="primary small" @click="ack(item)">确认处理</button><span v-else>—</span></td></tr></tbody></table></div></Panel></template>
+        <template v-else-if="page === 'alerts'"><Panel title="告警记录" :meta="`待处理 ${pending} 条`"><div v-if="!alerts.length" class="empty">暂无告警记录</div><div v-else class="table-wrap"><table><thead><tr><th>状态</th><th>从机 / 角色</th><th>告警</th><th>发生时间</th><th>操作</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.server_event_id"><td><span :class="['badge', item.acked_at ? 'good' : 'danger']">{{ item.acked_at ? '已处理' : '未处理' }}</span></td><td>{{ item.display_name || item.hostname || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ alertLabel(item) }}</td><td>{{ time(item.occurred_at) }}</td><td><button v-if="!item.acked_at" class="primary small" @click="ack(item)">确认处理</button><span v-else>—</span></td></tr></tbody></table></div></Panel></template>
 
         <template v-else-if="page === 'devices'"><Panel title="从机管理" :meta="`${devices.length} 台`"><div v-if="!devices.length" class="empty">暂无从机。请在从机程序中登录本账号，机器会自动出现在这里。</div><div v-else class="table-wrap"><table><thead><tr><th>从机名称</th><th>状态</th><th>版本</th><th>最后连接</th><th>操作</th></tr></thead><tbody><tr v-for="device in devices" :key="device.device_id"><td><strong>{{ device.display_name || device.hostname || device.device_id }}</strong><small v-if="device.note">{{ device.note }}</small></td><td><span :class="['badge', !device.disabled && online(device.last_seen_at) ? 'good' : '']">{{ device.disabled ? '已禁用' : online(device.last_seen_at) ? '在线' : '离线' }}</span></td><td>{{ device.app_version || '—' }}</td><td>{{ time(device.last_seen_at) }}</td><td class="actions"><button @click="editDevice(device)">编辑</button><button @click="toggleDevice(device)">{{ device.disabled ? '启用' : '禁用' }}</button><button class="text-danger" @click="removeDevice(device)">移除</button></td></tr></tbody></table></div></Panel></template>
 
@@ -519,6 +529,7 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
             <label class="check"><input v-model="bark.local_alert_enabled" type="checkbox"> 当前设备是否报警</label>
             <label class="check"><input v-model="bark.web_sound_enabled" type="checkbox"> 电脑网页提示音</label>
             <label>背包剩余空格提醒阈值<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required></label>
+            <label>游戏币低于（万）<input v-model.number="bark.cash_threshold_wan" type="number" min="1" max="99999999" step="1" required></label>
             <p class="hint">达到阈值的告警始终记录在后台；上方三个开关只控制提醒送达方式。网页提示音需要保持网页打开，并允许当前浏览器播放声音。</p>
             <label class="check"><input v-model="bark.call_enabled" type="checkbox"> 手机连续呼叫</label>
             <label>手机重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label>

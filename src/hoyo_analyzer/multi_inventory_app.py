@@ -98,6 +98,7 @@ class MonitorSession:
     minimized_alert_active: bool = False
     capacity_alert_active: bool = False
     capacity_candidate_since: float | None = None
+    cash_alert_active: bool = False
     occlusion_alert_active: bool = False
     occlusion_candidate_since: float | None = None
     removing: bool = False
@@ -132,6 +133,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.slave_settings = load_slave_settings()
         self._local_alert_enabled = False
         self._capacity_threshold = 0
+        self._cash_threshold_wan = 500
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
         self._sounding_alerts: set[QMessageBox] = set()
@@ -613,19 +615,29 @@ class InventoryMonitorWindow(QMainWindow):
         threshold = raw.get("capacity_threshold")
         if not isinstance(threshold, int) or isinstance(threshold, bool) or not 0 <= threshold <= 20:
             return
-        changed = (local, threshold) != (self._local_alert_enabled, self._capacity_threshold)
+        cash_threshold = raw.get("cash_threshold_wan")
+        if not isinstance(cash_threshold, int) or isinstance(cash_threshold, bool) or not 1 <= cash_threshold <= 99999999:
+            return
+        cash_threshold_changed = cash_threshold != self._cash_threshold_wan
+        changed = (local, threshold, cash_threshold) != (
+            self._local_alert_enabled, self._capacity_threshold, self._cash_threshold_wan)
         self._local_alert_enabled = local
         self._capacity_threshold = threshold
+        self._cash_threshold_wan = cash_threshold
         if changed:
             for session in self.sessions.values():
                 session.capacity_alert_active = False
                 session.capacity_candidate_since = None
+                if cash_threshold_changed:
+                    session.cash_alert_active = False
             if not local:
                 for alert in tuple(self.alerts):
                     alert.close()
                 self._sounding_alerts.clear()
                 self._stop_alarm_sound()
-            self.log.appendPlainText(f"后台告警设置已同步：本机报警{'开启' if local else '关闭'}，空格阈值 {threshold}")
+            self.log.appendPlainText(
+                f"后台告警设置已同步：本机报警{'开启' if local else '关闭'}，"
+                f"空格阈值 {threshold}，游戏币低于 {cash_threshold} 万提醒")
 
     @Slot(bool, str)
     def _on_profile_result(self, _success: bool, message: str) -> None:
@@ -736,6 +748,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._authenticated = False
         self._local_alert_enabled = False
         self._capacity_threshold = 0
+        self._cash_threshold_wan = 500
         self.scan_timer.stop()
         self.window_state_timer.stop()
         self.occlusion_timer.stop()
@@ -1038,6 +1051,7 @@ class InventoryMonitorWindow(QMainWindow):
         )
         self._apply_signal(session, signal)
         self._update_capacity_alert(session, signal)
+        self._update_cash_alert(session, signal)
 
     def _apply_signal(self, session: MonitorSession, signal: dict[str, Any]) -> None:
         status = str(signal.get("status", "invalid"))
@@ -1105,6 +1119,26 @@ class InventoryMonitorWindow(QMainWindow):
                 account_label,
                 with_sound=True,
             )
+
+    def _update_cash_alert(self, session: MonitorSession, signal: dict[str, Any]) -> None:
+        # MoneyTracker retains old confirmed values while the amount is unreadable.
+        # Only a freshly readable value may start or clear a low-cash alert.
+        cash = signal.get("cash")
+        if signal.get("cash_readable") is not True or not isinstance(cash, int) or isinstance(cash, bool):
+            return
+        threshold_wan = self._cash_threshold_wan
+        if cash >= threshold_wan * 10000:
+            session.cash_alert_active = False
+            return
+        if session.cash_alert_active:
+            return
+        session.cash_alert_active = True
+        account_label = f"{session.account.secondary_region} / {session.account.role_name}"
+        message = f"当前游戏币 {cash:,}，低于设置阈值 {threshold_wan} 万，请及时补充。"
+        self.log.appendPlainText(f"游戏币不足：{account_label}，{message}正在上报云端")
+        self._send_host_alert(session, "cash_low", details={"cash": cash, "threshold_wan": threshold_wan})
+        if self._local_alert_enabled:
+            self._show_alert(QMessageBox.Icon.Warning, "游戏币不足", message, account_label, with_sound=True)
 
     @Slot(int, object)
     def _on_event(self, hwnd: int, event: Event) -> None:

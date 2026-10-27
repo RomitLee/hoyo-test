@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.18.0"
+VERSION = "2.19.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -235,6 +235,7 @@ class BarkSettingsIn(BaseModel):
     local_alert_enabled: bool | None = None
     web_sound_enabled: bool | None = None
     capacity_threshold: int | None = Field(default=None, ge=0, le=20, strict=True)
+    cash_threshold_wan: int | None = Field(default=None, ge=1, le=99999999, strict=True)
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -514,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 local_alert_enabled=payload.local_alert_enabled,
                 web_sound_enabled=payload.web_sound_enabled,
                 capacity_threshold=payload.capacity_threshold,
+                cash_threshold_wan=payload.cash_threshold_wan,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -768,6 +770,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         identity: DeviceIdentity = Depends(authenticate_device),  # noqa: B008
     ) -> dict[str, Any]:
         device_id, account_id = identity.device_id, identity.account_id
+        if payload.event_type == "cash_low":
+            cash = payload.details.get("cash")
+            threshold_wan = payload.details.get("threshold_wan")
+            if (not isinstance(cash, int) or isinstance(cash, bool) or cash < 0
+                    or not isinstance(threshold_wan, int) or isinstance(threshold_wan, bool)
+                    or not 1 <= threshold_wan <= 99999999 or cash >= threshold_wan * 10000):
+                raise HTTPException(status_code=422, detail="游戏币低额告警数据无效")
         database.upsert_device(device_id, hostname=None, app_version=None,
                                ip_address=request.client.host if request.client else None)
         event_id, duplicate, received_at = database.insert_event(

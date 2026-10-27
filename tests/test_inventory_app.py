@@ -72,7 +72,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.9.0"
+        assert __version__ == "V2.10.0"
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -508,13 +508,44 @@ def test_slave_applies_account_alert_settings_without_using_local_alert_mode(mon
     window = InventoryMonitorWindow()
     try:
         window.slave_settings.inventory_capacity_alert_enabled = False
-        window._apply_alert_settings({"local_alert_enabled": True, "capacity_threshold": 4})
+        window._apply_alert_settings({"local_alert_enabled": True, "capacity_threshold": 4, "cash_threshold_wan": 500})
         assert window._local_alert_enabled is True
         assert window._capacity_threshold == 4
-        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 99})
+        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 99, "cash_threshold_wan": 500})
         assert window._local_alert_enabled is True and window._capacity_threshold == 4
-        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 0})
+        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 0, "cash_threshold_wan": 300})
         assert window._local_alert_enabled is False and window._capacity_threshold == 0
+        assert window._cash_threshold_wan == 300
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_cash_low_alert_uses_fresh_confirmed_cash_and_rearms_after_recovery(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window._cash_threshold_wan = 500
+    account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    session = SimpleNamespace(account=account, cash_alert_active=False)
+    sent = []
+    local = []
+    monkeypatch.setattr(window, "_send_host_alert", lambda *args, **kwargs: sent.append((args, kwargs)))
+    monkeypatch.setattr(window, "_show_alert", lambda *args, **kwargs: local.append((args, kwargs)))
+    try:
+        window._update_cash_alert(session, {"cash": 4999999, "cash_readable": False})
+        assert sent == []
+        window._update_cash_alert(session, {"cash": 5000000, "cash_readable": True})
+        assert sent == []
+        window._update_cash_alert(session, {"cash": 4999999, "cash_readable": True})
+        window._update_cash_alert(session, {"cash": 4990000, "cash_readable": True})
+        assert len(sent) == 1 and sent[0][0][1] == "cash_low"
+        assert sent[0][1]["details"] == {"cash": 4999999, "threshold_wan": 500}
+        assert local == []
+        window._update_cash_alert(session, {"cash": 5000000, "cash_readable": True})
+        window._local_alert_enabled = True
+        window._update_cash_alert(session, {"cash": 4900000, "cash_readable": True})
+        assert len(sent) == 2 and len(local) == 1
     finally:
         window.close()
         app.processEvents()

@@ -11,6 +11,7 @@ BARK_PUSH_URL = "https://api.day.app/push"
 EVENT_LABELS = {
     "inventory_full": "背包已满",
     "inventory_capacity": "背包容量不足",
+    "cash_low": "游戏币不足",
     "inventory_closed": "背包未打开",
     "inventory_occluded": "背包被遮挡",
     "window_occluded": "窗口被遮挡",
@@ -29,6 +30,14 @@ def event_message(event: dict[str, Any]) -> tuple[str, str]:
     details = [f"{device_name} · {role or '未识别角色'}", event_name]
     if event.get("empty_slots") is not None:
         details[-1] += f"，剩余 {event['empty_slots']} 格"
+    if event.get("event_type") == "cash_low":
+        try:
+            payload = json.loads(str(event.get("payload_json") or "{}"))
+            money = payload.get("details") or {}
+            cash, threshold = int(money["cash"]), int(money["threshold_wan"])
+            details[-1] += f"，当前 {cash:,}，低于 {threshold} 万"
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
     return f"背包监控 · {event_name}", "\n".join(details)
 
 

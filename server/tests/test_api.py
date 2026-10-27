@@ -318,6 +318,27 @@ def test_bark_settings_test_and_new_event_push(tmp_path: Path, monkeypatch) -> N
         assert "清风知夏" in str(sent[1]["body"])
 
 
+def test_cash_low_event_push_contains_amount_and_rejects_non_low_amount(tmp_path: Path, monkeypatch) -> None:
+    sent = []
+    monkeypatch.setattr(main_module, "send_bark_notification", lambda *args, **kwargs: sent.append(kwargs))
+    with make_client(tmp_path) as client:
+        assert client.put(
+            "/api/v1/master/notifications/bark", headers=master_headers(),
+            json={"enabled": True, "device_key": "BarkDeviceKey123"},
+        ).status_code == 200
+        event = {
+            "event_id": "cash-low-001", "event_type": "cash_low",
+            "occurred_at": "2026-10-27T18:00:00+08:00", "server_name": "秦淮风光",
+            "role_name": "清风知夏", "details": {"cash": 4999999, "threshold_wan": 500},
+        }
+        assert client.post("/api/v1/slave/events", headers=device_headers(), json=event).status_code == 202
+        assert len(sent) == 1
+        assert "4,999,999" in sent[0]["body"] and "500 万" in sent[0]["body"]
+        event["event_id"] = "cash-low-invalid"
+        event["details"]["cash"] = 5000000
+        assert client.post("/api/v1/slave/events", headers=device_headers(), json=event).status_code == 422
+
+
 def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_updates(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         saved = client.put(
@@ -329,6 +350,7 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert saved.json()["local_alert_enabled"] is True
         assert saved.json()["web_sound_enabled"] is True
         assert saved.json()["capacity_threshold"] == 3
+        assert saved.json()["cash_threshold_wan"] == 500
 
         heartbeat = client.post(
             "/api/v1/slave/heartbeat", headers=device_headers(),
@@ -336,7 +358,7 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         )
         assert heartbeat.status_code == 200
         assert heartbeat.json()["alert_settings"] == {
-            "local_alert_enabled": True, "capacity_threshold": 3,
+            "local_alert_enabled": True, "capacity_threshold": 3, "cash_threshold_wan": 500,
         }
         assert "web_sound_enabled" not in heartbeat.json()["alert_settings"]
 
@@ -348,6 +370,18 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
         assert legacy.json()["local_alert_enabled"] is True
         assert legacy.json()["web_sound_enabled"] is True
         assert legacy.json()["capacity_threshold"] == 3
+        assert legacy.json()["cash_threshold_wan"] == 500
+
+        changed = client.put(
+            "/api/v1/master/notifications/bark", headers=master_headers(),
+            json={"enabled": False, "cash_threshold_wan": 320},
+        )
+        assert changed.status_code == 200
+        assert changed.json()["cash_threshold_wan"] == 320
+        assert client.post(
+            "/api/v1/slave/heartbeat", headers=device_headers(),
+            json={"hostname": "machine", "app_version": "V2.10.0"},
+        ).json()["alert_settings"]["cash_threshold_wan"] == 320
 
 
 def test_window_status_snapshot_is_visible_to_master(tmp_path: Path) -> None:

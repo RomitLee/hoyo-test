@@ -167,6 +167,7 @@ class RelayDatabase:
                     local_alert_enabled INTEGER NOT NULL DEFAULT 0,
                     web_sound_enabled INTEGER NOT NULL DEFAULT 0,
                     capacity_threshold INTEGER NOT NULL DEFAULT 0,
+                    cash_threshold_wan INTEGER NOT NULL DEFAULT 500,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
                 );
@@ -191,6 +192,7 @@ class RelayDatabase:
             self._ensure_column(connection, "bark_settings", "local_alert_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "web_sound_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "bark_settings", "capacity_threshold", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "bark_settings", "cash_threshold_wan", "INTEGER NOT NULL DEFAULT 500")
             self._ensure_column(connection, "monitor_logs", "panel_type", "TEXT")
             self._ensure_column(connection, "monitor_logs", "confidence", "REAL")
             self._ensure_column(connection, "monitor_logs", "message", "TEXT")
@@ -922,7 +924,7 @@ class RelayDatabase:
     def get_bark_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,updated_at FROM bark_settings WHERE account_id=?",
+                "SELECT device_key,enabled,call_enabled,repeat_minutes,notify_after,local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,updated_at FROM bark_settings WHERE account_id=?",
                 (account_id,),
             ).fetchone()
         if row is None:
@@ -930,6 +932,7 @@ class RelayDatabase:
                 "device_key": "", "enabled": False, "call_enabled": True,
                 "repeat_minutes": 10, "notify_after": None, "updated_at": None,
                 "local_alert_enabled": False, "web_sound_enabled": False, "capacity_threshold": 0,
+                "cash_threshold_wan": 500,
             }
         item = dict(row)
         item["enabled"] = bool(item["enabled"])
@@ -942,7 +945,7 @@ class RelayDatabase:
         self, account_id: int, *, device_key: str | None, enabled: bool,
         call_enabled: bool, repeat_minutes: int,
         local_alert_enabled: bool | None = None, web_sound_enabled: bool | None = None,
-        capacity_threshold: int | None = None,
+        capacity_threshold: int | None = None, cash_threshold_wan: int | None = None,
     ) -> dict[str, Any]:
         current = self.get_bark_settings(account_id)
         stored_key = current["device_key"] if device_key is None else device_key
@@ -955,18 +958,20 @@ class RelayDatabase:
         local_alert_enabled = current["local_alert_enabled"] if local_alert_enabled is None else local_alert_enabled
         web_sound_enabled = current["web_sound_enabled"] if web_sound_enabled is None else web_sound_enabled
         capacity_threshold = current["capacity_threshold"] if capacity_threshold is None else capacity_threshold
+        cash_threshold_wan = current["cash_threshold_wan"] if cash_threshold_wan is None else cash_threshold_wan
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO bark_settings(account_id,device_key,enabled,call_enabled,repeat_minutes,notify_after,
-                   local_alert_enabled,web_sound_enabled,capacity_threshold,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                   local_alert_enabled,web_sound_enabled,capacity_threshold,cash_threshold_wan,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
                    device_key=excluded.device_key,enabled=excluded.enabled,
                    call_enabled=excluded.call_enabled,repeat_minutes=excluded.repeat_minutes,
                    notify_after=excluded.notify_after,local_alert_enabled=excluded.local_alert_enabled,
                    web_sound_enabled=excluded.web_sound_enabled,capacity_threshold=excluded.capacity_threshold,
+                   cash_threshold_wan=excluded.cash_threshold_wan,
                    updated_at=excluded.updated_at""",
                 (account_id, stored_key, int(enabled), int(call_enabled), repeat_minutes, notify_after,
-                 int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, now),
+                 int(local_alert_enabled), int(web_sound_enabled), capacity_threshold, cash_threshold_wan, now),
             )
         return self.get_bark_settings(account_id)
 
@@ -975,7 +980,7 @@ class RelayDatabase:
             row = connection.execute(
                 """SELECT e.id AS server_event_id,e.device_id,e.event_type,e.server_name,e.role_name,
                    e.empty_slots,e.occurred_at,e.acked_at,e.bark_last_sent_at,e.bark_send_count,
-                   b.device_key,b.enabled,b.call_enabled,b.repeat_minutes,
+                   e.payload_json,b.device_key,b.enabled,b.call_enabled,b.repeat_minutes,
                    d.display_name,d.hostname
                    FROM events e JOIN bark_settings b ON b.account_id=e.account_id
                    LEFT JOIN devices d ON d.device_id=e.device_id
@@ -989,7 +994,7 @@ class RelayDatabase:
             rows = connection.execute(
                 """SELECT e.id AS server_event_id,e.account_id,e.device_id,e.event_type,e.server_name,
                    e.role_name,e.empty_slots,e.occurred_at,e.acked_at,e.bark_last_sent_at,e.bark_send_count,
-                   b.device_key,b.enabled,b.call_enabled,b.repeat_minutes,
+                   e.payload_json,b.device_key,b.enabled,b.call_enabled,b.repeat_minutes,
                    d.display_name,d.hostname
                    FROM events e JOIN bark_settings b ON b.account_id=e.account_id
                    LEFT JOIN devices d ON d.device_id=e.device_id
@@ -1024,6 +1029,7 @@ class RelayDatabase:
             "alert_settings": {
                 "local_alert_enabled": alerts["local_alert_enabled"],
                 "capacity_threshold": alerts["capacity_threshold"],
+                "cash_threshold_wan": alerts["cash_threshold_wan"],
             },
         }
 
