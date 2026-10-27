@@ -105,23 +105,17 @@ Remove-Item Env:PYTHONPATH
 
 ## Windows 打包与发布
 
-完整构建两端：
+当前只发布从机客户端。打包默认只生成从机目录、从机 ZIP 和从机签名更新清单：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Role both -OutputDirectory dist
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -SkipInstall -OutputDirectory dist-client
 ```
 
-只修改主机时复用已有从机包；只修改从机时使用 `-Role slave`：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -SkipInstall -Role master -ReuseDirectory dist-master-v230-slave-v230 -OutputDirectory dist-next
-```
-
-复用目录需保留原签名清单和安装包，复用端版本必须与源码常量一致。构建脚本验证包大小、哈希和版本，生成分角色签名清单、带版本号 ZIP、更新器和自检报告。输出目录不要指向复用目录或正在运行的安装目录。
+历史主机源码继续保留，但日常需求不修改、构建或发布主机。现有签名格式仍包含历史主机包元数据；脚本从已签名的旧清单复用这部分元数据，不复制主机文件。构建脚本验证从机包大小、哈希和版本，生成从机签名清单、带版本号 ZIP、更新器和自检报告。复用目录需保留原签名清单；输出目录不要指向复用目录或正在运行的安装目录。
 
 默认打包不带本机账号及配对凭据。`-IncludeLocalSettings` 仅用于私人调试，生成的包不可公开分发。安装包和构建产物不提交 Git。
 
-发布时先备份、部署并验证服务端，再上传包，最后切换对应角色清单；保留旧共享过渡清单和历史包，不覆盖旧版本字节。不能将主机清单作为从机清单发布。详细上线核对见 [本次发布记录](docs/30-screenshot-production-release.md)。
+发布时先备份、部署并验证服务端，再上传从机包，最后切换从机更新清单；保留历史主机清单和安装包，不覆盖旧版本字节。详细上线核对见 [本次发布记录](docs/30-screenshot-production-release.md)。
 
 ## 服务端部署
 

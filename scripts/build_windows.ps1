@@ -6,8 +6,8 @@ param(
     [string]$SigningPrivateKey = "",
     [string]$OutputDirectory = "dist",
     [ValidateSet("both", "master", "slave")]
-    [string]$Role = "both",
-    [string]$ReuseDirectory = "dist-v200"
+    [string]$Role = "slave",
+    [string]$ReuseDirectory = "dist-master-v230-slave-v2120"
 )
 
 $ErrorActionPreference = "Stop"
@@ -107,6 +107,11 @@ try {
             $ExpectedVersion = if ($BuildRole -eq "slave") { $SlaveVersion } else { $ClientVersion }
             $ReusedVersion = if ($ReusedPackage.client_version) { $ReusedPackage.client_version } else { $ReuseManifest.client_version }
             if ($ReusedVersion -ne $ExpectedVersion) { throw "Unchanged $BuildRole version must match its reused package." }
+            if ($BuildRole -eq "master" -and $Role -eq "slave") {
+                # The legacy master stays on its existing channel. Its signed
+                # metadata is needed by schema 3, but its files are not shipped.
+                continue
+            }
             $ReusedZip = Join-Path $ReuseRoot $ReusedPackage.filename
             if ((Get-FileHash -LiteralPath $ReusedZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $ReusedPackage.sha256 -or (Get-Item -LiteralPath $ReusedZip).Length -ne $ReusedPackage.size) {
                 throw "Reused package integrity check failed."
@@ -131,9 +136,9 @@ try {
     }
     if ($Role -in @("both", "slave")) { Copy-Item -LiteralPath (Join-Path $ProjectRoot "configs") -Destination $SlaveOutputRoot -Recurse -Force }
     $SlaveRuntime = Join-Path $SlaveOutputRoot "runtime"
-    $MasterRuntime = Join-Path $MasterOutputRoot "runtime"
+    $MasterRuntime = if ($MasterOutputRoot) { Join-Path $MasterOutputRoot "runtime" } else { $null }
     New-Item -ItemType Directory -Path $SlaveRuntime -Force | Out-Null
-    New-Item -ItemType Directory -Path $MasterRuntime -Force | Out-Null
+    if ($MasterRuntime) { New-Item -ItemType Directory -Path $MasterRuntime -Force | Out-Null }
     # Published packages must start without machine-specific identities or
     # credentials. Each slave/master writes its own settings on first setup.
     if ($IncludeLocalSettings -and $Role -ne "both") { throw "Private local settings require a full build." }
@@ -152,10 +157,10 @@ try {
     }
     $Readme = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "packaging") -File | Select-Object -First 1
     Copy-Item -LiteralPath $Readme.FullName -Destination $SlaveOutputRoot -Force
-    Copy-Item -LiteralPath $Readme.FullName -Destination $MasterOutputRoot -Force
+    if ($MasterOutputRoot) { Copy-Item -LiteralPath $Readme.FullName -Destination $MasterOutputRoot -Force }
     $OutputExe = Get-ChildItem -LiteralPath $SlaveOutputRoot -Filter "*.exe" -File | Where-Object Name -ne $UpdaterExe.Name
-    $MasterExe = Get-ChildItem -LiteralPath $MasterOutputRoot -Filter "*.exe" -File | Where-Object Name -ne $UpdaterExe.Name
-    if (-not $OutputExe -or -not $MasterExe) { throw "Packaged executable was not found." }
+    $MasterExe = if ($MasterOutputRoot) { Get-ChildItem -LiteralPath $MasterOutputRoot -Filter "*.exe" -File | Where-Object Name -ne $UpdaterExe.Name } else { $null }
+    if (-not $OutputExe -or ($MasterOutputRoot -and -not $MasterExe)) { throw "Packaged executable was not found." }
 
     $SelfTest = Start-Process -FilePath $OutputExe.FullName -ArgumentList "--package-self-test" `
         -WindowStyle Hidden -Wait -PassThru
@@ -184,20 +189,22 @@ try {
     $UiSelfTestResult = Get-Content -LiteralPath $UiSelfTestReport -Raw | ConvertFrom-Json
     if (-not $UiSelfTestResult.ok) { throw "Package UI self-test reported a startup failure." }
 
-    $MasterSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-self-test" `
-        -WindowStyle Hidden -Wait -PassThru
-    if ($MasterSelfTest.ExitCode -ne 0) { throw "Master packaged executable self-test failed." }
-    $MasterSelfTestReport = Join-Path $MasterOutputRoot "runtime\master-package-self-test.json"
-    if (-not (Test-Path -LiteralPath $MasterSelfTestReport)) { throw "Master package self-test report was not created." }
-    $MasterSelfTestResult = Get-Content -LiteralPath $MasterSelfTestReport -Raw | ConvertFrom-Json
-    if (-not $MasterSelfTestResult.ok) { throw "Master package self-test reported a dependency failure." }
-    if ($MasterSelfTestResult.client_version -ne $ClientVersion) { throw "Master package version does not match the release version." }
+    if ($MasterOutputRoot) {
+        $MasterSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-self-test" `
+            -WindowStyle Hidden -Wait -PassThru
+        if ($MasterSelfTest.ExitCode -ne 0) { throw "Master packaged executable self-test failed." }
+        $MasterSelfTestReport = Join-Path $MasterOutputRoot "runtime\master-package-self-test.json"
+        if (-not (Test-Path -LiteralPath $MasterSelfTestReport)) { throw "Master package self-test report was not created." }
+        $MasterSelfTestResult = Get-Content -LiteralPath $MasterSelfTestReport -Raw | ConvertFrom-Json
+        if (-not $MasterSelfTestResult.ok) { throw "Master package self-test reported a dependency failure." }
+        if ($MasterSelfTestResult.client_version -ne $ClientVersion) { throw "Master package version does not match the release version." }
 
-    $MasterUiSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-ui-self-test" `
-        -WindowStyle Hidden -Wait -PassThru
-    if ($MasterUiSelfTest.ExitCode -ne 0) { throw "Master packaged UI startup self-test failed." }
-    $MasterUiResult = Get-Content -LiteralPath (Join-Path $MasterRuntime "master-package-ui-self-test.json") -Raw | ConvertFrom-Json
-    if (-not $MasterUiResult.ok) { throw "Master package UI self-test reported a startup failure." }
+        $MasterUiSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-ui-self-test" `
+            -WindowStyle Hidden -Wait -PassThru
+        if ($MasterUiSelfTest.ExitCode -ne 0) { throw "Master packaged UI startup self-test failed." }
+        $MasterUiResult = Get-Content -LiteralPath (Join-Path $MasterRuntime "master-package-ui-self-test.json") -Raw | ConvertFrom-Json
+        if (-not $MasterUiResult.ok) { throw "Master package UI self-test reported a startup failure." }
+    }
     # UI self-tests create synthetic startup/close logs; never publish these.
     $TestOutbox = Join-Path $SlaveRuntime "monitor-log-outbox.json"
     if (Test-Path -LiteralPath $TestOutbox) {
@@ -205,13 +212,12 @@ try {
     }
 
     $SlaveArchive = Join-Path $DistRoot ((Split-Path -Leaf $SlaveOutputRoot) + ".$SlaveVersion.zip")
-    $MasterArchive = Join-Path $DistRoot ((Split-Path -Leaf $MasterOutputRoot) + ".$ClientVersion.zip")
+    $MasterArchive = if ($MasterOutputRoot) { Join-Path $DistRoot ((Split-Path -Leaf $MasterOutputRoot) + ".$ClientVersion.zip") } else { $null }
     if ($Role -eq "master") { Copy-Item -LiteralPath (Join-Path $ReuseRoot $ReuseManifest.packages.slave.filename) -Destination $SlaveArchive }
     else { Compress-Archive -LiteralPath $SlaveOutputRoot -DestinationPath $SlaveArchive -CompressionLevel Optimal }
-    if ($Role -eq "slave") { Copy-Item -LiteralPath (Join-Path $ReuseRoot $ReuseManifest.packages.master.filename) -Destination $MasterArchive }
-    else { Compress-Archive -LiteralPath $MasterOutputRoot -DestinationPath $MasterArchive -CompressionLevel Optimal }
+    if ($MasterArchive) { Compress-Archive -LiteralPath $MasterOutputRoot -DestinationPath $MasterArchive -CompressionLevel Optimal }
     $SlaveHash = (Get-FileHash -LiteralPath $SlaveArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-    $MasterHash = (Get-FileHash -LiteralPath $MasterArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $MasterHash = if ($MasterArchive) { (Get-FileHash -LiteralPath $MasterArchive -Algorithm SHA256).Hash.ToLowerInvariant() } else { $ReuseManifest.packages.master.sha256 }
     $SlavePackage = [ordered]@{
         filename = (Split-Path -Leaf $SlaveArchive)
         sha256 = $SlaveHash
@@ -221,7 +227,7 @@ try {
         archive_root = (Split-Path -Leaf $SlaveOutputRoot)
         executable = $OutputExe.Name
     }
-    $MasterPackage = [ordered]@{
+    $MasterPackage = if ($MasterArchive) { [ordered]@{
         filename = (Split-Path -Leaf $MasterArchive)
         sha256 = $MasterHash
         size = (Get-Item -LiteralPath $MasterArchive).Length
@@ -229,7 +235,7 @@ try {
         download_path = "/api/v1/updates/download/master/$ClientVersion"
         archive_root = (Split-Path -Leaf $MasterOutputRoot)
         executable = $MasterExe.Name
-    }
+    } } else { $ReuseManifest.packages.master }
     $Manifest = [ordered]@{
         schema_version = 3
         release_role = "master"
@@ -242,15 +248,15 @@ try {
         }
         layout = [ordered]@{
             slave_directory = (Split-Path -Leaf $SlaveOutputRoot)
-            master_directory = (Split-Path -Leaf $MasterOutputRoot)
+            master_directory = $MasterPackage.archive_root
             slave_archive = (Split-Path -Leaf $SlaveArchive)
-            master_archive = (Split-Path -Leaf $MasterArchive)
+            master_archive = $MasterPackage.filename
         }
         checks = [ordered]@{
             slave_dependencies = $true
             slave_ui_startup = $true
-            master_dependencies = $true
-            master_ui_startup = $true
+            master_dependencies = [bool]$MasterOutputRoot
+            master_ui_startup = [bool]$MasterOutputRoot
             independent_role_versions = $true
         }
         sha256 = [ordered]@{
@@ -258,7 +264,8 @@ try {
             master_archive = $MasterHash
         }
     }
-    foreach ($ManifestRole in @("master", "slave")) {
+    $ManifestRoles = if ($Role -eq "slave") { @("slave") } else { @("master", "slave") }
+    foreach ($ManifestRole in $ManifestRoles) {
         $Manifest.release_role = $ManifestRole
         $Manifest.client_version = if ($ManifestRole -eq "master") { $ClientVersion } else { $SlaveVersion }
         $SignatureLines = @(
@@ -300,8 +307,9 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Release manifest signature self-test failed." }
 
     }
-    Copy-Item -LiteralPath (Join-Path $DistRoot "release-manifest-master.json") -Destination (Join-Path $DistRoot "release-manifest.json")
-    if ($ReuseManifest) {
+    $DefaultManifest = if ($Role -eq "slave") { "release-manifest-slave.json" } else { "release-manifest-master.json" }
+    Copy-Item -LiteralPath (Join-Path $DistRoot $DefaultManifest) -Destination (Join-Path $DistRoot "release-manifest.json")
+    if ($ReuseManifest -and $Role -ne "slave") {
         $LegacyPath = Join-Path $ReuseRoot "legacy-release-manifest.json"
         if (-not (Test-Path -LiteralPath $LegacyPath)) { $LegacyPath = Join-Path $ReuseRoot "release-manifest.json" }
         & $PythonExe -c "import json,sys; sys.path.insert(0,'src'); from hoyo_analyzer.auto_update import verify_manifest_signature; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); raise SystemExit(0 if verify_manifest_signature(d) else 1)" $LegacyPath
@@ -321,10 +329,12 @@ try {
     }
     Write-Host ""
     Write-Host "Slave build: $SlaveOutputRoot" -ForegroundColor Green
-    Write-Host "Master build: $MasterOutputRoot" -ForegroundColor Green
     Write-Host "Slave archive: $SlaveArchive" -ForegroundColor Green
-    Write-Host "Master archive: $MasterArchive" -ForegroundColor Green
-    Write-Host "Updater, signature, dependency, UI startup, and master package self-tests: passed" -ForegroundColor Green
+    if ($MasterOutputRoot) {
+        Write-Host "Master build: $MasterOutputRoot" -ForegroundColor Green
+        Write-Host "Master archive: $MasterArchive" -ForegroundColor Green
+    }
+    Write-Host "Updater, signature, dependency, and client UI startup self-tests: passed" -ForegroundColor Green
 } finally {
     Pop-Location
 }
