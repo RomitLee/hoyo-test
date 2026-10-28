@@ -52,7 +52,7 @@ def test_upload_checks_signed_manifest_size_and_hash_before_cos_call(tmp_path, m
     class Client:
         def put_object(self, **kwargs):
             calls.append(kwargs["Key"])
-    monkeypatch.setattr(store, "_client", lambda: Client())
+    monkeypatch.setattr(store, "_client", lambda **kwargs: Client())
     monkeypatch.setattr(store, "exists", lambda key: True)
     with pytest.raises(ValueError):
         store.upload_verified("releases/a", archive, "0" * 64, 5)

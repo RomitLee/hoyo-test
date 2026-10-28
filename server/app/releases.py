@@ -57,13 +57,13 @@ class ReleaseStore:
         return all((self.settings.cos_release_secret_id, self.settings.cos_release_secret_key,
                     self.settings.cos_release_bucket, self.settings.cos_release_region))
 
-    def _client(self):
+    def _client(self, *, timeout: int = 30):
         from qcloud_cos import CosConfig, CosS3Client
 
         config = CosConfig(Region=self.settings.cos_release_region,
                            SecretId=self.settings.cos_release_secret_id,
                            SecretKey=self.settings.cos_release_secret_key,
-                           Scheme="https", Timeout=30)
+                           Scheme="https", Timeout=timeout)
         return CosS3Client(config, retry=0)
 
     @staticmethod
@@ -102,7 +102,7 @@ class ReleaseStore:
         if size != expected_size or digest.hexdigest() != expected_hash:
             raise ValueError("安装包大小或 SHA-256 与清单不一致")
         with archive.open("rb") as source:
-            self._client().put_object(Bucket=self.settings.cos_release_bucket, Key=key,
+            self._client(timeout=600).put_object(Bucket=self.settings.cos_release_bucket, Key=key,
                                       Body=source, ContentType="application/zip",
                                       CacheControl="private, max-age=3600")
         self.exists(key)
