@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, json } from '../api'
+import { api, json, USERNAME_KEY } from '../api'
 import { dailyProfit, gemTypes, synthesisRows, type GemKind, type SaleMode } from '../gemMath'
 import Panel from './Panel.vue'
 import '../styles/gem.css'
 
 type Zone = { id: string; name: string; quote_yuan: number; purchase_wan: number; margin_percent: number; account_count: number; target_profit_yuan: number }
 type Settings = { revision: number; zones: Zone[]; price_ratios: Record<GemKind, Record<string, number>>; synthesis_prices: Record<GemKind, number>; average_sale_prices: Record<GemKind, number> }
-const props = defineProps<{ mode: 'synthesis' | 'profit' | 'zones' }>()
+const props = defineProps<{ mode: 'merchant' | 'zones' }>()
 const settings = ref<Settings | null>(null)
 const selectedZoneId = ref('')
 const gemKind = ref<GemKind>('normal')
@@ -16,6 +16,7 @@ const saving = ref(false)
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
+const editedSinceLoad = ref(false)
 const overallQuote = ref<number | string>(0)
 const overallAccounts = ref<number | string>(0)
 const overallPurchase = ref<number | string>(0)
@@ -44,16 +45,40 @@ const overallNetYuan = computed(() => overallProfit.value
 
 const fmt = (value: number | null, digits = 0) => value == null || !Number.isFinite(value) ? '—'
   : value.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
+const cacheKey = () => `hoyo.gemSettings.${localStorage.getItem(USERNAME_KEY) || ''}`
+function cacheSettings(value: Settings) {
+  try { sessionStorage.setItem(cacheKey(), JSON.stringify(value)) } catch { /* storage may be unavailable */ }
+}
+function isSettings(value: unknown): value is Settings {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Partial<Settings>
+  return typeof item.revision === 'number' && Array.isArray(item.zones)
+    && !!item.price_ratios && !!item.synthesis_prices && !!item.average_sale_prices
+}
+function applySettings(value: Settings) {
+  settings.value = value
+  selectedZoneId.value = value.zones.some(z => z.id === selectedZoneId.value)
+    ? selectedZoneId.value : value.zones[0]?.id || ''
+  if (!overallQuote.value) overallQuote.value = value.zones[0]?.quote_yuan || 0
+}
 
 async function load() {
-  loading.value = true
+  try {
+    const cached = sessionStorage.getItem(cacheKey())
+    if (cached) {
+      const parsed: unknown = JSON.parse(cached)
+      if (isSettings(parsed)) applySettings(parsed)
+    }
+  } catch { /* a malformed cache simply falls back to the server */ }
+  loading.value = !settings.value
   error.value = ''
   try {
-    settings.value = await api<Settings>('/api/v1/master/gem-settings')
-    selectedZoneId.value = settings.value.zones.some(z => z.id === selectedZoneId.value)
-      ? selectedZoneId.value : settings.value.zones[0]?.id || ''
-    if (!overallQuote.value) overallQuote.value = settings.value.zones[0]?.quote_yuan || 0
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
+    const fresh = await api<Settings>('/api/v1/master/gem-settings')
+    if (!editedSinceLoad.value) { applySettings(fresh); cacheSettings(fresh) }
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause)
+    error.value = settings.value ? `最新配置加载失败，当前显示本次会话的缓存：${message}` : message
+  }
   finally { loading.value = false }
 }
 
@@ -64,7 +89,8 @@ async function save() {
   notice.value = ''
   try {
     settings.value = await api<Settings>('/api/v1/master/gem-settings', json('PUT', settings.value))
-    notice.value = props.mode === 'zones' ? '区服比例已保存' : props.mode === 'profit' ? '单服参数已保存' : '宝石价格和售卖比例已保存'
+    cacheSettings(settings.value)
+    notice.value = props.mode === 'zones' ? '区服比例已保存' : '宝石商人参数已保存'
     selectedZoneId.value = settings.value.zones.some(z => z.id === selectedZoneId.value)
       ? selectedZoneId.value : settings.value.zones[0]?.id || ''
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
@@ -73,6 +99,7 @@ async function save() {
 
 function addZone() {
   if (!settings.value) return
+  editedSinceLoad.value = true
   let number = settings.value.zones.length + 1
   while (settings.value.zones.some(zone => zone.name === `新区服 ${number}`)) number++
   const id = crypto.randomUUID().replaceAll('-', '')
@@ -83,6 +110,7 @@ function addZone() {
 
 function removeZone(id: string) {
   if (!settings.value) return
+  editedSinceLoad.value = true
   settings.value.zones = settings.value.zones.filter(zone => zone.id !== id)
   if (selectedZoneId.value === id) selectedZoneId.value = settings.value.zones[0]?.id || ''
 }
@@ -91,7 +119,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="gem-workspace">
+  <div class="gem-workspace" @input.capture="editedSinceLoad = true" @change.capture="editedSinceLoad = true">
     <p v-if="error" class="message error" role="alert">{{ error }}</p>
     <p v-if="notice" class="message success" role="status">{{ notice }}</p>
     <p v-if="loading" class="empty">正在读取宝石计算配置…</p>
@@ -107,7 +135,7 @@ onMounted(load)
         <div class="gem-actions"><button type="button" class="secondary" :disabled="settings.zones.length >= 50" @click="addZone">新增区服</button><button type="button" class="primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存区服比例' }}</button></div>
       </Panel>
 
-      <template v-else-if="mode === 'synthesis'">
+      <div v-else class="gem-merchant-grid">
         <Panel title="宝石合成" meta="按一级宝石价格计算成本与售价">
           <p v-if="!settings.zones.length" class="empty">请先到“设置”中新增区服比例。</p>
           <template v-else>
@@ -125,9 +153,7 @@ onMounted(load)
             <div class="gem-actions"><button type="button" class="primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存宝石价格与售卖比例' }}</button></div>
           </template>
         </Panel>
-      </template>
-
-      <template v-else>
+        <div class="gem-profit-column">
         <Panel title="单服日利润" meta="按一个区服的每日经营参数估算">
           <p v-if="!settings.zones.length" class="empty">请先到“设置”中新增区服比例。</p>
           <template v-else-if="selectedZone && profit">
@@ -159,7 +185,8 @@ onMounted(load)
           <p v-else class="hint">请填写有效比例、账号数量、总收购金额和利润率。</p>
           <p class="hint">净利润＝总收购金额 × 利润率 − 总账号数 × 0.6 元/小时 × 24 小时折算的游戏币；人民币按填写的 3000 万比例换算。结果随输入实时更新。</p>
         </Panel>
-      </template>
+        </div>
+      </div>
     </template>
   </div>
 </template>

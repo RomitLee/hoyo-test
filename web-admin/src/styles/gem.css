@@ -1,5 +1,8 @@
 .gem-workspace { display: grid; gap: 14px; min-width: 0; }
 .settings-grid > .gem-workspace { grid-column: 1 / -1; }
+.gem-merchant-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); align-items: start; gap: 16px; min-width: 0; }
+.gem-profit-column { display: grid; align-content: start; gap: 16px; min-width: 0; }
+.gem-merchant-grid > .panel { min-width: 0; }
 .gem-workspace .panel { min-width: 0; }
 .gem-workspace .hint { margin: 4px 0 16px; line-height: 1.6; }
 .gem-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 14px 0 18px; }
@@ -26,3 +29,4 @@
 .gem-target { margin-top: 14px; padding: 14px 17px; border-radius: 10px; background: #fff8e7; color: #6e582c; }
 .gem-target strong { color: #8f5710; }
 @media (max-width: 700px) { .gem-zone-table th, .gem-zone-table td, .gem-price-table th, .gem-price-table td { padding: 9px 7px; } }
+@media (max-width: 1180px) { .gem-merchant-grid { grid-template-columns: minmax(0, 1fr); } }
