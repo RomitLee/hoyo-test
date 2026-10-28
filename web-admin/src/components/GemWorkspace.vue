@@ -16,6 +16,10 @@ const saving = ref(false)
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
+const overallQuote = ref<number | string>(0)
+const overallAccounts = ref<number | string>(0)
+const overallPurchase = ref<number | string>(0)
+const overallMargin = ref<number | string>(0)
 
 const selectedZone = computed(() => settings.value?.zones.find(zone => zone.id === selectedZoneId.value) || settings.value?.zones[0])
 const quote = computed(() => selectedZone.value?.quote_yuan || 0)
@@ -27,6 +31,16 @@ const profit = computed(() => selectedZone.value ? dailyProfit(
   Number(selectedZone.value.purchase_wan) || 0, Number(selectedZone.value.margin_percent) || 0,
   Number(selectedZone.value.account_count) || 0, quote.value,
   Number(selectedZone.value.target_profit_yuan) || 0) : null)
+const overallValid = computed(() => [overallQuote.value, overallAccounts.value, overallPurchase.value, overallMargin.value]
+  .every(value => value !== '' && Number.isFinite(Number(value)))
+  && Number(overallQuote.value) > 0 && Number(overallAccounts.value) >= 0
+  && Number.isInteger(Number(overallAccounts.value)) && Number(overallPurchase.value) >= 0
+  && Number(overallMargin.value) >= 0)
+const overallProfit = computed(() => overallValid.value ? dailyProfit(
+  Number(overallPurchase.value), Number(overallMargin.value), Number(overallAccounts.value),
+  Number(overallQuote.value), 0) : null)
+const overallNetYuan = computed(() => overallProfit.value
+  ? overallProfit.value.netWan / 3000 * Number(overallQuote.value) : null)
 
 const fmt = (value: number | null, digits = 0) => value == null || !Number.isFinite(value) ? '—'
   : value.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
@@ -38,6 +52,7 @@ async function load() {
     settings.value = await api<Settings>('/api/v1/master/gem-settings')
     selectedZoneId.value = settings.value.zones.some(z => z.id === selectedZoneId.value)
       ? selectedZoneId.value : settings.value.zones[0]?.id || ''
+    if (!overallQuote.value) overallQuote.value = settings.value.zones[0]?.quote_yuan || 0
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
   finally { loading.value = false }
 }
@@ -129,6 +144,20 @@ onMounted(load)
             <p class="hint">净利（万游戏币）＝收购额 × 利润率 − 点卡折算游戏币。点卡按每个号 0.6 元/小时、每天 24 小时计算。</p>
             <div class="gem-actions"><button type="button" class="primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存单服参数' }}</button></div>
           </template>
+        </Panel>
+        <Panel title="综合测算" meta="汇总所有账号一天的收购与点卡支出">
+          <div class="gem-fields">
+            <label>3000 万游戏币比例（元）<input v-model.number="overallQuote" type="number" min="0.01" step="0.01" inputmode="decimal"></label>
+            <label>总账号数量（个）<input v-model.number="overallAccounts" type="number" min="0" step="1" inputmode="numeric"></label>
+            <label>一天总收购金额（万游戏币）<input v-model.number="overallPurchase" type="number" min="0" step="100" inputmode="decimal"></label>
+            <label>实际利润率（%）<input v-model.number="overallMargin" type="number" min="0" step="0.1" inputmode="decimal"></label>
+          </div>
+          <template v-if="overallProfit">
+            <div class="gem-net"><span>预计一天净利润</span><strong>{{ fmt(overallProfit.netWan, 2) }} 万游戏币</strong><strong>≈ {{ fmt(overallNetYuan, 2) }} 元</strong><small>已扣除全部账号点卡</small></div>
+            <div class="gem-results gem-overall-results"><div><small>交易毛利润</small><strong>{{ fmt(overallProfit.grossWan, 2) }} 万游戏币</strong></div><div><small>点卡支出</small><strong>{{ fmt(overallProfit.cardYuan, 2) }} 元</strong><small>≈ {{ fmt(overallProfit.cardWan, 2) }} 万游戏币</small></div></div>
+          </template>
+          <p v-else class="hint">请填写有效比例、账号数量、总收购金额和利润率。</p>
+          <p class="hint">净利润＝总收购金额 × 利润率 − 总账号数 × 0.6 元/小时 × 24 小时折算的游戏币；人民币按填写的 3000 万比例换算。结果随输入实时更新。</p>
         </Panel>
       </template>
     </template>

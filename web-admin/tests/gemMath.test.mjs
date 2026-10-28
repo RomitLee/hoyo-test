@@ -30,3 +30,12 @@ test('single-server net profit and break-even retain source units', () => {
   assert.equal(result.netWan, 1530 - result.cardWan)
   assert.ok(result.breakEvenWan > 0 && result.targetPurchaseWan > result.breakEvenWan)
 })
+
+test('overall daily profit deducts point cards and converts net coins to RMB', () => {
+  const result = dailyProfit(10000, 20, 10, 240, 0)
+  assert.equal(result.grossWan, 2000)
+  assert.ok(Math.abs(result.cardYuan - 144) < 1e-9)
+  assert.ok(Math.abs(result.cardWan - 1800) < 1e-9)
+  assert.ok(Math.abs(result.netWan - 200) < 1e-9)
+  assert.ok(Math.abs(result.netWan / 3000 * 240 - 16) < 1e-9)
+})
