@@ -4,6 +4,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      - path: .env.cos
+        required: false
     volumes:
       - relay_data:/data
       - ./releases:/releases
