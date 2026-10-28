@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import Panel from './components/Panel.vue'
 import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from './api'
 import { estimateStamina } from './stamina'
+import { sortRolesByServer } from './roleSort'
 import alarmSoundUrl from './assets/inventory-alarm-loop-v1.wav'
 
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
@@ -82,11 +83,11 @@ let session = 0
 const windows = computed<RoleCard[]>(() => roles.value.map(role => ({ ...role,
   device: devices.value.find(device => device.device_id === role.device_id) || { device_id: role.device_id || '' },
   stamina_estimate: estimateStamina(role, nowMs.value),
-})).sort((a, b) => Number(b.role_online) - Number(a.role_online) || (b.received_at || b.first_seen_at || '').localeCompare(a.received_at || a.first_seen_at || '')))
+})))
 const stallGroups = computed(() => [
-  { key: 'buy', title: '收货', items: windows.value.filter(item => item.stall_mode === 'buy') },
-  { key: 'sell', title: '出货', items: windows.value.filter(item => item.stall_mode === 'sell') },
-  { key: 'unknown', title: '未知状态', items: windows.value.filter(item => !item.stall_mode || item.stall_mode === 'unknown') },
+  { key: 'buy', title: '收货', items: sortRolesByServer(windows.value.filter(item => item.stall_mode === 'buy')) },
+  { key: 'sell', title: '出货', items: sortRolesByServer(windows.value.filter(item => item.stall_mode === 'sell')) },
+  { key: 'unknown', title: '未知状态', items: sortRolesByServer(windows.value.filter(item => !item.stall_mode || item.stall_mode === 'unknown')) },
 ])
 const snapshotKey = (item: RoleStatus) => item.character_id || `${item.device_id}:${item.window_id}`
 
