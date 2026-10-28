@@ -159,11 +159,10 @@ onMounted(load)
             <div class="gem-sale-tabs" role="group" aria-label="售卖方式"><button type="button" :class="{ active: saleMode === 'ratio' }" :aria-pressed="saleMode === 'ratio'" @click="saleMode = 'ratio'">按比例售卖</button><button type="button" :class="{ active: saleMode === 'average' }" :aria-pressed="saleMode === 'average'" @click="saleMode = 'average'">按均价售卖</button></div>
             <p class="gem-rule">{{ gemTypes[gemKind].rule }}；藏宝阁 {{ gemTypes[gemKind].cbgMinLevel }} 级起可上架，到手按售价的 95% 估算。</p>
             <div class="gem-price-heading"><strong>等级价格表</strong><span>摆摊售价向下取整到万</span></div>
-            <div class="gem-price-list">
-              <div v-for="row in rows" :key="row.level" class="gem-price-row">
-                <div class="gem-row-top"><span class="gem-level">{{ row.level }} <small>级</small></span><div class="gem-row-cost"><strong>合成成本 {{ fmt(row.costCoins / 10000, 2) }} 万</strong><span>{{ fmt(row.units) }} 颗一级 · 约 {{ fmt(row.costYuan, 1) }} 元</span></div><label v-if="saleMode === 'ratio'" class="gem-ratio-field">售卖比例<input v-model.number="settings.price_ratios[gemKind][String(row.level)]" type="number" min="0" max="100" step="0.01" :aria-label="`${gemTypes[gemKind].name}${row.level}级售卖比例`"></label></div>
-                <div class="gem-row-metrics"><div><small>摆摊售价</small><strong>{{ fmt(row.stallWan) }} 万</strong></div><div><small>利润率</small><strong>{{ fmt(row.marginPercent, 2) }}%</strong></div><div><small>藏宝阁到手</small><strong>{{ row.cbgAfterFee == null ? '不可上架' : `${fmt(row.cbgAfterFee, 1)} 元` }}</strong><span v-if="row.cbgPrice != null">售价 {{ fmt(row.cbgPrice, 1) }} 元</span></div></div>
-              </div>
+            <div class="gem-price-table-wrap">
+              <table class="gem-price-table"><thead><tr><th>等级</th><th>合成成本</th><th>{{ saleMode === 'ratio' ? '售卖比例 / 利润' : '利润率' }}</th><th>摆摊售价</th><th>藏宝阁到手</th></tr></thead><tbody>
+                <tr v-for="row in rows" :key="row.level"><td><strong class="gem-level-inline">{{ row.level }} 级</strong><small>{{ fmt(row.units) }} 颗一级</small></td><td><strong>{{ fmt(row.costCoins / 10000, 2) }} 万</strong><small>≈ {{ fmt(row.costYuan, 1) }} 元</small></td><td><input v-if="saleMode === 'ratio'" v-model.number="settings.price_ratios[gemKind][String(row.level)]" type="number" min="0" max="100" step="0.01" :aria-label="`${gemTypes[gemKind].name}${row.level}级售卖比例`"><strong v-else>{{ fmt(row.marginPercent, 2) }}%</strong><small v-if="saleMode === 'ratio'">利润 {{ fmt(row.marginPercent, 2) }}%</small></td><td><strong class="gem-stall-price">{{ fmt(row.stallWan) }} 万</strong></td><td><strong>{{ row.cbgAfterFee == null ? '不可上架' : `${fmt(row.cbgAfterFee, 1)} 元` }}</strong><small v-if="row.cbgPrice != null">售价 {{ fmt(row.cbgPrice, 1) }} 元</small></td></tr>
+              </tbody></table>
             </div>
             <div class="gem-actions"><button type="button" class="gem-save" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存宝石价格与售卖比例' }}</button></div>
           </template>
