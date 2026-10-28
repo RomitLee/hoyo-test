@@ -29,6 +29,7 @@ const panelLabels: Record<string, string> = { inventory: '背包', give: '给予
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
 
 const page = ref<Page>('monitor')
+const monitorView = ref<'card' | 'list'>(localStorage.getItem('hoyo.monitorView') === 'list' ? 'list' : 'card')
 const token = ref(localStorage.getItem(TOKEN_KEY) || '')
 const username = ref(localStorage.getItem(USERNAME_KEY) || '')
 const password = ref('')
@@ -94,6 +95,7 @@ async function snapshotUrl(deviceId: string, windowId: string) {
 }
 
 async function refreshThumbnails() {
+  if (page.value !== 'monitor' || monitorView.value !== 'card') return
   const now = Date.now()
   await Promise.all(windows.value.filter(item => item.screenshot_at && item.screenshot_device_id && item.screenshot_window_id &&
     !thumbnailLoading.has(snapshotKey(item)) && now >= (thumbnailRetryAt[snapshotKey(item)] || 0) &&
@@ -298,7 +300,7 @@ async function refresh() {
     webSound.value = accountAlerts.web_sound_enabled
     if (!webSound.value) stopSound()
     if (page.value !== 'settings') Object.assign(bark, accountAlerts)
-    if (page.value === 'monitor') void refreshThumbnails()
+    if (page.value === 'monitor' && monitorView.value === 'card') void refreshThumbnails()
     alerts.value = Array.from(new Map([...(events.events || []), ...(pendingEvents.events || [])]
       .map(item => [item.server_event_id, item])).values()).sort((a, b) => b.server_event_id - a.server_event_id)
     const nextAlerts = new Set(alerts.value.filter(item => !item.acked_at).map(item => item.server_event_id))
@@ -344,9 +346,15 @@ function start() {
 function choose(next: Page) {
   page.value = next
   notice.value = ''
-  if (next === 'monitor') void refreshThumbnails()
+  if (next === 'monitor' && monitorView.value === 'card') void refreshThumbnails()
   if (next === 'logs') void fetchLogs(0)
   if (next === 'settings') void loadSettings()
+}
+
+function setMonitorView(next: 'card' | 'list') {
+  monitorView.value = next
+  localStorage.setItem('hoyo.monitorView', next)
+  if (next === 'card') void refreshThumbnails()
 }
 
 async function fetchLogs(cursor: number) {
@@ -516,9 +524,22 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
 
         <template v-if="page === 'monitor'">
           <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
+          <div class="monitor-view-bar"><div class="monitor-view-switch" role="group" aria-label="监控展示方式"><button type="button" :class="{ active: monitorView === 'card' }" :aria-pressed="monitorView === 'card'" @click="setMonitorView('card')">卡片</button><button type="button" :class="{ active: monitorView === 'list' }" :aria-pressed="monitorView === 'list'" @click="setMonitorView('list')">列表</button></div></div>
           <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
-          <Panel v-for="group in stallGroups" :key="group.key" :title="group.title" :meta="`${group.items.length} 个角色 · 截图每 ${snapshotInterval} 分钟`">
+          <Panel v-for="group in stallGroups" :key="group.key" :title="group.title" :meta="monitorView === 'card' ? `${group.items.length} 个角色 · 截图每 ${snapshotInterval} 分钟` : `${group.items.length} 个角色`">
             <div v-if="!group.items.length" class="empty">暂无{{ group.title }}角色</div>
+            <div v-else-if="monitorView === 'list'" class="table-wrap monitor-list-wrap">
+              <table class="monitor-list"><thead><tr><th>区服 / 游戏昵称</th><th>监控状态</th><th>背包空格</th><th>体力</th><th>游戏币</th><th v-if="group.key === 'sell'">在售商品</th></tr></thead><tbody>
+                <tr v-for="item in group.items" :key="snapshotKey(item)" :class="{ 'monitor-row-offline': !item.role_online }">
+                  <td><strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong><small v-if="item.character_id">账号 ID：{{ item.character_id }}</small></td>
+                  <td><span :class="['badge', !item.role_online || item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ !item.role_online ? '已掉线' : item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span></td>
+                  <td>{{ item.empty_slots == null ? '—' : `${item.empty_slots} 格` }}<small>{{ statusLabels[item.status || 'unknown'] || item.status }}</small></td>
+                  <td v-if="item.stamina_estimate != null && item.stamina_max != null">{{ item.stamina_estimate }}/{{ item.stamina_max }}<small :class="{ 'monitor-full': item.stamina_estimate >= item.stamina_max }">{{ item.stamina_estimate >= item.stamina_max ? '体力已满（预测）' : `预计满体力 ${time(item.stamina_full_at)}` }}</small></td><td v-else>未识别</td>
+                  <td>{{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small v-if="item.money_confirmed_at">确认于 {{ time(item.money_confirmed_at) }}</small></td>
+                  <td v-if="group.key === 'sell'">{{ item.sell_stock_count == null ? '待识别' : `${item.sell_stock_count} 件` }}</td>
+                </tr>
+              </tbody></table>
+            </div>
             <div v-else class="snapshot-grid">
               <article v-for="item in group.items" :key="snapshotKey(item)" class="snapshot-card">
                 <div class="snapshot-identity" :title="`${item.server_name || '未知区服'} / ${item.role_name || '未知角色'} · ${item.device_name || item.device.device_id}`">
