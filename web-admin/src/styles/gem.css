@@ -1,6 +1,6 @@
 .gem-workspace { display: grid; gap: 14px; min-width: 0; }
 .settings-grid > .gem-workspace { grid-column: 1 / -1; }
-.gem-merchant-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); align-items: start; gap: 16px; min-width: 0; }
+.gem-merchant-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: start; gap: 16px; min-width: 0; }
 .gem-profit-column { display: grid; align-content: start; gap: 16px; min-width: 0; }
 .gem-merchant-grid > .panel { min-width: 0; }
 .gem-workspace .panel { min-width: 0; }
