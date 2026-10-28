@@ -27,7 +27,7 @@ from .config import Settings
 from .database import RelayDatabase
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.25.0"
+VERSION = "2.26.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -375,6 +375,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return 1
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
 
+    def authenticate_admin(authorization: Annotated[str | None, Header()] = None) -> int:
+        supplied = _bearer_token(authorization)
+        if not supplied:
+            raise HTTPException(status_code=401, detail="请先登录管理员账号")
+        account_id = database.authenticate_session(_secret_hash(supplied))
+        if account_id is None:
+            raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+        if not database.is_admin(account_id):
+            raise HTTPException(status_code=403, detail="当前账号没有总后台权限")
+        return account_id
+
     def authenticate_device(
         x_device_id: Annotated[str | None, Header()] = None,
         authorization: Annotated[str | None, Header()] = None,
@@ -413,6 +424,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(ADMIN_ROOT / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/admin/", include_in_schema=False)
+    def admin_index() -> FileResponse:
+        return FileResponse(ADMIN_ROOT / "admin.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/legacy", include_in_schema=False)
     def legacy_index() -> FileResponse:
@@ -514,6 +530,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def current_account(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
         account = database.account_by_id(account_id)
         return {"account": account}
+
+    @app.get("/api/v1/admin/me")
+    def admin_me(account_id: int = Depends(authenticate_admin)) -> dict[str, Any]:
+        return {"account": database.account_by_id(account_id)}
+
+    @app.get("/api/v1/admin/overview")
+    def admin_overview(_: int = Depends(authenticate_admin)) -> dict[str, int]:
+        return database.admin_overview()
+
+    @app.get("/api/v1/admin/accounts")
+    def admin_accounts(search: str = Query(default="", max_length=100),
+                       limit: int = Query(default=50, ge=1, le=100),
+                       offset: int = Query(default=0, ge=0),
+                       _: int = Depends(authenticate_admin)) -> dict[str, Any]:
+        return database.admin_accounts(search, limit, offset)
+
+    @app.get("/api/v1/admin/roles")
+    def admin_roles(search: str = Query(default="", max_length=100),
+                    account_id: int | None = Query(default=None, ge=1),
+                    limit: int = Query(default=50, ge=1, le=100),
+                    offset: int = Query(default=0, ge=0),
+                    _: int = Depends(authenticate_admin)) -> dict[str, Any]:
+        return database.admin_roles(search, account_id, limit, offset)
+
+    @app.get("/api/v1/admin/devices")
+    def admin_devices(search: str = Query(default="", max_length=100),
+                      account_id: int | None = Query(default=None, ge=1),
+                      limit: int = Query(default=50, ge=1, le=100),
+                      offset: int = Query(default=0, ge=0),
+                      _: int = Depends(authenticate_admin)) -> dict[str, Any]:
+        return database.admin_devices(search, account_id, limit, offset)
 
     @app.get("/api/v1/master/notifications/bark")
     def get_bark_settings(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:

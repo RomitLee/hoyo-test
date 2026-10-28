@@ -188,6 +188,7 @@ class RelayDatabase:
                 """
             )
             self._ensure_column(connection, "devices", "account_id", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(connection, "accounts", "is_admin", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "devices", "display_name", "TEXT")
             self._ensure_column(connection, "devices", "note", "TEXT")
             self._ensure_column(connection, "devices", "credential_hash", "TEXT")
@@ -347,6 +348,110 @@ class RelayDatabase:
                 "SELECT id,username,display_name,disabled FROM accounts WHERE id=?", (account_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def is_admin(self, account_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT is_admin FROM accounts WHERE id=? AND disabled=0", (account_id,)
+            ).fetchone()
+        return bool(row and row["is_admin"])
+
+    def set_admin(self, username: str, enabled: bool) -> bool:
+        """Operator-only grant; never exposed through an HTTP endpoint."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE accounts SET is_admin=? WHERE lower(username)=lower(?) AND username IS NOT NULL",
+                (int(enabled), username.strip()),
+            )
+        return cursor.rowcount == 1
+
+    def admin_overview(self) -> dict[str, int]:
+        cutoff = (datetime.now(UTC) - timedelta(seconds=20)).isoformat()
+        with self._connect() as connection:
+            row = connection.execute("""SELECT
+                (SELECT COUNT(*) FROM accounts WHERE username IS NOT NULL) AS accounts,
+                (SELECT COUNT(*) FROM accounts WHERE username IS NOT NULL AND disabled=0) AS active_accounts,
+                (SELECT COUNT(*) FROM devices WHERE removed_at IS NULL) AS devices,
+                (SELECT COUNT(*) FROM devices WHERE removed_at IS NULL AND disabled=0 AND last_seen_at>=?) AS online_devices,
+                (SELECT COUNT(*) FROM game_roles) AS roles,
+                (SELECT COUNT(DISTINCT s.character_id) FROM device_window_status s
+                 JOIN devices d ON d.device_id=s.device_id
+                 WHERE s.character_id IS NOT NULL AND s.character_id<>''
+                   AND s.status<>'window_closed' AND d.removed_at IS NULL AND d.disabled=0
+                   AND d.last_seen_at>=?) AS online_roles""", (cutoff, cutoff)).fetchone()
+        return dict(row)
+
+    def admin_accounts(self, search: str, limit: int, offset: int) -> dict[str, Any]:
+        term = f"%{search.strip()}%"
+        where = "WHERE a.username IS NOT NULL AND (a.username LIKE ? OR a.display_name LIKE ? OR CAST(a.id AS TEXT) LIKE ?)"
+        with self._connect() as connection:
+            total = connection.execute(f"SELECT COUNT(*) FROM accounts a {where}", (term, term, term)).fetchone()[0]
+            rows = connection.execute(f"""SELECT a.id AS account_id,a.username,a.display_name,a.created_at,a.disabled,a.is_admin,
+                (SELECT MAX(s.created_at) FROM sessions s WHERE s.account_id=a.id) AS last_login_at,
+                (SELECT COUNT(*) FROM devices d WHERE d.account_id=a.id AND d.removed_at IS NULL) AS device_count,
+                (SELECT COUNT(*) FROM game_role_accounts r WHERE r.account_id=a.id) AS role_count
+                FROM accounts a {where} ORDER BY a.id DESC LIMIT ? OFFSET ?""",
+                (term, term, term, limit, offset)).fetchall()
+        return {"total": total, "items": [{**dict(row), "disabled": bool(row["disabled"]),
+                                            "is_admin": bool(row["is_admin"])} for row in rows]}
+
+    def admin_devices(self, search: str, account_id: int | None, limit: int, offset: int) -> dict[str, Any]:
+        term = f"%{search.strip()}%"
+        where = "WHERE d.removed_at IS NULL AND (d.display_name LIKE ? OR d.hostname LIKE ? OR d.device_id LIKE ? OR a.username LIKE ?)"
+        params: list[Any] = [term, term, term, term]
+        if account_id is not None:
+            where += " AND d.account_id=?"
+            params.append(account_id)
+        with self._connect() as connection:
+            total = connection.execute(f"SELECT COUNT(*) FROM devices d JOIN accounts a ON a.id=d.account_id {where}", params).fetchone()[0]
+            rows = connection.execute(f"""SELECT d.device_id,d.account_id,a.username AS account_username,
+                d.display_name,d.hostname,d.app_version,d.last_seen_at,d.created_at,d.disabled,
+                (SELECT COUNT(*) FROM device_window_status s WHERE s.device_id=d.device_id AND s.status<>'window_closed') AS window_count
+                FROM devices d JOIN accounts a ON a.id=d.account_id {where}
+                ORDER BY d.last_seen_at DESC LIMIT ? OFFSET ?""", (*params, limit, offset)).fetchall()
+        return {"total": total, "items": [{**dict(row), "disabled": bool(row["disabled"])} for row in rows]}
+
+    def admin_roles(self, search: str, account_id: int | None, limit: int, offset: int) -> dict[str, Any]:
+        term = f"%{search.strip()}%"
+        where = "WHERE (r.character_id LIKE ? OR r.server_name LIKE ? OR r.role_name LIKE ? OR u.username LIKE ?)"
+        params: list[Any] = [term, term, term, term]
+        if account_id is not None:
+            where += " AND EXISTS (SELECT 1 FROM game_role_accounts linked WHERE linked.character_id=r.character_id AND linked.account_id=?)"
+            params.append(account_id)
+        owner = """WITH owner AS (
+            SELECT a.*,ROW_NUMBER() OVER (PARTITION BY a.character_id ORDER BY COALESCE(a.last_seen_at,'') DESC,a.account_id DESC) AS rank
+            FROM game_role_accounts a)"""
+        joins = """FROM game_roles r JOIN owner o ON o.character_id=r.character_id AND o.rank=1
+            JOIN accounts u ON u.id=o.account_id"""
+        with self._connect() as connection:
+            total = connection.execute(f"{owner} SELECT COUNT(*) {joins} {where}", params).fetchone()[0]
+            rows = connection.execute(f"""{owner} SELECT r.character_id,r.server_name,r.role_name,r.first_seen_at,r.last_seen_at,
+                o.account_id,u.username AS account_username,u.display_name AS account_name,
+                (SELECT COUNT(*) FROM game_role_accounts linked WHERE linked.character_id=r.character_id) AS account_count,
+                o.stall_mode,o.sell_stock_count,d.device_id,d.display_name AS device_name,d.hostname,
+                d.last_seen_at AS device_last_seen_at,d.disabled AS device_disabled,d.removed_at AS device_removed_at,
+                s.status,s.empty_slots,s.cash,s.money_confirmed_at,s.monitoring,s.minimized,s.received_at,
+                v.character_level,v.stamina_current,v.stamina_max,v.recovery_per_5m AS stamina_recovery_per_5m,
+                v.observed_at AS stamina_observed_at,v.full_at AS stamina_full_at
+                {joins}
+                LEFT JOIN devices d ON d.device_id=o.last_device_id AND d.account_id=o.account_id
+                LEFT JOIN device_window_status s ON s.device_id=o.last_device_id AND s.window_id=o.last_window_id
+                LEFT JOIN game_role_vitals v ON v.character_id=r.character_id AND v.account_id=o.account_id
+                {where} ORDER BY r.last_seen_at DESC,r.character_id LIMIT ? OFFSET ?""",
+                (*params, limit, offset)).fetchall()
+        cutoff = (datetime.now(UTC) - timedelta(seconds=20)).isoformat()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["role_online"] = bool(item["device_id"] and not item["device_disabled"]
+                                       and not item["device_removed_at"] and item["device_last_seen_at"]
+                                       and item["device_last_seen_at"] >= cutoff and item["status"] != "window_closed")
+            item["monitoring"] = bool(item["monitoring"])
+            item["minimized"] = bool(item["minimized"])
+            item.pop("device_disabled")
+            item.pop("device_removed_at")
+            items.append(item)
+        return {"total": total, "items": items}
 
     def create_session(self, account_id: int, token_hash: str, expires_at: str) -> None:
         with self._connect() as connection:
