@@ -6,7 +6,7 @@ services:
       - .env
     volumes:
       - relay_data:/data
-      - ./releases:/releases:ro
+      - ./releases:/releases
     networks:
       - internal
     healthcheck:

@@ -17,7 +17,7 @@ from time import monotonic
 from typing import Annotated, Any, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -25,9 +25,10 @@ from .bark import BarkPushError, event_message, send_bark_notification
 from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
+from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.26.0"
+VERSION = "2.27.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -350,6 +351,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = app_settings
     app.state.database = database
     app.state.screenshots = app_screenshots
+    app.state.releases = ReleaseStore(app_settings)
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
     app.mount("/assets", StaticFiles(directory=ADMIN_ROOT / "assets"), name="admin-assets")
     attempt_log: dict[tuple[str, str], list[float]] = {}
@@ -461,7 +463,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(manifest, media_type="application/json", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/updates/download/{role}/{client_version}", include_in_schema=False)
-    def download_update(role: str, client_version: str) -> FileResponse:
+    def download_update(role: str, client_version: str) -> Response:
         if role not in {"slave", "master"} or not re.fullmatch(r"V\d+\.\d+\.\d+", client_version):
             raise HTTPException(status_code=404, detail="更新安装包不存在")
         try:
@@ -491,6 +493,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             archive.relative_to(app_settings.update_directory.resolve())
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=404, detail="更新安装包不存在") from exc
+        release_store: ReleaseStore = app.state.releases
+        if release_store.configured and package.get("sha256"):
+            try:
+                key = release_store.object_key(role, client_version, package)
+                if release_store.exists(key):
+                    return RedirectResponse(release_store.download_url(key), status_code=302,
+                                            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+            except Exception:  # COS outage falls back to a locally retained legacy package
+                if not archive.is_file():
+                    logger.exception("COS release download unavailable: %s %s", role, client_version)
+                    raise HTTPException(status_code=503, detail="安装包存储暂时不可用") from None
         if not archive.is_file():
             raise HTTPException(status_code=404, detail="更新安装包不存在")
         return FileResponse(

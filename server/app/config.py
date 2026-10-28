@@ -20,6 +20,10 @@ class Settings:
     cos_bucket: str = ""
     cos_region: str = ""
     cos_screenshot_domain: str = ""
+    cos_release_secret_id: str = field(default="", repr=False)
+    cos_release_secret_key: str = field(default="", repr=False)
+    cos_release_bucket: str = ""
+    cos_release_region: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -61,4 +65,8 @@ class Settings:
             cos_bucket=os.environ.get("COS_BUCKET", ""),
             cos_region=os.environ.get("COS_REGION", ""),
             cos_screenshot_domain=os.environ.get("COS_SCREENSHOT_DOMAIN", ""),
+            cos_release_secret_id=os.environ.get("COS_RELEASE_SECRET_ID", ""),
+            cos_release_secret_key=os.environ.get("COS_RELEASE_SECRET_KEY", ""),
+            cos_release_bucket=os.environ.get("COS_RELEASE_BUCKET", ""),
+            cos_release_region=os.environ.get("COS_RELEASE_REGION", ""),
         )
