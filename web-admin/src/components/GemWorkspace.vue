@@ -2,6 +2,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { api, json, USERNAME_KEY } from '../api'
 import { dailyProfit, gemTypes, synthesisRows, type GemKind, type SaleMode } from '../gemMath'
+import normalGemIcon from '../assets/gem-normal.png'
+import starGemIcon from '../assets/gem-star.png'
+import dustGemIcon from '../assets/gem-dust.png'
 import Panel from './Panel.vue'
 import '../styles/gem.css'
 
@@ -11,6 +14,7 @@ const props = defineProps<{ mode: 'merchant' | 'zones' }>()
 const settings = ref<Settings | null>(null)
 const selectedZoneId = ref('')
 const gemKind = ref<GemKind>('normal')
+const gemIcons: Record<GemKind, string> = { normal: normalGemIcon, star: starGemIcon, dust: dustGemIcon }
 const saleMode = ref<SaleMode>('ratio')
 const saving = ref(false)
 const loading = ref(true)
@@ -135,29 +139,40 @@ onMounted(load)
         <div class="gem-actions"><button type="button" class="secondary" :disabled="settings.zones.length >= 50" @click="addZone">新增区服</button><button type="button" class="primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存区服比例' }}</button></div>
       </Panel>
 
-      <div v-else class="gem-merchant-grid">
-        <Panel title="宝石合成" meta="按一级宝石价格计算成本与售价">
+      <div v-else class="gem-merchant-shell">
+        <div class="gem-merchant-banner">
+          <div><span class="gem-banner-kicker">GEM MERCHANT · 经营工具</span><h2>宝石商人工作台</h2><p>合成定价与日利润测算，使用同一套区服报价</p></div>
+          <span class="gem-banner-count">{{ settings.zones.length }} 个区服已配置</span>
+        </div>
+      <div class="gem-merchant-grid">
+        <Panel class="gem-synthesis-panel" title="宝石合成计算器" meta="按一级价格自动换算">
           <p v-if="!settings.zones.length" class="empty">请先到“设置”中新增区服比例。</p>
           <template v-else>
+            <div class="gem-type-tabs" role="group" aria-label="宝石类型">
+              <button v-for="(item, kind) in gemTypes" :key="kind" type="button" :class="['gem-type-tab', { active: gemKind === kind }]" :aria-pressed="gemKind === kind" @click="gemKind = kind"><img :src="gemIcons[kind]" alt="">{{ item.name }}</button>
+            </div>
             <div class="gem-fields">
               <label>应用区服<select v-model="selectedZoneId"><option v-for="zone in settings.zones" :key="zone.id" :value="zone.id">{{ zone.name }}（3000 万 = {{ fmt(zone.quote_yuan) }} 元）</option></select></label>
-              <label>宝石类型<select v-model="gemKind"><option v-for="(item, kind) in gemTypes" :key="kind" :value="kind">{{ item.name }}</option></select></label>
               <label>一级宝石价格（游戏币）<input v-model.number="settings.synthesis_prices[gemKind]" type="number" min="0" max="1000000000" step="1"></label>
-              <label>售卖方式<select v-model="saleMode"><option value="ratio">比例售卖</option><option value="average">均价售卖</option></select></label>
               <label v-if="saleMode === 'average'">一级售卖均价（游戏币）<input v-model.number="settings.average_sale_prices[gemKind]" type="number" min="0" max="1000000000" step="1"></label>
             </div>
-            <p class="hint">{{ gemTypes[gemKind].rule }}。藏宝阁从 {{ gemTypes[gemKind].cbgMinLevel }} 级起可上架；摆摊售价截去不足 1 万的部分，藏宝阁到手按 95% 估算。</p>
-            <div class="table-wrap"><table class="gem-price-table"><thead><tr><th>等级 / 所需一级数量</th><th>合成成本</th><th>利润率</th><th v-if="saleMode === 'ratio'">售卖比例</th><th>摆摊售价</th><th>藏宝阁售价 / 到手</th></tr></thead><tbody>
-              <tr v-for="row in rows" :key="row.level"><td><strong>{{ row.level }} 级</strong><small>需要 {{ fmt(row.units) }} 颗一级</small></td><td>{{ fmt(row.costCoins / 10000, 2) }} 万<small>≈ {{ fmt(row.costYuan, 1) }} 元</small></td><td>{{ fmt(row.marginPercent, 2) }}%</td><td v-if="saleMode === 'ratio'"><input v-model.number="settings.price_ratios[gemKind][String(row.level)]" type="number" min="0" max="100" step="0.01" :aria-label="`${gemTypes[gemKind].name}${row.level}级售卖比例`"></td><td><strong>{{ fmt(row.stallWan) }} 万</strong></td><td v-if="row.cbgPrice != null">{{ fmt(row.cbgPrice, 1) }} 元<small>到手 {{ fmt(row.cbgAfterFee, 1) }} 元</small></td><td v-else>不可上架</td></tr>
-            </tbody></table></div>
-            <div class="gem-actions"><button type="button" class="primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存宝石价格与售卖比例' }}</button></div>
+            <div class="gem-sale-tabs" role="group" aria-label="售卖方式"><button type="button" :class="{ active: saleMode === 'ratio' }" :aria-pressed="saleMode === 'ratio'" @click="saleMode = 'ratio'">按比例售卖</button><button type="button" :class="{ active: saleMode === 'average' }" :aria-pressed="saleMode === 'average'" @click="saleMode = 'average'">按均价售卖</button></div>
+            <p class="gem-rule">{{ gemTypes[gemKind].rule }}；藏宝阁 {{ gemTypes[gemKind].cbgMinLevel }} 级起可上架，到手按售价的 95% 估算。</p>
+            <div class="gem-price-heading"><strong>等级价格表</strong><span>摆摊售价向下取整到万</span></div>
+            <div class="gem-price-list">
+              <div v-for="row in rows" :key="row.level" class="gem-price-row">
+                <div class="gem-row-top"><span class="gem-level">{{ row.level }} <small>级</small></span><div class="gem-row-cost"><strong>合成成本 {{ fmt(row.costCoins / 10000, 2) }} 万</strong><span>{{ fmt(row.units) }} 颗一级 · 约 {{ fmt(row.costYuan, 1) }} 元</span></div><label v-if="saleMode === 'ratio'" class="gem-ratio-field">售卖比例<input v-model.number="settings.price_ratios[gemKind][String(row.level)]" type="number" min="0" max="100" step="0.01" :aria-label="`${gemTypes[gemKind].name}${row.level}级售卖比例`"></label></div>
+                <div class="gem-row-metrics"><div><small>摆摊售价</small><strong>{{ fmt(row.stallWan) }} 万</strong></div><div><small>利润率</small><strong>{{ fmt(row.marginPercent, 2) }}%</strong></div><div><small>藏宝阁到手</small><strong>{{ row.cbgAfterFee == null ? '不可上架' : `${fmt(row.cbgAfterFee, 1)} 元` }}</strong><span v-if="row.cbgPrice != null">售价 {{ fmt(row.cbgPrice, 1) }} 元</span></div></div>
+              </div>
+            </div>
+            <div class="gem-actions"><button type="button" class="gem-save" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存宝石价格与售卖比例' }}</button></div>
           </template>
         </Panel>
         <div class="gem-profit-column">
-        <Panel title="单服日利润" meta="按一个区服的每日经营参数估算">
+        <Panel class="gem-single-panel" title="单服日利润" meta="只计算当前选择的区服">
           <p v-if="!settings.zones.length" class="empty">请先到“设置”中新增区服比例。</p>
           <template v-else-if="selectedZone && profit">
-            <div class="gem-net"><span>预计每日净利润</span><strong>{{ fmt(profit.netWan, 2) }} 万游戏币</strong><small>{{ selectedZone.name }} · 已扣点卡</small></div>
+            <div :class="['gem-net', { loss: profit.netWan < 0 }]"><span>预计每日净利润</span><strong>{{ fmt(profit.netWan, 2) }} 万游戏币</strong><small>{{ selectedZone.name }} · 已扣点卡</small></div>
             <div class="gem-fields">
               <label>区服<select v-model="selectedZoneId"><option v-for="zone in settings.zones" :key="zone.id" :value="zone.id">{{ zone.name }}（3000 万 = {{ fmt(zone.quote_yuan) }} 元）</option></select></label>
               <label>每天收购金额（万）<input v-model.number="selectedZone.purchase_wan" type="number" min="0" max="100000000" step="100"></label>
@@ -165,13 +180,13 @@ onMounted(load)
               <label>账号配置<select v-model.number="selectedZone.account_count"><option v-for="count in [1,2,3,4,5]" :key="count" :value="count">{{ count === 1 ? '1 收' : `${count - 1} 收 1 卖` }}（{{ count }} 个号）</option></select></label>
               <label>目标每天净利润（元）<input v-model.number="selectedZone.target_profit_yuan" type="number" min="0" max="100000000" step="1"></label>
             </div>
-            <div class="gem-results"><div><small>游戏内销售额</small><strong>{{ fmt(profit.salesWan, 2) }} 万</strong></div><div><small>交易毛利润</small><strong>{{ fmt(profit.grossWan, 2) }} 万</strong></div><div><small>藏宝阁折算</small><strong>{{ fmt(profit.cbgYuan, 2) }} 元</strong></div><div><small>每天点卡</small><strong>{{ fmt(profit.cardYuan, 1) }} 元</strong><small>≈ {{ fmt(profit.cardWan, 2) }} 万游戏币</small></div><div><small>不亏本收购线</small><strong>{{ fmt(profit.breakEvenWan, 2) }} 万</strong></div><div><small>距离保本线</small><strong>{{ fmt(profit.gapWan, 2) }} 万</strong></div></div>
+            <div class="gem-results"><div><small>游戏内销售额</small><strong>{{ fmt(profit.salesWan, 2) }} 万</strong></div><div class="highlight"><small>交易毛利润</small><strong>{{ fmt(profit.grossWan, 2) }} 万</strong></div><div><small>藏宝阁折算</small><strong>{{ fmt(profit.cbgYuan, 2) }} 元</strong></div><div class="warning"><small>每天点卡</small><strong>{{ fmt(profit.cardYuan, 1) }} 元</strong><small>≈ {{ fmt(profit.cardWan, 2) }} 万游戏币</small></div><div><small>不亏本收购线</small><strong>{{ fmt(profit.breakEvenWan, 2) }} 万</strong></div><div><small>距离保本线</small><strong>{{ fmt(profit.gapWan, 2) }} 万</strong></div></div>
             <div class="gem-target">若目标每天净利 {{ fmt(selectedZone.target_profit_yuan) }} 元，每天至少收购 <strong>{{ fmt(profit.targetPurchaseWan, 2) }} 万</strong></div>
             <p class="hint">净利（万游戏币）＝收购额 × 利润率 − 点卡折算游戏币。点卡按每个号 0.6 元/小时、每天 24 小时计算。</p>
-            <div class="gem-actions"><button type="button" class="primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存单服参数' }}</button></div>
+            <div class="gem-actions"><button type="button" class="gem-save" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存当前区服设置' }}</button></div>
           </template>
         </Panel>
-        <Panel title="综合测算" meta="汇总所有账号一天的收购与点卡支出">
+        <Panel class="gem-overall-panel" title="综合测算" meta="汇总所有账号一天的收购与点卡支出">
           <div class="gem-fields">
             <label>3000 万游戏币比例（元）<input v-model.number="overallQuote" type="number" min="0.01" step="0.01" inputmode="decimal"></label>
             <label>总账号数量（个）<input v-model.number="overallAccounts" type="number" min="0" step="1" inputmode="numeric"></label>
@@ -179,13 +194,14 @@ onMounted(load)
             <label>实际利润率（%）<input v-model.number="overallMargin" type="number" min="0" step="0.1" inputmode="decimal"></label>
           </div>
           <template v-if="overallProfit">
-            <div class="gem-net"><span>预计一天净利润</span><strong>{{ fmt(overallProfit.netWan, 2) }} 万游戏币</strong><strong>≈ {{ fmt(overallNetYuan, 2) }} 元</strong><small>已扣除全部账号点卡</small></div>
+            <div :class="['gem-net', { loss: overallProfit.netWan < 0 }]"><span>预计一天净利润</span><strong>{{ fmt(overallProfit.netWan, 2) }} 万游戏币</strong><strong class="gem-rmb">≈ {{ fmt(overallNetYuan, 2) }} 元</strong><small>已扣除全部账号点卡</small></div>
             <div class="gem-results gem-overall-results"><div><small>交易毛利润</small><strong>{{ fmt(overallProfit.grossWan, 2) }} 万游戏币</strong></div><div><small>点卡支出</small><strong>{{ fmt(overallProfit.cardYuan, 2) }} 元</strong><small>≈ {{ fmt(overallProfit.cardWan, 2) }} 万游戏币</small></div></div>
           </template>
           <p v-else class="hint">请填写有效比例、账号数量、总收购金额和利润率。</p>
           <p class="hint">净利润＝总收购金额 × 利润率 − 总账号数 × 0.6 元/小时 × 24 小时折算的游戏币；人民币按填写的 3000 万比例换算。结果随输入实时更新。</p>
         </Panel>
         </div>
+      </div>
       </div>
     </template>
   </div>
