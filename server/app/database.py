@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from uuid import uuid4
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from . import cash_ledger
+from .gem_config import default_gem_settings
 from .panel_log_merge import BOUNDARY_TYPES, POSITION, merge_confirmation, remember_confirmation, target_message
 
 
@@ -50,6 +51,12 @@ class RelayDatabase:
                 CREATE TABLE IF NOT EXISTS monitor_log_settings (
                     account_id INTEGER PRIMARY KEY, occlusion_enabled INTEGER NOT NULL,
                     occlusion_percent REAL NOT NULL, occlusion_seconds INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS gem_calculator_settings (
+                    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL,
+                    config_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS monitor_screenshots (
                     log_id INTEGER PRIMARY KEY REFERENCES monitor_logs(id) ON DELETE CASCADE,
@@ -998,6 +1005,32 @@ class RelayDatabase:
     def get_monitor_log_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             return self._log_settings(connection, account_id)
+
+    def get_gem_settings(self, account_id: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT config_json FROM gem_calculator_settings WHERE account_id=?", (account_id,)
+            ).fetchone()
+        return json.loads(row["config_json"]) if row else default_gem_settings()
+
+    def update_gem_settings(self, account_id: int, values: dict[str, Any]) -> dict[str, Any] | None:
+        """Return None when another browser saved a newer revision."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT revision FROM gem_calculator_settings WHERE account_id=?", (account_id,)
+            ).fetchone()
+            revision = int(row["revision"]) if row else 0
+            if values["revision"] != revision:
+                return None
+            saved = {**values, "revision": revision + 1}
+            connection.execute(
+                """INSERT INTO gem_calculator_settings(account_id,revision,config_json,updated_at)
+                   VALUES(?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET
+                   revision=excluded.revision,config_json=excluded.config_json,updated_at=excluded.updated_at""",
+                (account_id, saved["revision"], json.dumps(saved, ensure_ascii=False, separators=(",", ":")), utc_now()),
+            )
+            return saved
 
     def update_monitor_log_settings(self, account_id: int, values: dict[str, Any]) -> dict[str, Any]:
         with self._connect() as connection:

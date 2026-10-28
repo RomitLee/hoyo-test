@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import Panel from './components/Panel.vue'
+import GemWorkspace from './components/GemWorkspace.vue'
 import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from './api'
 import { estimateStamina } from './stamina'
 import { sortRolesByServer } from './roleSort'
 import alarmSoundUrl from './assets/inventory-alarm-loop-v1.wav'
 
-type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'settings'
+type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'synthesis' | 'profit' | 'settings'
 type RoleMode = 'buy' | 'sell' | 'unknown'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
 type Device = { device_id: string; display_name?: string; hostname?: string; note?: string; app_version?: string; last_seen_at?: string; disabled?: boolean; windows?: WindowStatus[] }
@@ -22,6 +23,8 @@ const pages: { key: Page; label: string; hint: string }[] = [
   { key: 'alerts', label: '告警', hint: '待处理事件' },
   { key: 'devices', label: '从机管理', hint: '登录与设备' },
   { key: 'logs', label: '监控日志', hint: '操作与截图' },
+  { key: 'synthesis', label: '宝石合成', hint: '成本与售卖价格' },
+  { key: 'profit', label: '单服日利润', hint: '区服经营测算' },
   { key: 'settings', label: '设置', hint: '上报与通知' },
 ]
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
@@ -571,7 +574,9 @@ onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.re
 
         <template v-else-if="page === 'logs'"><Panel title="监控日志" :meta="`${logs.length} 条`"><template #tools><div class="filters"><select v-model="filter.event_type" aria-label="日志类型"><option v-for="[value, label] in eventTypes" :key="value" :value="value">{{ label }}</option></select><select v-model="filter.panel_type" aria-label="面板类型"><option value="">全部面板</option><option v-for="(name, key) in panelLabels" :key="key" :value="key">{{ name }}</option></select><button class="secondary" @click="fetchLogs(0)">最新</button></div></template><div v-if="!logs.length" class="empty">暂无符合条件的记录</div><div v-else class="table-wrap"><table><thead><tr><th>发生时间</th><th>从机 / 角色</th><th>类型与内容</th><th>遮挡 / 最小化</th><th>截图</th></tr></thead><tbody><tr v-for="item in logs" :key="item.id"><td>{{ time(item.occurred_at) }}</td><td>{{ item.display_name || item.device_id }}<small>{{ item.server_name || '—' }} / {{ item.role_name || '—' }}</small></td><td>{{ logLabel(item) }}<small>{{ reasons[item.reason || ''] || '状态上报' }}</small></td><td>{{ item.occlusion_percent == null ? '—' : `${Number(item.occlusion_percent).toFixed(1)}%` }} / {{ item.minimized == null ? '—' : item.minimized ? '是' : '否' }}</td><td><button v-if="item.screenshot_ready && Date.parse(item.screenshot_expires_at || '') > Date.now()" class="secondary small" @click="screenshot(item)">查看截图</button><span v-else>{{ item.screenshot_ready ? '已过期' : '—' }}</span></td></tr></tbody></table></div><div class="pagination"><button class="secondary" :disabled="logCursor === 0" @click="fetchLogs(0)">返回最新</button><button class="secondary" :disabled="!logHasMore" @click="fetchLogs(logNext)">更早记录</button></div></Panel></template>
 
-        <template v-else><div class="settings-grid"><Panel title="窗口截图" meta="账号级设置"><form class="form-grid" @submit.prevent="saveSnapshotInterval"><label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label><p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p><button class="primary" :disabled="busy" type="submit">保存截图周期</button></form></Panel><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel>
+        <template v-else-if="page === 'synthesis'"><GemWorkspace mode="synthesis" /></template>
+        <template v-else-if="page === 'profit'"><GemWorkspace mode="profit" /></template>
+        <template v-else><div class="settings-grid"><GemWorkspace mode="zones" /><Panel title="窗口截图" meta="账号级设置"><form class="form-grid" @submit.prevent="saveSnapshotInterval"><label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label><p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p><button class="primary" :disabled="busy" type="submit">保存截图周期</button></form></Panel><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel>
           <Panel title="告警方式" meta="账号级设置，所有从机共用"><form class="form-grid" @submit.prevent="saveBark">
             <label class="check"><input v-model="bark.enabled" type="checkbox"> 手机是否推送</label>
             <label class="check"><input v-model="bark.local_alert_enabled" type="checkbox"> 当前设备是否报警</label>

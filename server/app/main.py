@@ -25,10 +25,11 @@ from .bark import BarkPushError, event_message, send_bark_notification
 from .cash_ledger import BEIJING
 from .config import Settings
 from .database import RelayDatabase
+from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.27.0"
+VERSION = "2.28.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -843,6 +844,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 headers={"Cache-Control": "no-store"})
         except Exception:  # noqa: BLE001 - prevent SDK request credentials from reaching responses
             raise HTTPException(status_code=503, detail="暂时无法读取截图，请稍后重试") from None
+
+    @app.get("/api/v1/master/gem-settings")
+    def get_gem_settings(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return database.get_gem_settings(account_id)
+
+    @app.put("/api/v1/master/gem-settings")
+    def put_gem_settings(payload: GemSettings, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        saved = database.update_gem_settings(account_id, payload.model_dump())
+        if saved is None:
+            raise HTTPException(status_code=409, detail="设置已在其他页面修改，请刷新后重试")
+        return saved
 
     @app.get("/api/v1/master/monitor-log-settings")
     def get_monitor_log_settings(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
