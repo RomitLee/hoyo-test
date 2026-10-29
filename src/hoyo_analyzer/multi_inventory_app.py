@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import cv2
 from PySide6.QtCore import Qt, QThread, QTimer, Slot
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtGui import QCloseEvent, QCursor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -144,6 +144,12 @@ class InventoryMonitorWindow(QMainWindow):
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
         self._sounding_alerts: set[QMessageBox] = set()
+        self._market_toast: QFrame | None = None
+        self._market_toast_title: QLabel | None = None
+        self._market_toast_detail: QLabel | None = None
+        self._market_toast_timer = QTimer(self)
+        self._market_toast_timer.setSingleShot(True)
+        self._market_toast_timer.timeout.connect(self._hide_market_toast)
         self._window_titles: dict[int, str] = {}
         self._minimize_targets: tuple[int, ...] = ()
         self.monitoring_paused = False
@@ -1214,6 +1220,9 @@ class InventoryMonitorWindow(QMainWindow):
         session = self.sessions.get(hwnd)
         if session is None or self.monitoring_paused:
             return
+        if (event.type == "panel_opened" and event.payload.get("panel_type") == "stall_other_buy"
+                or event.type == "market_stall_changed"):
+            self._show_market_toast(session.account.secondary_region, event)
         if event.type == "market_gem_quotes":
             self.relay_client.send_market_quotes({
                 "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
@@ -1245,6 +1254,51 @@ class InventoryMonitorWindow(QMainWindow):
                 self.relay_client.send_monitor_payload(payload, screenshot_path=event.evidence_path)
             else:
                 self.relay_client.send_monitor_payload(payload)
+
+    def _show_market_toast(self, server_name: str, event: Event) -> None:
+        if self._market_toast is None:
+            toast = QFrame(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                           | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+            toast.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            toast.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            toast.setObjectName("marketDetectionToast")
+            toast.setStyleSheet("""
+                QFrame#marketDetectionToast { background: #17213B; border: 1px solid #33466F;
+                    border-radius: 12px; }
+                QLabel { color: #F8FAFC; background: transparent; }
+                QLabel#toastTitle { font-size: 15px; font-weight: 800; }
+                QLabel#toastDetail { color: #D8E2F4; font-size: 12px; }
+            """)
+            layout = QVBoxLayout(toast)
+            layout.setContentsMargins(16, 12, 16, 12)
+            layout.setSpacing(5)
+            self._market_toast_title = QLabel("已检测到他人摊位", toast)
+            self._market_toast_title.setObjectName("toastTitle")
+            self._market_toast_detail = QLabel(toast)
+            self._market_toast_detail.setObjectName("toastDetail")
+            layout.addWidget(self._market_toast_title)
+            layout.addWidget(self._market_toast_detail)
+            self._market_toast = toast
+        occurred = str(event.payload.get("occurred_at") or "")
+        try:
+            detected_at = datetime.fromisoformat(occurred).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            detected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        assert self._market_toast_detail is not None and self._market_toast is not None
+        self._market_toast_detail.setText(f"区服：{server_name or '未知区服'}\n检测时间：{detected_at}")
+        self._market_toast.adjustSize()
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            self._market_toast.move(area.right() - self._market_toast.width() - 18,
+                                    area.bottom() - self._market_toast.height() - 18)
+        self._market_toast.show()
+        self._market_toast.raise_()
+        self._market_toast_timer.start(2000)
+
+    def _hide_market_toast(self) -> None:
+        if self._market_toast is not None:
+            self._market_toast.hide()
 
     def _show_alert(
         self,

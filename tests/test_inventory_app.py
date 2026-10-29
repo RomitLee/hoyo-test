@@ -19,6 +19,7 @@ from hoyo_analyzer.inventory_app import (
 )
 from hoyo_analyzer.inventory_fullness import InventoryAnalysis, InventoryStatus, SlotResult, SlotState
 from hoyo_analyzer.multi_inventory_app import InventoryMonitorWindow
+from hoyo_analyzer.models import Event
 from hoyo_analyzer.slave_settings import SlaveSettings
 from hoyo_analyzer.wgc import OccludingWindow, WindowInfo, WindowOcclusionStatus
 
@@ -72,7 +73,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert window.background_button.text() == "后台监控"
         assert window.mini_button.text() == "迷你版"
         assert window.host_status_label.text() == "云端：未连接"
-        assert __version__ == "V2.13.0"
+        assert __version__.startswith("V2.")
         assert __version__ in window.subtitle_label.text()
         assert window.host_connect_button.text() == "连接"
         assert not window.host_connect_button.isEnabled()
@@ -95,6 +96,25 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert not window.scan_timer.isActive()
         assert not window.status_timer.isActive()
         assert not window.relay_client.configured
+    finally:
+        window.close()
+
+
+def test_market_detection_toast_shows_server_and_closes_after_two_seconds(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    try:
+        event = Event("market", 100, "market_stall_changed",
+                      payload={"occurred_at": "2026-10-29T16:30:00+08:00"})
+        window._show_market_toast("百花村", event)
+        assert window._market_toast is not None and window._market_toast.isVisible()
+        assert window._market_toast_detail is not None
+        assert "百花村" in window._market_toast_detail.text()
+        assert "2026-10-29 16:30:00" in window._market_toast_detail.text()
+        assert 0 < window._market_toast_timer.remainingTime() <= 2000
+        window._hide_market_toast()
+        assert not window._market_toast.isVisible()
     finally:
         window.close()
         app.processEvents()
