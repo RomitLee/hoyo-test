@@ -121,6 +121,35 @@ def test_market_detection_toast_shows_server_and_closes_after_two_seconds(monkey
         window.close()
 
 
+def test_market_panel_event_enters_toast_from_worker_event_path(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.auth_timer.stop()
+    shown = []
+    try:
+        window._authenticated = True
+        window.sessions = {
+            123: SimpleNamespace(
+                account=SimpleNamespace(secondary_region="秦淮风光", role_name="测试角色", role_id="123456"),
+                minimized=False,
+                monitor_session_id="session-1",
+            )
+        }
+        monkeypatch.setattr(window, "_show_market_toast", lambda server, event: shown.append((server, event.type)))
+        monkeypatch.setattr(window.relay_client, "send_monitor_payload", lambda *args, **kwargs: None)
+        event = Event(
+            "market-open", 100, "panel_opened", confidence=1.0,
+            payload={"panel_type": "stall_other_buy", "message": "打开他人收货摊位",
+                     "occurred_at": "2026-10-29T20:30:00+08:00"},
+        )
+        window._on_event(123, event)
+        assert shown == [("秦淮风光", "panel_opened")]
+    finally:
+        window.sessions = {}
+        window.close()
+
+
 def test_periodic_screenshots_are_dispatched_one_window_at_a_time(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)

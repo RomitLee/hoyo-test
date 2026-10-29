@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1299,7 +1300,30 @@ class InventoryMonitorWindow(QMainWindow):
                                     area.bottom() - self._market_toast.height() - 18)
         self._market_toast.show()
         self._market_toast.raise_()
+        self._force_market_toast_topmost()
         self._market_toast_timer.start(2000)
+
+    def _force_market_toast_topmost(self) -> None:
+        """Keep the passive toast above game/browser windows without focus."""
+        if self._market_toast is None or sys.platform != "win32":
+            return
+        try:
+            # Qt's WindowStaysOnTopHint is not sufficient when a game window
+            # or a remote-desktop host owns the foreground topmost band.
+            hwnd = int(self._market_toast.winId())
+            geometry = self._market_toast.geometry()
+            ctypes.windll.user32.SetWindowPos(
+                hwnd,
+                -1,  # HWND_TOPMOST
+                geometry.x(),
+                geometry.y(),
+                geometry.width(),
+                geometry.height(),
+                0x0010 | 0x0040,  # SWP_NOACTIVATE | SWP_SHOWWINDOW
+            )
+        except (AttributeError, OSError, TypeError, ValueError):
+            # The Qt hint remains the fallback on nonstandard Windows shells.
+            return
 
     def _hide_market_toast(self) -> None:
         if self._market_toast is not None:
