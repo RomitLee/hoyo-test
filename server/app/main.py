@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.28.0"
+VERSION = "2.29.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -230,6 +230,22 @@ class MonitorLogIn(BaseModel):
     stamina_max: int | None = Field(default=None, ge=1, le=99999, strict=True)
     character_level: int | None = Field(default=None, ge=1, le=175, strict=True)
     stamina_observed_at: datetime | None = None
+
+
+class MarketGemQuoteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    gem_name: Literal["光芒石", "月亮石", "太阳石", "红玛瑙", "五色灵尘", "星辉石", "黑宝石", "舍利子"]
+    price_coins: int = Field(ge=1, le=999999999, strict=True)
+
+
+class MarketGemQuotesIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    occurred_at: datetime
+    server_name: str = Field(min_length=1, max_length=128)
+    observer_character_id: str | None = Field(default=None, max_length=64)
+    stall_owner_id: str = Field(min_length=6, max_length=12, pattern=r"^[0-9]+$")
+    quotes: list[MarketGemQuoteIn] = Field(min_length=1, max_length=8)
 
 
 class BarkSettingsIn(BaseModel):
@@ -789,6 +805,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.insert_monitor_log(identity.account_id, identity.device_id, payload.model_dump(mode="json"))
         return {"accepted": True}
 
+    @app.post("/api/v1/slave/market-gem-quotes", status_code=status.HTTP_202_ACCEPTED)
+    def save_market_gem_quotes(payload: MarketGemQuotesIn,
+                               identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, bool]:  # noqa: B008
+        database.save_market_gem_quotes(identity.account_id, payload.model_dump(mode="json"))
+        return {"accepted": True}
+
     @app.put("/api/v1/slave/monitor-logs/{event_id}/screenshot")
     async def upload_monitor_screenshot(event_id: str, request: Request,
             identity: DeviceIdentity = Depends(authenticate_device)):  # noqa: B008
@@ -848,6 +870,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/master/gem-settings")
     def get_gem_settings(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
         return database.get_gem_settings(account_id)
+
+    @app.get("/api/v1/master/market-gem-statistics")
+    def market_gem_statistics(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return {"items": database.market_gem_statistics(account_id)}
 
     @app.put("/api/v1/master/gem-settings")
     def put_gem_settings(payload: GemSettings, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:

@@ -58,6 +58,15 @@ class RelayDatabase:
                     config_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS market_gem_quotes (
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    server_name TEXT NOT NULL, stall_owner_id TEXT NOT NULL, gem_name TEXT NOT NULL,
+                    price_coins INTEGER NOT NULL, observer_character_id TEXT,
+                    observed_at TEXT NOT NULL, received_at TEXT NOT NULL,
+                    PRIMARY KEY(account_id,server_name,stall_owner_id,gem_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_market_gem_quotes_summary
+                    ON market_gem_quotes(account_id,server_name,gem_name);
                 CREATE TABLE IF NOT EXISTS monitor_screenshots (
                     log_id INTEGER PRIMARY KEY REFERENCES monitor_logs(id) ON DELETE CASCADE,
                     object_key TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
@@ -1005,6 +1014,28 @@ class RelayDatabase:
     def get_monitor_log_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             return self._log_settings(connection, account_id)
+
+    def save_market_gem_quotes(self, account_id: int, payload: dict[str, Any]) -> None:
+        received = utc_now()
+        with self._connect() as connection:
+            for quote in payload["quotes"]:
+                connection.execute("""INSERT INTO market_gem_quotes(
+                    account_id,server_name,stall_owner_id,gem_name,price_coins,observer_character_id,
+                    observed_at,received_at) VALUES (?,?,?,?,?,?,?,?)
+                    ON CONFLICT(account_id,server_name,stall_owner_id,gem_name) DO UPDATE SET
+                    price_coins=excluded.price_coins,observer_character_id=excluded.observer_character_id,
+                    observed_at=excluded.observed_at,received_at=excluded.received_at""",
+                    (account_id, payload["server_name"], payload["stall_owner_id"], quote["gem_name"],
+                     quote["price_coins"], payload.get("observer_character_id"), payload["occurred_at"], received))
+
+    def market_gem_statistics(self, account_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT server_name,gem_name,COUNT(*) AS merchant_count,
+                ROUND(AVG(price_coins)) AS average_price,MIN(price_coins) AS minimum_price,
+                MAX(price_coins) AS maximum_price,MAX(observed_at) AS latest_at
+                FROM market_gem_quotes WHERE account_id=? GROUP BY server_name,gem_name
+                ORDER BY server_name,gem_name""", (account_id,)).fetchall()
+        return [dict(row) for row in rows]
 
     def get_gem_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:

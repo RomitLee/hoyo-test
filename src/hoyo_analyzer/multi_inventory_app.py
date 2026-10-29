@@ -1214,6 +1214,14 @@ class InventoryMonitorWindow(QMainWindow):
         session = self.sessions.get(hwnd)
         if session is None or self.monitoring_paused:
             return
+        if event.type == "market_gem_quotes":
+            self.relay_client.send_market_quotes({
+                "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
+                "server_name": session.account.secondary_region,
+                "observer_character_id": session.account.role_id or None,
+                "stall_owner_id": event.payload["stall_owner_id"], "quotes": event.payload["quotes"],
+            })
+            return
         if session.minimized and (event.type not in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}
                                   or is_window_minimized(hwnd)):
             return
