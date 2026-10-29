@@ -1,7 +1,7 @@
 """Independent desktop release versions and wire protocol compatibility."""
 
 MASTER_VERSION = "V2.3.0"
-SLAVE_VERSION = "V2.14.8"
+SLAVE_VERSION = "V2.14.9"
 PROTOCOL_VERSION = 1
 # Backward-compatible import for external tooling; applications use role versions.
 __version__ = MASTER_VERSION

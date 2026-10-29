@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.29.3"
+VERSION = "2.29.4"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -879,7 +879,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/master/market-gem-statistics")
     def market_gem_statistics(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
-        return {"items": database.market_gem_statistics(account_id)}
+        return {"items": database.market_gem_statistics(account_id),
+                "merchants": database.market_gem_merchants(account_id)}
 
     @app.put("/api/v1/master/gem-settings")
     def put_gem_settings(payload: GemSettings, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:

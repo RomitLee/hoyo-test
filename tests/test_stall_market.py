@@ -1,3 +1,4 @@
+import json
 from threading import Event as ThreadEvent
 from time import monotonic
 
@@ -50,8 +51,11 @@ def test_close_then_reopen_same_merchant_is_still_a_new_visit():
     assert [event.type for event in events] == ["market_stall_changed"]
 
 
-def test_slow_market_ocr_never_blocks_panel_observation_loop():
+def test_slow_market_ocr_uses_persistent_fifo_without_overwriting(tmp_path):
     worker = InventoryMonitorWorker(123, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 角色[123456])")
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    worker._market_queue = []
     started, release = ThreadEvent(), ThreadEvent()
 
     class SlowDetector:
@@ -65,14 +69,18 @@ def test_slow_market_ocr_never_blocks_panel_observation_loop():
     image = np.zeros((480, 640, 3), dtype=np.uint8)
     panel = PanelObservation("stall_other_buy", 1.0, (19, 81, 148, 104))
     before = monotonic()
-    worker._observe_market_panel(image, panel, 100, 1)
+    worker._enqueue_market_visit(image, panel, 100, 1)
     elapsed = monotonic() - before
     try:
         assert elapsed < 0.1
         assert started.wait(1)
         before = monotonic()
-        worker._observe_market_panel(image, panel, 200, 2)
+        worker._enqueue_market_visit(image, panel, 200, 2)
         assert monotonic() - before < 0.1
+        assert len(worker._market_queue) == 2
+        saved = json.loads(worker._market_manifest.read_text(encoding="utf-8"))
+        assert [item["timestamp_ms"] for item in saved] == [100, 200]
+        assert all((tmp_path / item["file"]).is_file() for item in saved)
     finally:
         release.set()
         worker.stop()

@@ -30,6 +30,27 @@ def master_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MASTER_TOKEN}"}
 
 
+def test_market_gem_statistics_keep_every_merchant_quote(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        route = "/api/v1/slave/market-gem-quotes"
+        base = {"occurred_at": "2026-10-29T20:00:00+08:00", "server_name": "秦淮风光",
+                "observer_character_id": "123456", "quotes": [{"gem_name": "光芒石", "price_coins": 20000}]}
+        first = {**base, "event_id": "stall-1", "stall_owner_id": "800001"}
+        second = {**base, "event_id": "stall-2", "stall_owner_id": "800002",
+                  "quotes": [{"gem_name": "光芒石", "price_coins": 30000},
+                             {"gem_name": "月亮石", "price_coins": 40000}]}
+        assert client.post(route, headers=device_headers(), json=first).status_code == 202
+        assert client.post(route, headers=device_headers(), json=second).status_code == 202
+        result = client.get("/api/v1/master/market-gem-statistics", headers=master_headers()).json()
+        light = next(item for item in result["items"] if item["gem_name"] == "光芒石")
+        assert light["merchant_count"] == 2 and light["average_price"] == 25000
+        assert [merchant["stall_owner_id"] for merchant in result["merchants"]] == ["800001", "800002"]
+        second_merchant = result["merchants"][1]
+        assert {quote["gem_name"]: quote["price_coins"] for quote in second_merchant["quotes"]} == {
+            "光芒石": 30000, "月亮石": 40000,
+        }
+
+
 def test_legacy_cash_observations_are_acknowledged_without_statistics(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         payload = {"event_id": "balance-1", "character_id": "123456", "stream_id": "run1",

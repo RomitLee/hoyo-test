@@ -1037,6 +1037,30 @@ class RelayDatabase:
                 ORDER BY server_name,gem_name""", (account_id,)).fetchall()
         return [dict(row) for row in rows]
 
+    def market_gem_merchants(self, account_id: int) -> list[dict[str, Any]]:
+        """Return every seller's latest quote set; never collapse merchants into min/max."""
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT server_name,stall_owner_id,observer_character_id,
+                gem_name,price_coins,observed_at FROM market_gem_quotes
+                WHERE account_id=? ORDER BY server_name,stall_owner_id,gem_name""", (account_id,)).fetchall()
+        merchants: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (row["server_name"], row["stall_owner_id"])
+            item = merchants.setdefault(key, {
+                "server_name": row["server_name"], "stall_owner_id": row["stall_owner_id"],
+                "observer_character_id": row["observer_character_id"], "latest_at": row["observed_at"],
+                "quotes": [],
+            })
+            item["quotes"].append({"gem_name": row["gem_name"], "price_coins": row["price_coins"],
+                                   "observed_at": row["observed_at"]})
+            if row["observed_at"] > item["latest_at"]:
+                item["latest_at"] = row["observed_at"]
+        counts: dict[str, int] = {}
+        for server_name, _ in merchants:
+            counts[server_name] = counts.get(server_name, 0) + 1
+        return sorted(merchants.values(),
+                      key=lambda item: (-counts[item["server_name"]], item["server_name"], item["stall_owner_id"]))
+
     def get_gem_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(

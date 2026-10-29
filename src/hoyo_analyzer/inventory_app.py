@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -13,10 +14,12 @@ from threading import Event as ThreadEvent
 from threading import Lock
 from time import monotonic
 from typing import Any, ClassVar
+from uuid import uuid4
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 
 import cv2
+import numpy as np
 
 from .capture import make_source
 from .config import AppConfig, load_config
@@ -25,13 +28,13 @@ from .inventory_fullness import InventoryAnalysis, InventoryFullnessDetector, In
 from .models import Event, Observation
 from .money import MoneyDetector, MoneyTracker
 from .panel_targets import PanelTargetDetector, PanelTargetTracker, attach_target, target_payload
-from .panels import PanelDetector, PanelTracker
+from .panels import PanelDetector, PanelObservation, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
 from .screenshots import capture_panel_screenshot
 from .stamina import StaminaDetector, StaminaTracker
 from .stall_stock import StallStockDetector, StallStockTracker
-from .stall_market import StallMarketDetector, StallMarketTracker, StallVisitTracker
+from .stall_market import StallMarketDetector, StallVisitTracker
 from .storage import JsonlEventSink
 from .wgc import is_window_available, is_window_minimized, list_capturable_windows
 
@@ -154,11 +157,11 @@ class InventoryMonitorWorker(QObject):
         self._snapshot_request: str | None = None
         self._market_lock = Lock()
         self._market_detector = StallMarketDetector()
-        self._market_tracker = StallMarketTracker()
         self._market_future: Future | None = None
-        self._market_pending: tuple[Any, Any, int, int, int] | None = None
-        self._market_epoch = 0
-        self._market_panel_present = False
+        identity = parse_account_info(window_title).role_id or f"hwnd-{hwnd}"
+        self._market_directory = application_root() / "runtime" / "market-ocr-queue" / identity
+        self._market_manifest = self._market_directory / "queue.json"
+        self._market_queue = self._load_market_queue()
 
     def request_live_snapshot(self, request_id: str = "") -> None:
         """Request the next genuine game frame from the capture thread."""
@@ -176,64 +179,122 @@ class InventoryMonitorWorker(QObject):
 
     def stop(self) -> None:
         self._stop_requested.set()
-        self._reset_market_analysis()
         if self._source is not None:
             self._source.close()
 
     def _reset_market_analysis(self) -> None:
-        """Invalidate queued OCR without waiting for an in-flight model call."""
-        with self._market_lock:
-            self._market_epoch += 1
-            self._market_pending = None
-            self._market_panel_present = False
-            self._market_tracker.reset()
+        """Panel transitions must not discard already captured merchant visits."""
 
-    def _observe_market_panel(self, image: Any, panel: Any, timestamp_ms: int, frame_index: int) -> None:
-        """Queue latest stall OCR while keeping panel recognition non-blocking."""
-        if panel.panel_type != "stall_other_buy" or panel.bbox is None:
-            if self._market_panel_present:
-                self._reset_market_analysis()
+    def _load_market_queue(self) -> list[dict[str, Any]]:
+        try:
+            raw = json.loads(self._market_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        return [item for item in raw if isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and isinstance(item.get("file"), str)
+                and Path(item["file"]).name == item["file"]
+                and item["file"].endswith(".png")
+                and isinstance(item.get("bbox"), list) and len(item["bbox"]) == 4]
+
+    def _save_market_queue_locked(self) -> None:
+        self._market_directory.mkdir(parents=True, exist_ok=True)
+        temporary = self._market_manifest.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self._market_queue, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(self._market_manifest)
+
+    def _enqueue_market_visit(self, image: Any, panel: PanelObservation,
+                              timestamp_ms: int, frame_index: int) -> None:
+        if panel.bbox is None:
             return
+        entry_id = uuid4().hex
+        filename = f"{entry_id}.png"
+        try:
+            self._market_directory.mkdir(parents=True, exist_ok=True)
+            encoded, data = cv2.imencode(".png", image)
+            if not encoded:
+                return
+            (self._market_directory / filename).write_bytes(data.tobytes())
+            entry = {
+                "id": entry_id, "file": filename, "bbox": list(panel.bbox),
+                "timestamp_ms": timestamp_ms, "frame_index": frame_index,
+                "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"), "attempts": 0,
+            }
+            with self._market_lock:
+                self._market_queue.append(entry)
+                self._save_market_queue_locked()
+                if self._market_future is None:
+                    self._submit_market_ocr_locked()
+        except (OSError, cv2.error):
+            try:
+                (self._market_directory / filename).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _start_market_ocr_queue(self) -> None:
         with self._market_lock:
-            self._market_panel_present = True
-            # Only the newest frame matters while an earlier OCR is running.
-            self._market_pending = (image.copy(), panel, timestamp_ms, frame_index, self._market_epoch)
             if self._market_future is None:
                 self._submit_market_ocr_locked()
 
     def _submit_market_ocr_locked(self) -> None:
-        if self._market_pending is None or self._stop_requested.is_set():
+        if not self._market_queue or self._stop_requested.is_set():
             return
-        task = self._market_pending
-        self._market_pending = None
+        task = dict(self._market_queue[0])
         future = _MARKET_OCR_EXECUTOR.submit(self._run_market_ocr, task)
+        future.market_task = task  # type: ignore[attr-defined]
         self._market_future = future
         future.add_done_callback(self._market_ocr_finished)
 
-    def _run_market_ocr(self, task: tuple[Any, Any, int, int, int]) -> tuple[Any, int, int, int]:
-        image, panel, timestamp_ms, frame_index, epoch = task
-        return self._market_detector.analyze(image, panel), timestamp_ms, frame_index, epoch
+    def _run_market_ocr(self, task: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        path = self._market_directory / Path(task["file"]).name
+        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise OSError("queued market screenshot is unreadable")
+        panel = PanelObservation("stall_other_buy", 1.0, tuple(int(value) for value in task["bbox"]))
+        return task, self._market_detector.analyze(image, panel)
 
     def _market_ocr_finished(self, future: Future) -> None:
-        events: list[Event] = []
+        task: dict[str, Any] | None = getattr(future, "market_task", None)
+        reading = None
+        failed = False
         try:
-            reading, timestamp_ms, frame_index, epoch = future.result()
+            task, reading = future.result()
         except Exception:  # noqa: BLE001 - optional OCR must not interrupt monitoring
-            reading = None
-            timestamp_ms = frame_index = epoch = -1
+            failed = True
+        event: Event | None = None
         with self._market_lock:
-            if epoch == self._market_epoch and not self._stop_requested.is_set():
-                events = self._market_tracker.update(reading, timestamp_ms, frame_index)
             self._market_future = None
-        # Submit outside the completion lock.  Cached OCR can finish very
-        # quickly and concurrent.futures may invoke its callback immediately.
-        with self._market_lock:
-            if self._market_future is None:
+            current = self._market_queue[0] if self._market_queue else None
+            if current is not None and (task is None or current["id"] == task["id"]):
+                if failed:
+                    current["attempts"] = int(current.get("attempts", 0)) + 1
+                    if current["attempts"] < 3:
+                        self._save_market_queue_locked()
+                    else:
+                        task = self._market_queue.pop(0)
+                else:
+                    task = self._market_queue.pop(0)
+                    if reading is not None:
+                        event = Event(
+                            uuid4().hex, int(task["timestamp_ms"]), "market_gem_quotes",
+                            confidence=reading.confidence,
+                            payload={
+                                "stall_owner_id": reading.owner_id,
+                                "quotes": [{"gem_name": name, "price_coins": price}
+                                           for name, price in reading.quotes],
+                                "occurred_at": task["occurred_at"],
+                            }, evidence_frame_index=int(task["frame_index"]),
+                        )
+                self._save_market_queue_locked()
+                if task is not None and (not failed or int(task.get("attempts", 0)) >= 3):
+                    try:
+                        (self._market_directory / Path(task["file"]).name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            if not self._stop_requested.is_set():
                 self._submit_market_ocr_locked()
-        if not events:
-            return
-        account = parse_account_info(self.window_title)
-        for event in events:
+        if event is not None:
+            account = parse_account_info(self.window_title)
             event.payload.setdefault("window_hwnd", self.hwnd)
             event.payload.setdefault("window_title", self.window_title)
             event.payload.setdefault("secondary_region", account.secondary_region)
@@ -266,6 +327,7 @@ class InventoryMonitorWorker(QObject):
             detector = InventoryFullnessDetector(template_path)
             panel_detector = PanelDetector()
             panel_tracker = PanelTracker()
+            self._start_market_ocr_queue()
             target_detector = PanelTargetDetector()
             target_tracker = PanelTargetTracker()
             money_detector = MoneyDetector()
@@ -385,11 +447,6 @@ class InventoryMonitorWorker(QObject):
                         stall_stock_detector.count(packet.image, panel) if stall_panel == "stall" else None,
                         packet.timestamp_ms,
                     )
-                    # Product OCR is intentionally asynchronous.  Panel events
-                    # below now leave this loop in well under one second even
-                    # when the stall contains no supported gems.
-                    self._observe_market_panel(packet.image, panel, packet.timestamp_ms, packet.frame_index)
-                    market_events: list[Event] = []
                     visit_events = stall_visit_tracker.update(
                         stall_visit_tracker.signature(self._market_detector, packet.image, panel),
                         packet.timestamp_ms, packet.frame_index)
@@ -403,6 +460,17 @@ class InventoryMonitorWorker(QObject):
                         for event in panel_events
                     ):
                         visit_events = []
+                    if any(
+                        event.payload.get("panel_type") == "stall_other_buy"
+                        and event.type in {"panel_opened", "market_stall_changed"}
+                        for event in panel_events + visit_events
+                    ):
+                        # One lossless image per confirmed visit.  The durable
+                        # FIFO survives restarts and never lets later stalls
+                        # overwrite earlier, still-unprocessed stalls.
+                        self._enqueue_market_visit(
+                            packet.image, panel, packet.timestamp_ms, packet.frame_index
+                        )
                     signal["character_id"] = current_character_id
                     stamina = stamina_detector.analyze(packet.image, panel)
                     signal.update(stamina_tracker.update(stamina, packet.timestamp_ms))
@@ -431,7 +499,7 @@ class InventoryMonitorWorker(QObject):
                         analysis.confidence,
                         "inventory-monitor",
                     )
-                    for event in panel_events + target_events + visit_events + market_events + machine.update(observation):
+                    for event in panel_events + target_events + visit_events + machine.update(observation):
                         account = parse_account_info(self.window_title)
                         event.payload.setdefault("window_hwnd", self.hwnd)
                         event.payload.setdefault("window_title", self.window_title)
