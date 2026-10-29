@@ -30,7 +30,7 @@ from .sampler import AdaptiveSampler, SamplingProfile
 from .screenshots import capture_panel_screenshot
 from .stamina import StaminaDetector, StaminaTracker
 from .stall_stock import StallStockDetector, StallStockTracker
-from .stall_market import StallMarketDetector, StallMarketTracker
+from .stall_market import StallMarketDetector, StallMarketTracker, StallVisitTracker
 from .storage import JsonlEventSink
 from .wgc import is_window_available, is_window_minimized, list_capturable_windows
 
@@ -199,6 +199,7 @@ class InventoryMonitorWorker(QObject):
             stall_stock_tracker = StallStockTracker()
             stall_market_detector = StallMarketDetector()
             stall_market_tracker = StallMarketTracker()
+            stall_visit_tracker = StallVisitTracker()
             money_character_id = parse_account_info(self.window_title).role_id
             last_panel_frame_ms: int | None = None
             sampler = AdaptiveSampler(
@@ -245,6 +246,7 @@ class InventoryMonitorWorker(QObject):
                     target_tracker.reset()
                     stall_stock_tracker.reset()
                     stall_market_tracker.reset()
+                    stall_visit_tracker.reset()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
                     sampler = AdaptiveSampler(
@@ -267,6 +269,7 @@ class InventoryMonitorWorker(QObject):
                     target_tracker.reset()
                     stall_stock_tracker.reset()
                     stall_market_tracker.reset()
+                    stall_visit_tracker.reset()
                     continue
                 now = monotonic()
                 if now - last_preview >= self.PREVIEW_INTERVAL_SECONDS:
@@ -282,6 +285,7 @@ class InventoryMonitorWorker(QObject):
                         target_tracker.reset()
                         stall_stock_tracker.reset()
                         stall_market_tracker.reset()
+                        stall_visit_tracker.reset()
                     last_panel_frame_ms = packet.timestamp_ms
                     panel_events = panel_tracker.update(panel, packet.timestamp_ms, packet.frame_index)
                     stall_panel = (panel.panel_type if panel.panel_type == panel_tracker.stable
@@ -297,6 +301,7 @@ class InventoryMonitorWorker(QObject):
                         target_tracker.reset()
                         stall_stock_tracker.reset()
                         stall_market_tracker.reset()
+                        stall_visit_tracker.reset()
                         money_character_id = current_character_id
                     signal = _analysis_signal(analysis)
                     signal["panel_type"] = panel.panel_type
@@ -307,6 +312,9 @@ class InventoryMonitorWorker(QObject):
                     )
                     market_events = stall_market_tracker.update(
                         stall_market_detector.analyze(packet.image, panel), packet.timestamp_ms, packet.frame_index)
+                    visit_events = stall_visit_tracker.update(
+                        stall_visit_tracker.signature(stall_market_detector, packet.image, panel),
+                        packet.timestamp_ms, packet.frame_index)
                     signal["character_id"] = current_character_id
                     stamina = stamina_detector.analyze(packet.image, panel)
                     signal.update(stamina_tracker.update(stamina, packet.timestamp_ms))
@@ -335,7 +343,7 @@ class InventoryMonitorWorker(QObject):
                         analysis.confidence,
                         "inventory-monitor",
                     )
-                    for event in panel_events + target_events + market_events + machine.update(observation):
+                    for event in panel_events + target_events + visit_events + market_events + machine.update(observation):
                         account = parse_account_info(self.window_title)
                         event.payload.setdefault("window_hwnd", self.hwnd)
                         event.payload.setdefault("window_title", self.window_title)

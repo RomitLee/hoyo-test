@@ -12,7 +12,7 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from .models import Event
+from .models import BEIJING_TZ, Event
 from .panel_targets import recognize_shared_text
 from .panels import PanelObservation
 
@@ -166,3 +166,53 @@ class StallMarketTracker:
                                "quotes": [{"gem_name": name, "price_coins": price} for name, price in reading.quotes],
                                "occurred_at": now.isoformat(timespec="milliseconds")},
                       evidence_frame_index=frame_index)]
+
+
+class StallVisitTracker:
+    """Detect direct merchant switches while the same market panel remains open."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.pending: bytes | None = None
+        self.count = 0
+        self.emitted: bytes | None = None
+
+    @staticmethod
+    def _same(left: bytes | None, right: bytes | None) -> bool:
+        if left is None or right is None:
+            return left is right
+        return sum((a ^ b).bit_count() for a, b in zip(left, right)) <= 6
+
+    @staticmethod
+    def signature(detector: StallMarketDetector, image: np.ndarray, panel: PanelObservation) -> bytes | None:
+        if panel.panel_type != "stall_other_buy":
+            return None
+        field = detector._crop(image, panel, (50, 53, 259, 72))
+        if field is None:
+            return None
+        gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(gray, (33, 8), interpolation=cv2.INTER_AREA)
+        return np.packbits(small[:, 1:] > small[:, :-1]).tobytes()
+
+    def update(self, signature: bytes | None, timestamp_ms: int, frame_index: int = 0) -> list[Event]:
+        if signature is None:
+            self.reset()
+            return []
+        if self._same(signature, self.pending):
+            self.count += 1
+        else:
+            self.pending, self.count = signature, 1
+        if self.count < 2 or self._same(signature, self.emitted):
+            return []
+        first_visit = self.emitted is None
+        self.emitted = signature
+        if first_visit:
+            return []
+        now = datetime.now(BEIJING_TZ)
+        return [Event(uuid4().hex, timestamp_ms, "market_stall_changed", confidence=.9,
+                      payload={"panel_type": "stall_other_buy", "message": "切换浏览其他人摊位",
+                               "occurred_at": now.isoformat(timespec="milliseconds")},
+                      evidence_frame_index=frame_index,
+                      beijing_time=now.strftime("%Y年%m月%d日%H:%M:%S"))]

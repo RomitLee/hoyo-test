@@ -24,7 +24,7 @@ def capture_panel_screenshot(event, image) -> str | None:
         "give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy"
     }:
         return None
-    if event.type != "panel_opened" and not (
+    if event.type not in {"panel_opened", "market_stall_changed"} and not (
         event.type == "panel_target_changed" and event.payload.get("panel_type") in {"give", "trade"}
         and event.payload.get("target_status") == "recognized"
     ):

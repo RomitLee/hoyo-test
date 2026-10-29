@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.29.1"
+VERSION = "2.29.2"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -211,7 +211,7 @@ class AckIn(BaseModel):
 class MonitorLogIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
-    event_type: Literal["monitoring_started", "monitoring_paused", "window_monitored", "panel_opened", "panel_closed", "game_default", "panel_target_changed"]
+    event_type: Literal["monitoring_started", "monitoring_paused", "window_monitored", "panel_opened", "panel_closed", "game_default", "panel_target_changed", "market_stall_changed"]
     occurred_at: datetime
     reason: Literal["startup", "resume", "pause", "close", "recognition"]
     window_id: str | None = Field(default=None, max_length=128)
@@ -789,6 +789,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="对象日志仅支持给予和交易面板")
         if payload.event_type == "panel_target_changed" and payload.target_status is None:
             raise HTTPException(status_code=422, detail="对象日志缺少识别状态")
+        if payload.event_type == "market_stall_changed" and payload.panel_type != "stall_other_buy":
+            raise HTTPException(status_code=422, detail="摊主变化日志仅支持他人收货摊位")
         if any(value is not None for value in (payload.target_status, payload.target_name, payload.target_level, payload.target_confidence)):
             if payload.event_type not in {"panel_opened", "panel_target_changed"} or payload.panel_type not in {"give", "trade"}:
                 raise HTTPException(status_code=422, detail="对象信息仅支持给予和交易面板")
@@ -820,9 +822,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not row:
             raise HTTPException(status_code=404, detail="对应监控日志尚未接收")
         if (row["panel_type"] not in {"give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy"}
-                or row["event_type"] not in {"panel_opened", "panel_target_changed"}
+                or row["event_type"] not in {"panel_opened", "panel_target_changed", "market_stall_changed"}
+                or row["event_type"] == "market_stall_changed" and row["panel_type"] != "stall_other_buy"
                 or row["panel_type"] in {"attributes", "stall", "stall_buy", "stall_other_buy"}
-                and row["event_type"] != "panel_opened"):
+                and row["event_type"] not in {"panel_opened", "market_stall_changed"}):
             raise HTTPException(status_code=422, detail="该面板日志不支持上传截图")
         if not app.state.screenshots.configured:
             raise HTTPException(status_code=503, detail="截图存储暂未配置")

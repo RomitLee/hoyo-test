@@ -1227,7 +1227,7 @@ class InventoryMonitorWindow(QMainWindow):
             return
         account_label = f"{session.account.secondary_region} / {session.account.role_name}"
         self.log.appendPlainText(f"{event.display_time}  {account_label}  {event.display_name}")
-        if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:
+        if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed", "market_stall_changed"}:
             payload = {
                 "event_id": event.event_id, "event_type": event.type, "reason": "recognition",
                 "occurred_at": event.payload["occurred_at"],

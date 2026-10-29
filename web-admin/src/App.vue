@@ -211,7 +211,7 @@ const eventTypes = [
   ['', '全部类型'], ['window_occluded', '遮挡'], ['window_minimized', '最小化'],
   ['monitoring_started', '开始监控'], ['monitoring_paused', '暂停监控'], ['window_monitored', '开始监控角色'],
   ['panel_opened', '打开面板'], ['panel_closed', '关闭面板'],
-  ['panel_target_changed', '对象变化'], ['game_default', '默认界面'],
+  ['panel_target_changed', '对象变化'], ['market_stall_changed', '切换他人摊位'], ['game_default', '默认界面'],
 ]
 
 function fail(cause: unknown) {
@@ -383,6 +383,7 @@ function logLabel(item: Log): string {
     : item.event_type === 'panel_opened' ? `打开${panelLabels[item.panel_type || ''] || '面板'}`
     : item.event_type === 'panel_closed' ? `关闭${panelLabels[item.panel_type || ''] || '面板'}`
     : item.event_type === 'panel_target_changed' ? `${item.panel_type === 'give' ? '给予' : '交易'}对象变化`
+    : item.event_type === 'market_stall_changed' ? '切换浏览其他人摊位'
     : ({ window_occluded: '遮挡', window_minimized: '最小化', monitoring_started: '开始监控', monitoring_paused: '暂停监控', window_monitored: '开始监控角色' } as Record<string, string>)[item.event_type] || item.event_type
   if (['give', 'trade'].includes(item.panel_type || '') && item.target_status != null) {
     const target = item.target_status === 'recognized' && item.target_name && item.target_level ? `${item.target_name}，${item.target_level}级` : '对象未识别'
