@@ -26,7 +26,9 @@ class LiveScreenshotClient(QObject):
         self._permissions: dict[str, tuple[str, datetime, str]] = {}
         self._pending: dict[str, tuple[bytes, str, str, str]] = {}
         self._inflight: set[str] = set()
+        self._busy_window = ""
         self._retries: dict[str, int] = {}
+        self._retry_waiting: set[str] = set()
         self._polling = False
         self._timer = QTimer(self)
         self._timer.setInterval(5000)
@@ -37,7 +39,9 @@ class LiveScreenshotClient(QObject):
         self._permissions.clear()
         self._pending.clear()
         self._inflight.clear()
+        self._busy_window = ""
         self._retries.clear()
+        self._retry_waiting.clear()
         self._timer.stop()
         if base_url and device_id and token:
             self._timer.start()
@@ -82,11 +86,14 @@ class LiveScreenshotClient(QObject):
         self._pending[window_id] = (jpeg, captured_at, request_id, uuid.uuid4().hex)
         self._permissions.pop(window_id, None)
         self._retries[window_id] = 0
+        self._retry_waiting.discard(window_id)
         self._upload_next(window_id)
 
     def _upload_next(self, window_id: str) -> None:
-        if window_id in self._inflight or window_id not in self._pending:
+        if ((self._busy_window and self._busy_window != window_id)
+                or window_id in self._inflight or window_id not in self._pending):
             return
+        self._busy_window = window_id
         permission = self._permissions.get(window_id)
         capture_id = self._pending[window_id][3]
         if permission is None or permission[2] != capture_id or permission[1] <= datetime.now(UTC) + timedelta(minutes=2):
@@ -106,8 +113,10 @@ class LiveScreenshotClient(QObject):
 
     def _on_permission(self, window_id: str, capture_id: str, data: dict[str, Any] | None) -> None:
         self._inflight.discard(window_id)
+        self._busy_window = ""
         if window_id not in self._pending or self._pending[window_id][3] != capture_id:
             self._upload_next(window_id)
+            self._pump_pending()
             return
         if data and isinstance(data.get("url"), str):
             try:
@@ -117,6 +126,7 @@ class LiveScreenshotClient(QObject):
             except (ValueError, KeyError):
                 pass
         self._retry(window_id, "无法取得截图上传许可")
+        self._pump_pending()
 
     def _retry(self, window_id: str, reason: str) -> None:
         if window_id not in self._pending:
@@ -127,7 +137,13 @@ class LiveScreenshotClient(QObject):
             self._retries.pop(window_id, None)
             self.upload_failed.emit(f"{window_id}：{reason}")
             return
-        QTimer.singleShot(5000, lambda: self._upload_next(window_id))
+        self._retry_waiting.add(window_id)
+        QTimer.singleShot(5000, lambda: self._resume_retry(window_id))
+
+    def _resume_retry(self, window_id: str) -> None:
+        self._retry_waiting.discard(window_id)
+        self._upload_next(window_id)
+        self._pump_pending()
 
     def _on_upload(self, reply: QNetworkReply, window_id: str, jpeg: bytes, captured_at: str,
                    request_id: str, capture_id: str) -> None:
@@ -136,9 +152,11 @@ class LiveScreenshotClient(QObject):
         reply.deleteLater()
         if not ok:
             self._inflight.discard(window_id)
+            self._busy_window = ""
             self._pending.setdefault(window_id, (jpeg, captured_at, request_id, capture_id))
             self._permissions.pop(window_id, None)
             self._retry(window_id, "COS 截图上传失败")
+            self._pump_pending()
             return
         self._post("/api/v1/slave/live-screenshots/complete",
                    {"window_id": window_id, "captured_at": captured_at, "request_id": request_id or None,
@@ -148,9 +166,23 @@ class LiveScreenshotClient(QObject):
     def _on_complete(self, window_id: str, jpeg: bytes, captured_at: str, request_id: str, capture_id: str,
                      data: dict[str, Any] | None) -> None:
         self._inflight.discard(window_id)
+        self._busy_window = ""
         if data is None:
             self._pending.setdefault(window_id, (jpeg, captured_at, request_id, capture_id))
             self._retry(window_id, "截图已上传，但登记失败")
+            self._pump_pending()
             return
         self._retries.pop(window_id, None)
+        self._retry_waiting.discard(window_id)
         self._upload_next(window_id)
+        self._pump_pending()
+
+    def _pump_pending(self) -> None:
+        if self._busy_window:
+            return
+        for window_id in tuple(self._pending):
+            if window_id in self._retry_waiting:
+                continue
+            self._upload_next(window_id)
+            if self._busy_window:
+                return

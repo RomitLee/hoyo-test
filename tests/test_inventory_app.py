@@ -58,6 +58,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
 
     window = InventoryMonitorWindow()
+    window.auth_timer.stop()
     try:
         assert window.windowTitle() == APP_NAME
         assert not window.windowIcon().isNull()
@@ -97,6 +98,7 @@ def test_inventory_window_exposes_only_monitoring_controls(monkeypatch) -> None:
         assert not window.status_timer.isActive()
         assert not window.relay_client.configured
     finally:
+        window.sessions = {}
         window.close()
 
 
@@ -116,6 +118,33 @@ def test_market_detection_toast_shows_server_and_closes_after_two_seconds(monkey
         window._hide_market_toast()
         assert not window._market_toast.isVisible()
     finally:
+        window.close()
+
+
+def test_periodic_screenshots_are_dispatched_one_window_at_a_time(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    monkeypatch.setattr("hoyo_analyzer.multi_inventory_app.is_window_minimized", lambda hwnd: False)
+    window = InventoryMonitorWindow()
+    window.auth_timer.stop()
+    calls: list[int] = []
+    try:
+        window.sessions = {
+            hwnd: SimpleNamespace(removing=False, worker=SimpleNamespace(
+                request_live_snapshot=lambda current=hwnd: calls.append(current)))
+            for hwnd in (1, 2, 3)
+        }
+        window._live_capture_queue = [1, 2, 3]
+        window._queued_live_captures = {1, 2, 3}
+        window._dispatch_next_periodic_snapshot()
+        assert calls == [1]
+        assert window._live_capture_queue == [2, 3]
+        assert window._live_capture_queue_timer.isActive()
+        window._live_capture_queue_timer.stop()
+        window._dispatch_next_periodic_snapshot()
+        assert calls == [1, 2]
+    finally:
+        window.sessions = {}
         window.close()
         app.processEvents()
 

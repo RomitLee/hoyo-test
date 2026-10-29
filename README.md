@@ -8,7 +8,7 @@
 
 | 组件 | 当前版本 | 获取方式 |
 | --- | --- | --- |
-| Windows 从机 | V2.14.4 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.14.4) |
+| Windows 从机 | V2.14.5 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.14.5) |
 | 云端服务 | 2.29.0 | [用户工作台](https://jiankong.maipi.top/) · [项目总后台](https://jiankong.maipi.top/admin) |
 | Windows 主机（历史版本，不再使用） | V2.3.0 | 由网页管理界面替代 |
 

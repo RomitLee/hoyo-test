@@ -170,6 +170,11 @@ class InventoryMonitorWindow(QMainWindow):
         self._live_interval_minutes = 5
         self._last_live_capture: dict[int, float] = {}
         self._seen_live_requests: set[str] = set()
+        self._live_capture_queue: list[int] = []
+        self._queued_live_captures: set[int] = set()
+        self._live_capture_queue_timer = QTimer(self)
+        self._live_capture_queue_timer.setSingleShot(True)
+        self._live_capture_queue_timer.timeout.connect(self._dispatch_next_periodic_snapshot)
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.refresh_windows)
         self.scan_timer.setInterval(3000)
@@ -1588,14 +1593,34 @@ class InventoryMonitorWindow(QMainWindow):
             session = self.sessions.get(hwnd)
             if session and not session.removing and not is_window_minimized(hwnd):
                 self._seen_live_requests.add(request_id)
+                if hwnd in self._queued_live_captures:
+                    self._queued_live_captures.discard(hwnd)
+                    self._live_capture_queue = [item for item in self._live_capture_queue if item != hwnd]
                 session.worker.request_live_snapshot(request_id)
         now = monotonic()
         for hwnd, session in self.sessions.items():
             if session.removing or self.monitoring_paused or is_window_minimized(hwnd):
                 continue
             if now - self._last_live_capture.get(hwnd, -3600.0) >= self._live_interval_minutes * 60:
-                self._last_live_capture[hwnd] = now
-                session.worker.request_live_snapshot()
+                if hwnd not in self._queued_live_captures:
+                    self._queued_live_captures.add(hwnd)
+                    self._live_capture_queue.append(hwnd)
+        if self._live_capture_queue and not self._live_capture_queue_timer.isActive():
+            self._dispatch_next_periodic_snapshot()
+
+    def _dispatch_next_periodic_snapshot(self) -> None:
+        while self._live_capture_queue:
+            hwnd = self._live_capture_queue.pop(0)
+            self._queued_live_captures.discard(hwnd)
+            session = self.sessions.get(hwnd)
+            if (session is None or session.removing or self.monitoring_paused
+                    or is_window_minimized(hwnd)):
+                continue
+            self._last_live_capture[hwnd] = monotonic()
+            session.worker.request_live_snapshot()
+            break
+        if self._live_capture_queue:
+            self._live_capture_queue_timer.start(10_000)
 
     @Slot(int, object, str, str)
     def _on_live_snapshot(self, hwnd: int, jpeg: bytes, captured_at: str, request_id: str) -> None:
