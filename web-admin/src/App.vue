@@ -82,6 +82,7 @@ let alarmAudio: HTMLAudioElement | undefined
 let audioUnlockAttempted = false
 let sampleTimer: number | undefined
 let timer: number | undefined
+let logStreamController: AbortController | undefined
 let session = 0
 
 const windows = computed<RoleCard[]>(() => roles.value.map(role => ({ ...role,
@@ -222,6 +223,7 @@ function fail(cause: unknown) {
 
 function logout(message = '') {
   ++session
+  stopLogStream()
   localStorage.removeItem(TOKEN_KEY)
   token.value = ''
   password.value = ''
@@ -317,7 +319,7 @@ async function refresh() {
     if (!nextAlerts.size) stopSound()
     updatedAt.value = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
     connected.value = true; error.value = ''
-    if (page.value === 'logs') await fetchLogs(logCursor.value)
+    if (page.value === 'logs' && !logStreamController) await fetchLogs(logCursor.value)
   } catch (cause) { if (current === session) fail(cause) }
   finally { loading.value = false }
 }
@@ -349,6 +351,7 @@ function start() {
 }
 
 function choose(next: Page) {
+  if (next !== 'logs') stopLogStream()
   page.value = next
   notice.value = ''
   if (next === 'monitor' && monitorView.value === 'card') void refreshThumbnails()
@@ -364,6 +367,8 @@ function setMonitorView(next: 'card' | 'list') {
 
 async function fetchLogs(cursor: number) {
   if (!token.value) return
+  if (cursor > 0) stopLogStream()
+  if (cursor > 0) stopLogStream()
   const params = new URLSearchParams({ limit: '100', before_id: String(cursor) })
   if (filter.event_type) params.set('event_type', filter.event_type)
   if (filter.panel_type) params.set('panel_type', filter.panel_type)
@@ -375,7 +380,64 @@ async function fetchLogs(cursor: number) {
     logCursor.value = cursor
     logNext.value = logs.value.at(-1)?.id || 0
     logHasMore.value = data.has_more
+    if (cursor === 0) void startLogStream()
+    if (cursor === 0 && page.value === 'logs') void startLogStream()
   } catch (cause) { if (current === session) fail(cause) }
+}
+
+function stopLogStream() {
+  logStreamController?.abort()
+  logStreamController = undefined
+}
+
+async function startLogStream() {
+  if (!token.value || page.value !== 'logs' || logCursor.value !== 0) return
+  stopLogStream()
+  const controller = new AbortController()
+  logStreamController = controller
+  const current = session
+  const params = new URLSearchParams()
+  if (filter.event_type) params.set('event_type', filter.event_type)
+  if (filter.panel_type) params.set('panel_type', filter.panel_type)
+  try {
+    const response = await fetch(`/api/v1/master/monitor-logs/stream?${params}`, {
+      headers: { Authorization: `Bearer ${token.value}` }, cache: 'no-store', signal: controller.signal,
+    })
+    if (response.status === 401) throw new Unauthorized('登录已失效')
+    if (!response.ok || !response.body) throw new Error(`实时日志连接失败 (${response.status})`)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (!controller.signal.aborted) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let boundary = buffer.indexOf('\n\n')
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary)
+        buffer = buffer.slice(boundary + 2)
+        const line = block.split('\n').find(item => item.startsWith('data: '))
+        if (line && current === session && page.value === 'logs' && logCursor.value === 0) {
+          const data = JSON.parse(line.slice(6)) as { logs: Log[]; has_more: boolean }
+          logs.value = data.logs || []
+          logNext.value = logs.value.at(-1)?.id || 0
+          logHasMore.value = data.has_more
+          connected.value = true
+        }
+        boundary = buffer.indexOf('\n\n')
+      }
+    }
+    if (!controller.signal.aborted && current === session) {
+      window.setTimeout(() => { if (page.value === 'logs') void startLogStream() }, 1000)
+    }
+  } catch (cause) {
+    if (!controller.signal.aborted && current === session) {
+      if (cause instanceof Unauthorized) fail(cause)
+      else window.setTimeout(() => { if (page.value === 'logs') void startLogStream() }, 1000)
+    }
+  } finally {
+    if (logStreamController === controller) logStreamController = undefined
+  }
 }
 
 function logLabel(item: Log): string {
@@ -493,9 +555,9 @@ async function testBark() {
   catch (cause) { fail(cause) }
 }
 
-watch([() => filter.event_type, () => filter.panel_type], () => { if (page.value === 'logs') void fetchLogs(0) })
+watch([() => filter.event_type, () => filter.panel_type], () => { if (page.value === 'logs') { stopLogStream(); void fetchLogs(0) } })
 onMounted(() => { window.addEventListener('keydown', previewKey); window.addEventListener('pointerdown', onAudioGesture); if (token.value) start() })
-onUnmounted(() => { window.removeEventListener('keydown', previewKey); window.removeEventListener('pointerdown', onAudioGesture); if (timer) window.clearInterval(timer); stopSound() })
+onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previewKey); window.removeEventListener('pointerdown', onAudioGesture); if (timer) window.clearInterval(timer); stopSound() })
 </script>
 
 <template>

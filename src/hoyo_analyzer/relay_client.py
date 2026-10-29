@@ -368,6 +368,7 @@ class SlaveRelayClient(QObject):
                 self._log_outbox = [item for item in self._log_outbox
                                     if item["payload"]["event_id"] != log_id]
                 self._save_log_outbox()
+                self.screenshots.retry()
                 self._send_next_log()
         if success:
             if kind in {"heartbeat", "profile", "status"} and data.get("display_name"):

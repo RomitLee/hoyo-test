@@ -17,7 +17,7 @@ from time import monotonic
 from typing import Annotated, Any, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.29.2"
+VERSION = "2.29.3"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -908,6 +908,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                           event_type=event_type, panel_type=panel_type)
         return {"logs": rows[:limit], "has_more": len(rows) > limit,
                 "filters": {"event_type": event_type, "panel_type": panel_type}}
+
+    @app.get("/api/v1/master/monitor-logs/stream")
+    async def stream_monitor_logs(
+        request: Request,
+        event_type: Annotated[str, Query(max_length=64)] = "",
+        panel_type: Annotated[str, Query(max_length=64)] = "",
+        account_id: int = Depends(authenticate_master),
+    ):
+        async def events():
+            previous = ""
+            keepalive_at = monotonic()
+            while not await request.is_disconnected():
+                rows = await asyncio.to_thread(
+                    database.list_monitor_logs, account_id, before_id=0, limit=101,
+                    event_type=event_type, panel_type=panel_type,
+                )
+                payload = json.dumps({"logs": rows[:100], "has_more": len(rows) > 100},
+                                     ensure_ascii=False, separators=(",", ":"))
+                if payload != previous:
+                    previous = payload
+                    keepalive_at = monotonic()
+                    yield f"event: logs\ndata: {payload}\n\n"
+                elif monotonic() - keepalive_at >= 15:
+                    keepalive_at = monotonic()
+                    yield ": keepalive\n\n"
+                await asyncio.sleep(.35)
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no",
+        })
 
     @app.post("/api/v1/slave/events", status_code=status.HTTP_202_ACCEPTED)
     def create_event(

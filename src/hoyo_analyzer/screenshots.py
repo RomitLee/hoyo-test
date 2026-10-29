@@ -100,8 +100,9 @@ class ScreenshotUploader(QObject):
             {"device_id": self.device_id, "event_id": event_id, "file": candidate.name, "created": time()}
         )
         self._save()
-        # Give the corresponding monitor log a chance to arrive first.
-        self.soon.start(2000)
+        # Normal uploads start as soon as the log is acknowledged. This timer
+        # remains as a fallback for restarts and brief network races.
+        self.soon.start(1000)
 
     def retry(self):
         self._save()
