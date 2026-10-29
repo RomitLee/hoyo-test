@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.29.0"
+VERSION = "2.29.1"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -219,7 +219,9 @@ class MonitorLogIn(BaseModel):
     role_name: str | None = Field(default=None, max_length=128)
     character_id: str | None = Field(default=None, max_length=64)
     monitor_session_id: str | None = Field(default=None, min_length=16, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
-    panel_type: Literal["inventory", "give", "trade", "attributes", "stall", "stall_buy", "stall_records"] | None = None
+    panel_type: Literal[
+        "inventory", "give", "trade", "attributes", "stall", "stall_buy", "stall_records", "stall_other_buy"
+    ] | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     message: str | None = Field(default=None, max_length=128)
     target_name: str | None = Field(default=None, min_length=1, max_length=16)
@@ -817,9 +819,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row = database.screenshot_log(identity.account_id, identity.device_id, event_id)
         if not row:
             raise HTTPException(status_code=404, detail="对应监控日志尚未接收")
-        if (row["panel_type"] not in {"give", "trade", "attributes", "stall", "stall_buy"}
+        if (row["panel_type"] not in {"give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy"}
                 or row["event_type"] not in {"panel_opened", "panel_target_changed"}
-                or row["panel_type"] in {"attributes", "stall", "stall_buy"} and row["event_type"] != "panel_opened"):
+                or row["panel_type"] in {"attributes", "stall", "stall_buy", "stall_other_buy"}
+                and row["event_type"] != "panel_opened"):
             raise HTTPException(status_code=422, detail="该面板日志不支持上传截图")
         if not app.state.screenshots.configured:
             raise HTTPException(status_code=503, detail="截图存储暂未配置")

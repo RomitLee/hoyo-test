@@ -20,7 +20,9 @@ MAX_BYTES = 2 * 1024 * 1024
 
 
 def capture_panel_screenshot(event, image) -> str | None:
-    if event.payload.get("panel_type") not in {"give", "trade", "attributes", "stall", "stall_buy"}:
+    if event.payload.get("panel_type") not in {
+        "give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy"
+    }:
         return None
     if event.type != "panel_opened" and not (
         event.type == "panel_target_changed" and event.payload.get("panel_type") in {"give", "trade"}

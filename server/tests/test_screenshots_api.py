@@ -189,6 +189,13 @@ def test_buy_and_sell_stall_screenshots_join_role_history(client):
     assert {item["event_type"] for item in history} == {"panel_opened:stall_buy", "panel_opened:stall"}
 
 
+def test_other_buy_stall_screenshot_joins_role_history(client):
+    report(client, "other-buy-stall", panel_type="stall_other_buy", target_status=None)
+    assert upload(client, "other-buy-stall").status_code == 200
+    history = client.get("/api/v1/master/live-screenshots/history?character_id=123", headers=MASTER).json()["items"]
+    assert history[0]["event_type"] == "panel_opened:stall_other_buy"
+
+
 def test_attributes_screenshot_and_stamina_forecast_share_role_card(client):
     observed = datetime.now(UTC).replace(microsecond=0)
     report(client, "attributes-open", panel_type="attributes", target_status=None,

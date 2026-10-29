@@ -30,7 +30,7 @@ const pages: { key: Page; label: string; hint: string }[] = [
 ]
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
 const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', stall_sold: '商品售出', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
-const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '卖货摊位', stall_buy: '收货摊位', stall_records: '摊位记录面板' }
+const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '卖货摊位', stall_buy: '收货摊位', stall_records: '摊位记录面板', stall_other_buy: '他人收货摊位' }
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
 
 const page = ref<Page>('monitor')
