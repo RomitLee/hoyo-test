@@ -169,7 +169,7 @@ class StallMarketTracker:
 
 
 class StallVisitTracker:
-    """Detect direct merchant switches while the same market panel remains open."""
+    """Detect every close-then-open visit to another merchant's buying stall."""
 
     def __init__(self) -> None:
         self.reset()
@@ -178,6 +178,7 @@ class StallVisitTracker:
         self.pending: bytes | None = None
         self.count = 0
         self.emitted: bytes | None = None
+        self.reopen_pending = False
 
     @staticmethod
     def _same(left: bytes | None, right: bytes | None) -> bool:
@@ -198,21 +199,31 @@ class StallVisitTracker:
 
     def update(self, signature: bytes | None, timestamp_ms: int, frame_index: int = 0) -> list[Event]:
         if signature is None:
-            self.reset()
+            # Closing a stall can be shorter than PanelTracker's generic
+            # default-screen confirmation window.  Preserve the last merchant
+            # across that real absence so reopening another stall cannot be
+            # mistaken for the original continuously open panel.
+            if self.emitted is not None:
+                self.reopen_pending = True
+            self.pending, self.count = None, 0
             return []
         if self._same(signature, self.pending):
             self.count += 1
         else:
             self.pending, self.count = signature, 1
-        if self.count < 2 or self._same(signature, self.emitted):
+        required = 3 if self.reopen_pending else 2
+        if self.count < required:
             return []
         first_visit = self.emitted is None
+        same_merchant = self._same(signature, self.emitted)
         self.emitted = signature
-        if first_visit:
+        was_reopened = self.reopen_pending
+        self.reopen_pending = False
+        if first_visit or (same_merchant and not was_reopened):
             return []
         now = datetime.now(BEIJING_TZ)
         return [Event(uuid4().hex, timestamp_ms, "market_stall_changed", confidence=.9,
-                      payload={"panel_type": "stall_other_buy", "message": "切换浏览其他人摊位",
+                      payload={"panel_type": "stall_other_buy", "message": "打开他人收货摊位",
                                "occurred_at": now.isoformat(timespec="milliseconds")},
                       evidence_frame_index=frame_index,
                       beijing_time=now.strftime("%Y年%m月%d日%H:%M:%S"))]

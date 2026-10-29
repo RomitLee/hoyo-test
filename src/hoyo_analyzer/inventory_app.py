@@ -315,6 +315,16 @@ class InventoryMonitorWorker(QObject):
                     visit_events = stall_visit_tracker.update(
                         stall_visit_tracker.signature(stall_market_detector, packet.image, panel),
                         packet.timestamp_ms, packet.frame_index)
+                    # A fully confirmed default screen makes PanelTracker emit
+                    # panel_opened on the same third frame as the reopen
+                    # tracker.  Keep only the canonical panel event in that
+                    # case; fast close/reopen flows retain visit_events.
+                    if visit_events and any(
+                        event.type == "panel_opened" and
+                        event.payload.get("panel_type") == "stall_other_buy"
+                        for event in panel_events
+                    ):
+                        visit_events = []
                     signal["character_id"] = current_character_id
                     stamina = stamina_detector.analyze(packet.image, panel)
                     signal.update(stamina_tracker.update(stamina, packet.timestamp_ms))

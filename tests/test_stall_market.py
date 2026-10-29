@@ -17,7 +17,7 @@ def test_direct_market_switch_emits_once_but_first_visit_uses_panel_opened():
     assert tracker.update(key(255), 600, 6) == []
 
 
-def test_market_visit_hash_tolerates_small_capture_noise_and_resets_after_close():
+def test_market_visit_hash_tolerates_small_capture_noise_and_detects_reopen():
     tracker = StallVisitTracker()
     baseline = bytes(32)
     noisy = bytes([0b00000001, *([0] * 31)])
@@ -26,3 +26,17 @@ def test_market_visit_hash_tolerates_small_capture_noise_and_resets_after_close(
     assert tracker.update(None, 300) == []
     assert tracker.update(key(255), 400) == []
     assert tracker.update(key(255), 500) == []
+    events = tracker.update(key(255), 600)
+    assert [event.type for event in events] == ["market_stall_changed"]
+    assert events[0].payload["message"] == "打开他人收货摊位"
+
+
+def test_close_then_reopen_same_merchant_is_still_a_new_visit():
+    tracker = StallVisitTracker()
+    tracker.update(key(7), 100)
+    tracker.update(key(7), 200)
+    tracker.update(None, 300)
+    assert tracker.update(key(7), 400) == []
+    assert tracker.update(key(7), 500) == []
+    events = tracker.update(key(7), 600)
+    assert [event.type for event in events] == ["market_stall_changed"]
