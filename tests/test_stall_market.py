@@ -1,3 +1,11 @@
+from threading import Event as ThreadEvent
+from time import monotonic
+
+import numpy as np
+
+from hoyo_analyzer.config import AppConfig
+from hoyo_analyzer.inventory_app import InventoryMonitorWorker
+from hoyo_analyzer.panels import PanelObservation
 from hoyo_analyzer.stall_market import StallVisitTracker
 
 
@@ -40,3 +48,31 @@ def test_close_then_reopen_same_merchant_is_still_a_new_visit():
     assert tracker.update(key(7), 500) == []
     events = tracker.update(key(7), 600)
     assert [event.type for event in events] == ["market_stall_changed"]
+
+
+def test_slow_market_ocr_never_blocks_panel_observation_loop():
+    worker = InventoryMonitorWorker(123, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 角色[123456])")
+    started, release = ThreadEvent(), ThreadEvent()
+
+    class SlowDetector:
+        @staticmethod
+        def analyze(image, panel):
+            started.set()
+            release.wait(2)
+            return None
+
+    worker._market_detector = SlowDetector()
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    panel = PanelObservation("stall_other_buy", 1.0, (19, 81, 148, 104))
+    before = monotonic()
+    worker._observe_market_panel(image, panel, 100, 1)
+    elapsed = monotonic() - before
+    try:
+        assert elapsed < 0.1
+        assert started.wait(1)
+        before = monotonic()
+        worker._observe_market_panel(image, panel, 200, 2)
+        assert monotonic() - before < 0.1
+    finally:
+        release.set()
+        worker.stop()

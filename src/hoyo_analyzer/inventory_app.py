@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,6 +60,12 @@ APP_NAME = "梦幻西游背包监控"
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
 MAX_MONITORED_WINDOWS = 8
+
+# Gem/name/price OCR takes several seconds on real 640x480 captures.  It must
+# never run in the per-window capture loop, otherwise panel-open events wait
+# behind OCR and multiple windows amplify the delay.  A small shared pool keeps
+# the UI/capture threads responsive without letting OCR saturate the machine.
+_MARKET_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hoyo-market-ocr")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +152,13 @@ class InventoryMonitorWorker(QObject):
         self._source: Any | None = None
         self._snapshot_lock = Lock()
         self._snapshot_request: str | None = None
+        self._market_lock = Lock()
+        self._market_detector = StallMarketDetector()
+        self._market_tracker = StallMarketTracker()
+        self._market_future: Future | None = None
+        self._market_pending: tuple[Any, Any, int, int, int] | None = None
+        self._market_epoch = 0
+        self._market_panel_present = False
 
     def request_live_snapshot(self, request_id: str = "") -> None:
         """Request the next genuine game frame from the capture thread."""
@@ -162,8 +176,71 @@ class InventoryMonitorWorker(QObject):
 
     def stop(self) -> None:
         self._stop_requested.set()
+        self._reset_market_analysis()
         if self._source is not None:
             self._source.close()
+
+    def _reset_market_analysis(self) -> None:
+        """Invalidate queued OCR without waiting for an in-flight model call."""
+        with self._market_lock:
+            self._market_epoch += 1
+            self._market_pending = None
+            self._market_panel_present = False
+            self._market_tracker.reset()
+
+    def _observe_market_panel(self, image: Any, panel: Any, timestamp_ms: int, frame_index: int) -> None:
+        """Queue latest stall OCR while keeping panel recognition non-blocking."""
+        if panel.panel_type != "stall_other_buy" or panel.bbox is None:
+            if self._market_panel_present:
+                self._reset_market_analysis()
+            return
+        with self._market_lock:
+            self._market_panel_present = True
+            # Only the newest frame matters while an earlier OCR is running.
+            self._market_pending = (image.copy(), panel, timestamp_ms, frame_index, self._market_epoch)
+            if self._market_future is None:
+                self._submit_market_ocr_locked()
+
+    def _submit_market_ocr_locked(self) -> None:
+        if self._market_pending is None or self._stop_requested.is_set():
+            return
+        task = self._market_pending
+        self._market_pending = None
+        future = _MARKET_OCR_EXECUTOR.submit(self._run_market_ocr, task)
+        self._market_future = future
+        future.add_done_callback(self._market_ocr_finished)
+
+    def _run_market_ocr(self, task: tuple[Any, Any, int, int, int]) -> tuple[Any, int, int, int]:
+        image, panel, timestamp_ms, frame_index, epoch = task
+        return self._market_detector.analyze(image, panel), timestamp_ms, frame_index, epoch
+
+    def _market_ocr_finished(self, future: Future) -> None:
+        events: list[Event] = []
+        try:
+            reading, timestamp_ms, frame_index, epoch = future.result()
+        except Exception:  # noqa: BLE001 - optional OCR must not interrupt monitoring
+            reading = None
+            timestamp_ms = frame_index = epoch = -1
+        with self._market_lock:
+            if epoch == self._market_epoch and not self._stop_requested.is_set():
+                events = self._market_tracker.update(reading, timestamp_ms, frame_index)
+            self._market_future = None
+        # Submit outside the completion lock.  Cached OCR can finish very
+        # quickly and concurrent.futures may invoke its callback immediately.
+        with self._market_lock:
+            if self._market_future is None:
+                self._submit_market_ocr_locked()
+        if not events:
+            return
+        account = parse_account_info(self.window_title)
+        for event in events:
+            event.payload.setdefault("window_hwnd", self.hwnd)
+            event.payload.setdefault("window_title", self.window_title)
+            event.payload.setdefault("secondary_region", account.secondary_region)
+            event.payload.setdefault("role_name", account.role_name)
+            event.payload.setdefault("role_id", account.role_id)
+            self.event_ready.emit(event)
+            self.event_for_window.emit(self.hwnd, event)
 
     @staticmethod
     def _preview(image: Any) -> Any:
@@ -197,8 +274,6 @@ class InventoryMonitorWorker(QObject):
             stamina_tracker = StaminaTracker()
             stall_stock_detector = StallStockDetector()
             stall_stock_tracker = StallStockTracker()
-            stall_market_detector = StallMarketDetector()
-            stall_market_tracker = StallMarketTracker()
             stall_visit_tracker = StallVisitTracker()
             money_character_id = parse_account_info(self.window_title).role_id
             last_panel_frame_ms: int | None = None
@@ -245,7 +320,7 @@ class InventoryMonitorWorker(QObject):
                     money_tracker.reset_pending()
                     target_tracker.reset()
                     stall_stock_tracker.reset()
-                    stall_market_tracker.reset()
+                    self._reset_market_analysis()
                     stall_visit_tracker.reset()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
@@ -268,7 +343,7 @@ class InventoryMonitorWorker(QObject):
                     money_tracker.reset_pending()
                     target_tracker.reset()
                     stall_stock_tracker.reset()
-                    stall_market_tracker.reset()
+                    self._reset_market_analysis()
                     stall_visit_tracker.reset()
                     continue
                 now = monotonic()
@@ -284,7 +359,7 @@ class InventoryMonitorWorker(QObject):
                         panel_tracker.reset_pending()
                         target_tracker.reset()
                         stall_stock_tracker.reset()
-                        stall_market_tracker.reset()
+                        self._reset_market_analysis()
                         stall_visit_tracker.reset()
                     last_panel_frame_ms = packet.timestamp_ms
                     panel_events = panel_tracker.update(panel, packet.timestamp_ms, packet.frame_index)
@@ -300,7 +375,7 @@ class InventoryMonitorWorker(QObject):
                         stamina_tracker = StaminaTracker()
                         target_tracker.reset()
                         stall_stock_tracker.reset()
-                        stall_market_tracker.reset()
+                        self._reset_market_analysis()
                         stall_visit_tracker.reset()
                         money_character_id = current_character_id
                     signal = _analysis_signal(analysis)
@@ -310,10 +385,13 @@ class InventoryMonitorWorker(QObject):
                         stall_stock_detector.count(packet.image, panel) if stall_panel == "stall" else None,
                         packet.timestamp_ms,
                     )
-                    market_events = stall_market_tracker.update(
-                        stall_market_detector.analyze(packet.image, panel), packet.timestamp_ms, packet.frame_index)
+                    # Product OCR is intentionally asynchronous.  Panel events
+                    # below now leave this loop in well under one second even
+                    # when the stall contains no supported gems.
+                    self._observe_market_panel(packet.image, panel, packet.timestamp_ms, packet.frame_index)
+                    market_events: list[Event] = []
                     visit_events = stall_visit_tracker.update(
-                        stall_visit_tracker.signature(stall_market_detector, packet.image, panel),
+                        stall_visit_tracker.signature(self._market_detector, packet.image, panel),
                         packet.timestamp_ms, packet.frame_index)
                     # A fully confirmed default screen makes PanelTracker emit
                     # panel_opened on the same third frame as the reopen
