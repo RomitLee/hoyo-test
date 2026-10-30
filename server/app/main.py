@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.30.2"
+VERSION = "2.30.3"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -902,6 +902,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def own_stalls(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
         return {"stalls": database.own_stall_gem_quotes(account_id),
                 "merchants": database.market_gem_merchants(account_id)}
+
+    @app.delete("/api/v1/master/own-stalls/{character_id}")
+    def remove_own_stall(character_id: str, account_id: int = Depends(authenticate_master)) -> dict[str, bool]:
+        return {"removed": database.remove_own_stall(account_id, character_id)}
 
     @app.put("/api/v1/master/gem-settings")
     def put_gem_settings(payload: GemSettings, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:

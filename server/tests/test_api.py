@@ -75,6 +75,13 @@ def test_own_stalls_keep_role_prices_separate_from_competitor_statistics(tmp_pat
         summary = client.get("/api/v1/master/market-gem-statistics", headers=master_headers()).json()["items"]
         assert summary[0]["merchant_count"] == 1 and summary[0]["average_price"] == 20000
 
+        removed = client.delete("/api/v1/master/own-stalls/123456", headers=master_headers())
+        assert removed.status_code == 200 and removed.json() == {"removed": True}
+        assert client.get("/api/v1/master/own-stalls", headers=master_headers()).json()["stalls"] == []
+        assert client.delete("/api/v1/master/own-stalls/123456").status_code == 401
+        assert client.post("/api/v1/slave/own-stall-gem-quotes", headers=device_headers(), json=own).status_code == 202
+        assert len(client.get("/api/v1/master/own-stalls", headers=master_headers()).json()["stalls"]) == 1
+
 
 def test_legacy_cash_observations_are_acknowledged_without_statistics(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:

@@ -1104,6 +1104,14 @@ class RelayDatabase:
         return sorted(stalls.values(), key=lambda item: (
             -counts[item["server_name"]], item["server_name"], item["role_name"] or "", item["character_id"]))
 
+    def remove_own_stall(self, account_id: int, character_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM own_stall_gem_quotes WHERE account_id=? AND character_id=?",
+                (account_id, character_id),
+            )
+            return cursor.rowcount > 0
+
     def get_gem_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(

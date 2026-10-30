@@ -91,10 +91,8 @@ const windows = computed<RoleCard[]>(() => roles.value.map(role => ({ ...role,
   device: devices.value.find(device => device.device_id === role.device_id) || { device_id: role.device_id || '' },
   stamina_estimate: estimateStamina(role, nowMs.value),
 })))
-const stallGroups = computed(() => [
-  { key: 'buy', title: '收货', items: sortRolesByServer(windows.value.filter(item => item.stall_mode === 'buy')) },
-  { key: 'sell', title: '出货', items: sortRolesByServer(windows.value.filter(item => item.stall_mode === 'sell')) },
-  { key: 'unknown', title: '未知状态', items: sortRolesByServer(windows.value.filter(item => !item.stall_mode || item.stall_mode === 'unknown')) },
+const monitorGroups = computed(() => [
+  { key: 'all', title: '全部角色', items: sortRolesByServer(windows.value) },
 ])
 const snapshotKey = (item: RoleStatus) => item.character_id || `${item.device_id}:${item.window_id}`
 
@@ -596,17 +594,16 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
           <div class="stats"><div class="stat m-surface"><small>在线从机</small><strong>{{ activeDevices }} <span>/ {{ devices.length }}</span></strong></div><div class="stat m-surface"><small>监控窗口</small><strong>{{ windows.length }}</strong></div><div class="stat m-surface"><small>待处理告警</small><strong>{{ pending }}</strong></div><div class="stat m-surface"><small>统一更新时间</small><strong class="time-value">{{ updatedAt || '—' }}</strong></div></div>
           <div class="monitor-view-bar"><div class="monitor-view-switch" role="group" aria-label="监控展示方式"><button type="button" :class="{ active: monitorView === 'card' }" :aria-pressed="monitorView === 'card'" @click="setMonitorView('card')">卡片</button><button type="button" :class="{ active: monitorView === 'list' }" :aria-pressed="monitorView === 'list'" @click="setMonitorView('list')">列表</button></div></div>
           <div v-if="!windows.length" class="empty">暂无监控窗口，请在从机程序中添加游戏窗口。</div>
-          <Panel v-for="group in stallGroups" :key="group.key" :title="group.title" :meta="monitorView === 'card' ? `${group.items.length} 个角色 · 截图每 ${snapshotInterval} 分钟` : `${group.items.length} 个角色`">
-            <div v-if="!group.items.length" class="empty">暂无{{ group.title }}角色</div>
+          <Panel v-for="group in monitorGroups" :key="group.key" :title="group.title" :meta="monitorView === 'card' ? `${group.items.length} 个角色 · 截图每 ${snapshotInterval} 分钟` : `${group.items.length} 个角色`">
+            <div v-if="!group.items.length" class="empty">暂无监控角色</div>
             <div v-else-if="monitorView === 'list'" class="table-wrap monitor-list-wrap">
-              <table class="monitor-list"><thead><tr><th>区服 / 游戏昵称</th><th>监控状态</th><th>背包空格</th><th>体力</th><th>游戏币</th><th v-if="group.key === 'sell'">在售商品</th></tr></thead><tbody>
+              <table class="monitor-list"><thead><tr><th>区服 / 游戏昵称</th><th>监控状态</th><th>背包空格</th><th>体力</th><th>游戏币</th></tr></thead><tbody>
                 <tr v-for="item in group.items" :key="snapshotKey(item)" :class="{ 'monitor-row-offline': !item.role_online }">
                   <td><strong>{{ item.server_name || '未知区服' }} / {{ item.role_name || '未知角色' }}</strong><small v-if="item.character_id">账号 ID：{{ item.character_id }}</small></td>
                   <td><span :class="['badge', !item.role_online || item.minimized ? 'danger' : item.monitoring ? 'good' : '']">{{ !item.role_online ? '已掉线' : item.minimized ? '已最小化' : item.monitoring ? '监控中' : '已暂停' }}</span></td>
                   <td>{{ item.empty_slots == null ? '—' : `${item.empty_slots} 格` }}<small>{{ statusLabels[item.status || 'unknown'] || item.status }}</small></td>
                   <td v-if="item.stamina_estimate != null && item.stamina_max != null">{{ item.stamina_estimate }}/{{ item.stamina_max }}<small :class="{ 'monitor-full': item.stamina_estimate >= item.stamina_max }">{{ item.stamina_estimate >= item.stamina_max ? '体力已满（预测）' : `预计满体力 ${time(item.stamina_full_at)}` }}</small></td><td v-else>未识别</td>
                   <td>{{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small v-if="item.money_confirmed_at">确认于 {{ time(item.money_confirmed_at) }}</small></td>
-                  <td v-if="group.key === 'sell'">{{ item.sell_stock_count == null ? '待识别' : `${item.sell_stock_count} 件` }}</td>
                 </tr>
               </tbody></table>
             </div>
@@ -624,7 +621,6 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
                 <button :class="['snapshot-image', { 'offline-shot': !item.role_online }]" :disabled="!item.screenshot_at" @click="openHistory(item).catch(fail)"><img v-if="thumbnails[snapshotKey(item)]" :src="thumbnails[snapshotKey(item)]" alt="游戏窗口最近截图，点击浏览该账号历史画面" referrerpolicy="no-referrer" @error="thumbnailError(item)"><span v-else>截图加载中…</span></button>
                 <div class="snapshot-meta"><span>截图于 {{ time(item.screenshot_at) }}</span><button class="snapshot-count" :disabled="!item.screenshot_count" :aria-label="`查看${item.role_name || '角色'}的 ${item.screenshot_count || 0} 张历史截图`" @click="openHistory(item).catch(fail)">共 {{ item.screenshot_count || 0 }} 张</button><span v-if="item.screenshot_at && Date.now() - Date.parse(item.screenshot_at) > snapshotInterval * 120000" class="stale">画面可能已过时</span></div>
                 <div class="snapshot-details"><span>{{ statusLabels[item.status || 'unknown'] || item.status }} · 空格 {{ item.empty_slots ?? '—' }}</span><span>现金 {{ item.cash == null ? '未识别' : Number(item.cash).toLocaleString('zh-CN') }}<small>{{ time(item.money_confirmed_at) }}</small></span></div>
-                <div v-if="item.stall_mode === 'sell'" class="snapshot-details"><span>在售商品 {{ item.sell_stock_count == null ? '待识别' : `${item.sell_stock_count} 件` }}</span><small>卖货摊位第一页</small></div>
                 <div v-if="item.stamina_estimate != null && item.stamina_max != null && item.stamina_full_at" class="stamina-summary">
                   <span>预计体力 {{ item.stamina_estimate }}/{{ item.stamina_max }} <small>上次实测 {{ item.stamina_current }}/{{ item.stamina_max }} · 观测于 {{ time(item.stamina_observed_at) }}<template v-if="!item.role_online"> · 离线后暂停估算，需复核</template></small></span>
                   <strong :class="{ full: item.stamina_estimate >= item.stamina_max }">{{ item.stamina_estimate >= item.stamina_max ? '体力已满（预测）' : `预计满体力：${time(item.stamina_full_at)}` }}</strong>
