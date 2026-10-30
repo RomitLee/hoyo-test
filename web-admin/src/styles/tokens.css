@@ -10,16 +10,16 @@
   color-scheme: light;
 
   /* ── 字色：五档 ─────────────────────────────────────────────── */
-  --ink: #101418;          /* 正文 / 标题 */
-  --ink-muted: #596368;    /* 次级正文 */
-  --ink-soft: #7e888c;     /* 次级标签 */
+  --ink: #172033;          /* 正文 / 标题 */
+  --ink-muted: #5f6b82;    /* 次级正文 */
+  --ink-soft: #8a95aa;     /* 次级标签 */
   --ink-faint: #99a2a5;    /* 元信息 */
   --leaf-text: #58a021;    /* 承载文字的青柠 */
 
   /* ── 语义色：蓝 = 选择 / 主操作，青柠 = 能力与状态，红 = 警示 ── */
-  --blue: #236de9;
-  --blue-hover: #1d61d5;
-  --blue-soft: rgba(35, 109, 233, .1);
+  --blue: #5b5cf0;
+  --blue-hover: #4b4cd8;
+  --blue-soft: rgba(91, 92, 240, .1);
   --lime: #82dd2d;
   --lime-soft: rgba(130, 221, 45, .14);
   --red: #ff5a50;
@@ -52,15 +52,15 @@
   --edge-strong: inset 0 1px 0 rgba(255, 255, 255, .98);
 
   /* ── 场景面：舞台、外框、画布与四种玻璃配方的底色 ─────────── */
-  --stage: #dfe3e2;
+  --stage: #eef1f8;
   --frame: #17191d;
-  --canvas: #f6f8f7;
-  --rail-bg: rgba(250, 251, 250, .92);
+  --canvas: #f4f6fb;
+  --rail-bg: rgba(255, 255, 255, .94);
   --pill-bg: linear-gradient(145deg, rgba(255, 255, 255, .93), rgba(246, 251, 249, .62));
   --pill-inset: inset 0 -1px 0 rgba(105, 122, 128, .08);
   --float-bg: rgba(246, 248, 247, .86);
   --float-inset: inset 0 0 0 1px rgba(120, 132, 135, .13), inset 0 1px 0 rgba(255, 255, 255, .72);
-  --surface: linear-gradient(145deg, rgba(255, 255, 255, .97), rgba(249, 252, 251, .93));
+  --surface: linear-gradient(145deg, rgba(255, 255, 255, .99), rgba(252, 253, 255, .96));
   --surface-solid: #fbfcfc;
   --groove-bg: rgba(225, 231, 229, .5);
   --groove-inset: inset 0 1px 0 rgba(255, 255, 255, .46);

@@ -19,15 +19,15 @@ type Log = { id: number; event_type: string; panel_type?: string; message?: stri
 type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; capacity_enabled: boolean; cash_low_enabled: boolean; stamina_full_enabled: boolean; stall_sold_enabled: boolean; configured?: boolean; masked_key?: string }
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
 
-const pages: { key: Page; label: string; hint: string }[] = [
-  { key: 'monitor', label: '监控', hint: '角色状态与现金' },
-  { key: 'alerts', label: '告警', hint: '待处理事件' },
-  { key: 'devices', label: '从机管理', hint: '登录与设备' },
-  { key: 'logs', label: '监控日志', hint: '操作与截图' },
-  { key: 'my-stalls', label: '我的摊位', hint: '我的价格与同行对比' },
-  { key: 'products', label: '商品统计', hint: '宝石与市场价格' },
-  { key: 'merchant', label: '宝石商人', hint: '合成与利润测算' },
-  { key: 'settings', label: '设置', hint: '上报与通知' },
+const pages: { key: Page; label: string; hint: string; icon: string }[] = [
+  { key: 'monitor', label: '实时监控', hint: '角色状态与现金', icon: '⌁' },
+  { key: 'alerts', label: '告警中心', hint: '待处理事件', icon: '!' },
+  { key: 'devices', label: '设备', hint: '客户端与连接', icon: '▣' },
+  { key: 'logs', label: '监控日志', hint: '操作与截图', icon: '≡' },
+  { key: 'my-stalls', label: '我的摊位', hint: '价格与同行对比', icon: '◇' },
+  { key: 'products', label: '商品行情', hint: '宝石市场价格', icon: '◫' },
+  { key: 'merchant', label: '经营工具', hint: '合成与利润测算', icon: '↗' },
+  { key: 'settings', label: '偏好设置', hint: '上报与通知', icon: '⚙' },
 ]
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
 const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', stall_sold: '商品售出', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
@@ -559,9 +559,9 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
 <template>
   <div v-if="!token" class="login-stage">
     <section class="login-card m-surface">
-      <span class="eyebrow">HOYO MONITOR · WEB</span>
-      <h1>梦幻西游监控后台</h1>
-      <p>登录账号，查看已登录从机的监控状态。</p>
+      <span class="eyebrow">MAIPI PLAYER CLOUD</span>
+      <h1>欢迎使用麦皮云助手</h1>
+      <p>一个账号，随时掌握角色状态、摊位行情与经营数据。</p>
       <form @submit.prevent="login">
         <label>账号<input v-model="username" autocomplete="username" required minlength="3" maxlength="32"></label>
         <label>密码<input v-model="password" type="password" autocomplete="current-password" required minlength="8"></label>
@@ -572,16 +572,16 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
   </div>
   <div v-else class="app-shell">
     <aside class="sidebar m-rail">
-      <div class="brand"><span class="brand-mark">M</span><div><strong>梦幻西游监控</strong><small>MONITOR CONSOLE</small></div></div>
+      <div class="brand"><span class="brand-mark">M</span><div><strong>麦皮云助手</strong><small>MAIPI PLAYER CLOUD</small></div></div>
       <nav aria-label="管理板块">
         <button v-for="item in pages" :key="item.key" :class="['nav-item', { active: page === item.key }]" @click="choose(item.key)">
-          <strong>{{ item.label }}</strong><small>{{ item.hint }}</small><em v-if="item.key === 'alerts' && pending">{{ pending }}</em>
+          <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span><span class="nav-copy"><strong>{{ item.label }}</strong><small>{{ item.hint }}</small></span><em v-if="item.key === 'alerts' && pending">{{ pending }}</em>
         </button>
       </nav>
       <div class="sidebar-foot"><span>{{ accountName || username }}</span><button @click="logout()">退出登录</button></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div><span class="eyebrow">HOYO MONITOR / {{ pages.find(item => item.key === page)?.label }}</span><h1>{{ pages.find(item => item.key === page)?.label }}</h1></div><div class="top-actions"><button v-if="ringing" class="primary" @click="stopSound">停止提示音</button><span :class="['connection', { offline: !connected }]">{{ connected ? '云端已连接' : '连接中断' }}</span><button class="secondary" :disabled="loading" @click="refresh">刷新</button></div></header>
+      <header class="topbar"><div><span class="eyebrow">MAIPI CLOUD · {{ pages.find(item => item.key === page)?.label }}</span><h1>{{ pages.find(item => item.key === page)?.label }}</h1><p>{{ pages.find(item => item.key === page)?.hint }}</p></div><div class="top-actions"><button v-if="ringing" class="primary" @click="stopSound">停止提示音</button><span :class="['connection', { offline: !connected }]">{{ connected ? '实时连接' : '连接中断' }}</span><button class="secondary refresh-button" :disabled="loading" @click="refresh">{{ loading ? '同步中…' : '同步数据' }}</button><span class="account-chip"><b>{{ (accountName || username).slice(0, 1).toUpperCase() }}</b><span>{{ accountName || username }}</span></span></div></header>
       <main>
         <p v-if="error" class="message error" role="alert">{{ error }}</p>
         <p v-if="notice" class="message success" role="status">{{ notice }}</p>
@@ -651,7 +651,7 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
             <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存告警设置</button><button class="secondary" type="button" @click="testBark">测试手机推送</button><button v-if="bark.web_sound_enabled && !soundReady" class="secondary" type="button" @click="unlockWebSound()">允许当前浏览器播放</button></div>
           </form></Panel></div></template>
       </main>
-      <footer>数据每 5 秒刷新 · 手机告警由服务端 Bark 推送</footer>
+      <footer>麦皮云助手 Web · 数据每 5 秒安全同步</footer>
     </div>
   </div>
   <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><div class="preview-bar"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><span v-if="historyCharacter" class="preview-time">账号 ID：{{ historyCharacter }}</span></div><div class="preview-image-row"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || historyIndex === 0" aria-label="更新一张历史截图" @click="navigateHistory(-1).catch(fail)">‹</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || (!historyHasMore && historyIndex >= history.length - 1)" aria-label="更早一张历史截图" @click="navigateHistory(1).catch(fail)">›</button></div><p v-if="historyCharacter" class="preview-counter">第 {{ historyIndex + 1 }} / {{ historyTotal }} 张 · 从新到旧 · 左右方向键可翻看 · 保留最近 30 天</p><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
