@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.30.1"
+VERSION = "2.30.2"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
