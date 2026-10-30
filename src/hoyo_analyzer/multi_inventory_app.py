@@ -1226,6 +1226,7 @@ class InventoryMonitorWindow(QMainWindow):
         session = self.sessions.get(hwnd)
         if session is None or self.monitoring_paused:
             return
+        supplemental = getattr(event, "payload", {}).get("supplemental") is True
         if (event.type == "panel_opened" and event.payload.get("panel_type") == "stall_other_buy"
                 or event.type == "market_stall_changed"):
             self._show_market_toast(session.account.secondary_region, event)
@@ -1237,11 +1238,12 @@ class InventoryMonitorWindow(QMainWindow):
                 "stall_owner_id": event.payload["stall_owner_id"], "quotes": event.payload["quotes"],
             })
             return
-        if session.minimized and (event.type not in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}
+        if session.minimized and not supplemental and (event.type not in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}
                                   or is_window_minimized(hwnd)):
             return
         account_label = f"{session.account.secondary_region} / {session.account.role_name}"
-        self.log.appendPlainText(f"{event.display_time}  {account_label}  {event.display_name}")
+        if not supplemental:
+            self.log.appendPlainText(f"{event.display_time}  {account_label}  {event.display_name}")
         if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed", "market_stall_changed"}:
             payload = {
                 "event_id": event.event_id, "event_type": event.type, "reason": "recognition",

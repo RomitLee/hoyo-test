@@ -27,12 +27,12 @@ from .event_machine import EventMachine
 from .inventory_fullness import InventoryAnalysis, InventoryFullnessDetector, InventoryStatus
 from .models import Event, Observation
 from .money import MoneyDetector, MoneyTracker
-from .panel_targets import PanelTargetDetector, PanelTargetTracker, attach_target, target_payload
+from .panel_targets import PanelTargetDetector, attach_target, target_payload
 from .panels import PanelDetector, PanelObservation, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
 from .screenshots import capture_panel_screenshot
-from .stamina import StaminaDetector, StaminaTracker
+from .stamina import StaminaDetector
 from .stall_stock import StallStockDetector, StallStockTracker
 from .stall_market import StallMarketDetector, StallVisitTracker
 from .storage import JsonlEventSink
@@ -69,6 +69,7 @@ MAX_MONITORED_WINDOWS = 8
 # behind OCR and multiple windows amplify the delay.  A small shared pool keeps
 # the UI/capture threads responsive without letting OCR saturate the machine.
 _MARKET_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hoyo-market-ocr")
+_PANEL_DETAIL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hoyo-panel-detail")
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +163,7 @@ class InventoryMonitorWorker(QObject):
         self._market_directory = application_root() / "runtime" / "market-ocr-queue" / identity
         self._market_manifest = self._market_directory / "queue.json"
         self._market_queue = self._load_market_queue()
+        self._detail_futures: set[Future] = set()
 
     def request_live_snapshot(self, request_id: str = "") -> None:
         """Request the next genuine game frame from the capture thread."""
@@ -303,6 +305,63 @@ class InventoryMonitorWorker(QObject):
             self.event_ready.emit(event)
             self.event_for_window.emit(self.hwnd, event)
 
+    def _schedule_panel_detail(self, event: Event, image: Any, panel: PanelObservation) -> None:
+        """Run attributes/recipient OCR after the fast panel event has been confirmed."""
+        panel_type = event.payload.get("panel_type")
+        if panel_type not in {"attributes", "give", "trade"}:
+            return
+        task = (event.event_id, panel_type, event.payload.get("occurred_at"),
+                event.timestamp_ms, event.evidence_frame_index or 0, image.copy(), panel)
+        future = _PANEL_DETAIL_EXECUTOR.submit(self._run_panel_detail, task)
+        self._detail_futures.add(future)
+        future.add_done_callback(self._panel_detail_finished)
+
+    def _run_panel_detail(self, task: tuple[Any, ...]) -> tuple[tuple[Any, ...], Any]:
+        event_id, panel_type, occurred_at, timestamp_ms, frame_index, image, panel = task
+        detector = StaminaDetector() if panel_type == "attributes" else PanelTargetDetector()
+        return task, detector.analyze(image, panel)
+
+    def _panel_detail_finished(self, future: Future) -> None:
+        self._detail_futures.discard(future)
+        try:
+            task, reading = future.result()
+        except Exception:  # noqa: BLE001 - optional details never block panel monitoring
+            return
+        if reading is None or self._stop_requested.is_set():
+            return
+        parent_id, panel_type, occurred_at, timestamp_ms, frame_index, _image, _panel = task
+        if panel_type == "attributes":
+            event = Event(
+                parent_id, timestamp_ms, "panel_opened", confidence=reading.confidence,
+                payload={
+                    "panel_type": "attributes", "message": "打开属性面板",
+                    "occurred_at": occurred_at, "supplemental": True,
+                    "stamina_current": reading.current, "stamina_max": reading.maximum,
+                    "character_level": reading.level,
+                    "stamina_observed_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+                }, evidence_frame_index=frame_index,
+            )
+        elif reading.identity is not None:
+            name = "给予" if panel_type == "give" else "交易"
+            event = Event(
+                uuid4().hex, timestamp_ms, "panel_target_changed", confidence=reading.confidence,
+                payload={
+                    "panel_type": panel_type, "message": f"{name}对象：{reading.name}，{reading.level}级",
+                    "occurred_at": occurred_at, "supplemental": True,
+                    **target_payload(reading),
+                }, evidence_frame_index=frame_index,
+            )
+        else:
+            return
+        account = parse_account_info(self.window_title)
+        event.payload.update({
+            "window_hwnd": self.hwnd, "window_title": self.window_title,
+            "secondary_region": account.secondary_region, "role_name": account.role_name,
+            "role_id": account.role_id,
+        })
+        self.event_ready.emit(event)
+        self.event_for_window.emit(self.hwnd, event)
+
     @staticmethod
     def _preview(image: Any) -> Any:
         height, width = image.shape[:2]
@@ -328,12 +387,8 @@ class InventoryMonitorWorker(QObject):
             panel_detector = PanelDetector()
             panel_tracker = PanelTracker()
             self._start_market_ocr_queue()
-            target_detector = PanelTargetDetector()
-            target_tracker = PanelTargetTracker()
             money_detector = MoneyDetector()
             money_tracker = MoneyTracker()
-            stamina_detector = StaminaDetector()
-            stamina_tracker = StaminaTracker()
             stall_stock_detector = StallStockDetector()
             stall_stock_tracker = StallStockTracker()
             stall_visit_tracker = StallVisitTracker()
@@ -380,7 +435,6 @@ class InventoryMonitorWorker(QObject):
                 if was_paused:
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
-                    target_tracker.reset()
                     stall_stock_tracker.reset()
                     self._reset_market_analysis()
                     stall_visit_tracker.reset()
@@ -403,7 +457,6 @@ class InventoryMonitorWorker(QObject):
                 if is_window_minimized(self.hwnd):
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
-                    target_tracker.reset()
                     stall_stock_tracker.reset()
                     self._reset_market_analysis()
                     stall_visit_tracker.reset()
@@ -419,7 +472,6 @@ class InventoryMonitorWorker(QObject):
                     panel = panel_detector.analyze(packet.image)
                     if last_panel_frame_ms is not None and packet.timestamp_ms - last_panel_frame_ms > 1500:
                         panel_tracker.reset_pending()
-                        target_tracker.reset()
                         stall_stock_tracker.reset()
                         self._reset_market_analysis()
                         stall_visit_tracker.reset()
@@ -434,8 +486,6 @@ class InventoryMonitorWorker(QObject):
                     current_character_id = parse_account_info(self.window_title).role_id
                     if money_character_id != current_character_id:
                         money_tracker = MoneyTracker()
-                        stamina_tracker = StaminaTracker()
-                        target_tracker.reset()
                         stall_stock_tracker.reset()
                         self._reset_market_analysis()
                         stall_visit_tracker.reset()
@@ -472,16 +522,17 @@ class InventoryMonitorWorker(QObject):
                             packet.image, panel, packet.timestamp_ms, packet.frame_index
                         )
                     signal["character_id"] = current_character_id
-                    stamina = stamina_detector.analyze(packet.image, panel)
-                    signal.update(stamina_tracker.update(stamina, packet.timestamp_ms))
-                    reading = target_detector.analyze(packet.image, panel)
-                    target_events = target_tracker.update(panel.panel_type, reading, packet.timestamp_ms, packet.frame_index)
-                    signal.update(target_payload(target_tracker.current))
-                    signal["target_reason"] = reading.reason
+                    # Expensive OCR runs only after the base panel event is
+                    # emitted.  Existing confirmed stamina may remain visible
+                    # while a fresh attributes reading is pending.
+                    target_events: list[Event] = []
+                    signal.update(target_payload(None))
+                    signal["target_reason"] = (
+                        "后台识别中" if panel.panel_type in {"give", "trade"} else "未定位给予或交易面板"
+                    )
                     for action in panel_events:
                         if action.type == "panel_opened" and panel.panel_type in {"give", "trade"}:
-                            attach_target(action, target_tracker.current)
-                            target_events = []
+                            attach_target(action, None)
 
                     money = money_detector.read_fields(
                         packet.image, panel.bbox if panel.panel_type == "inventory" else None,
@@ -506,8 +557,6 @@ class InventoryMonitorWorker(QObject):
                         event.payload.setdefault("secondary_region", account.secondary_region)
                         event.payload.setdefault("role_name", account.role_name)
                         event.payload.setdefault("role_id", account.role_id)
-                        if event.type == "panel_opened" and event.payload.get("panel_type") == "attributes":
-                            event.payload.update(stamina_tracker.confirmed)
                         capture_panel_screenshot(event, packet.image)
                         sink.write(event)
                         if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:
@@ -517,6 +566,8 @@ class InventoryMonitorWorker(QObject):
                                              f"[{account.secondary_region}/{account.role_name}]\n")
                         self.event_ready.emit(event)
                         self.event_for_window.emit(self.hwnd, event)
+                        if event.type == "panel_opened":
+                            self._schedule_panel_detail(event, packet.image, panel)
                 if now - last_stats >= 1.0:
                     last_stats = now
                     elapsed = max(0.001, now - started)

@@ -107,7 +107,7 @@ def test_live_worker_writes_confirmed_panel_actions_with_character_identity(monk
     assert "打开背包" in lines[0] and "秦淮风光/清风知夏" in lines[0]
 
 
-def test_worker_enriches_open_log_then_records_same_dialog_target_switch(monkeypatch, tmp_path):
+def test_worker_emits_open_log_before_background_target_result(monkeypatch, tmp_path):
     from hoyo_analyzer.config import AppConfig
     from hoyo_analyzer.inventory_app import InventoryMonitorWorker
     from hoyo_analyzer.models import FramePacket
@@ -137,7 +137,8 @@ def test_worker_enriches_open_log_then_records_same_dialog_target_switch(monkeyp
     worker.run()
     assert errors == []
     assert [event.type for event in events] == ["panel_opened", "panel_target_changed"]
-    assert [event.payload["target_name"] for event in events] == ["甲", "乙"]
-    assert events[0].display_name == "打开给予面板，对象：甲，109级"
+    assert [event.payload["target_name"] for event in events] == [None, "甲"]
+    assert events[1].payload["supplemental"] is True
+    assert events[0].display_name == "打开给予面板，对象：对象未识别"
     assert all(event.payload["role_id"] == "54588235" for event in events)
-    assert "乙，144级" in (tmp_path / "panel_events.log").read_text(encoding="utf-8")
+    assert "打开给予面板" in (tmp_path / "panel_events.log").read_text(encoding="utf-8")

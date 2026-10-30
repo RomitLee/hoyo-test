@@ -1147,6 +1147,12 @@ class RelayDatabase:
 
         if cursor.rowcount and payload.get("character_id"):
             RelayDatabase._remember_game_role(connection, account_id, device_id, payload, received_at)
+
+        # Attribute OCR is deliberately completed after the fast panel event.
+        # The supplement reuses the opening event id so retries remain idempotent;
+        # therefore role vitals must also be accepted when the log row already
+        # exists instead of being tied to INSERT OR IGNORE's rowcount.
+        if payload.get("character_id"):
             RelayDatabase._upsert_role_vitals(connection, account_id, device_id, payload)
 
         if payload["event_type"] == "panel_target_changed" and cursor.rowcount:

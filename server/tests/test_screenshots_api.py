@@ -239,6 +239,20 @@ def test_attributes_screenshot_and_stamina_forecast_share_role_card(client):
     assert bad.status_code == 422
 
 
+def test_attribute_ocr_supplement_updates_vitals_without_duplicate_log(client):
+    observed = datetime.now(UTC).replace(microsecond=0)
+    report(client, "async-attributes", panel_type="attributes", target_status=None,
+           occurred_at=observed.isoformat())
+    report(client, "async-attributes", panel_type="attributes", target_status=None,
+           occurred_at=observed.isoformat(), character_level=141,
+           stamina_current=314, stamina_max=863, stamina_observed_at=observed.isoformat())
+
+    matching = [row for row in logs(client) if row["client_event_id"] == "async-attributes"]
+    assert len(matching) == 1
+    role = client.get("/api/v1/master/status", headers=MASTER).json()["roles"][0]
+    assert (role["character_level"], role["stamina_current"], role["stamina_max"]) == (141, 314, 863)
+
+
 def test_authentication_account_and_device_isolation(client):
     client.post("/api/v1/auth/register", json={"username": "first_owner", "password": "password123"})
     report(client)
