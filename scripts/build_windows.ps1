@@ -78,7 +78,7 @@ try {
     if ($UpdaterFiles.Count -ne 1) { throw "Expected exactly one packaged updater executable." }
     $UpdaterExe = $UpdaterFiles[0]
     $UpdaterSelfTest = Start-Process -FilePath $UpdaterExe.FullName -ArgumentList "--self-test" `
-        -WindowStyle Hidden -Wait -PassThru
+        -NoNewWindow -Wait -PassThru
     if ($UpdaterSelfTest.ExitCode -ne 0) { throw "Packaged updater self-test failed." }
 
     $ReuseRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot $ReuseDirectory))
@@ -163,7 +163,7 @@ try {
     if (-not $OutputExe -or ($MasterOutputRoot -and -not $MasterExe)) { throw "Packaged executable was not found." }
 
     $SelfTest = Start-Process -FilePath $OutputExe.FullName -ArgumentList "--package-self-test" `
-        -WindowStyle Hidden -Wait -PassThru
+        -NoNewWindow -Wait -PassThru
     if ($SelfTest.ExitCode -ne 0) { throw "Packaged executable self-test failed." }
     $SelfTestReport = Join-Path $SlaveOutputRoot "runtime\package-self-test.json"
     if (-not (Test-Path -LiteralPath $SelfTestReport)) { throw "Package self-test report was not created." }
@@ -175,7 +175,7 @@ try {
     try {
         $env:QT_QPA_PLATFORM = "offscreen"
         $UiSelfTest = Start-Process -FilePath $OutputExe.FullName -ArgumentList "--package-ui-self-test" `
-            -WindowStyle Hidden -Wait -PassThru
+            -NoNewWindow -Wait -PassThru
     } finally {
         if ($null -eq $PreviousQtPlatform) {
             Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
@@ -191,7 +191,7 @@ try {
 
     if ($MasterOutputRoot) {
         $MasterSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-self-test" `
-            -WindowStyle Hidden -Wait -PassThru
+            -NoNewWindow -Wait -PassThru
         if ($MasterSelfTest.ExitCode -ne 0) { throw "Master packaged executable self-test failed." }
         $MasterSelfTestReport = Join-Path $MasterOutputRoot "runtime\master-package-self-test.json"
         if (-not (Test-Path -LiteralPath $MasterSelfTestReport)) { throw "Master package self-test report was not created." }
@@ -200,7 +200,7 @@ try {
         if ($MasterSelfTestResult.client_version -ne $ClientVersion) { throw "Master package version does not match the release version." }
 
         $MasterUiSelfTest = Start-Process -FilePath $MasterExe.FullName -ArgumentList "--package-ui-self-test" `
-            -WindowStyle Hidden -Wait -PassThru
+            -NoNewWindow -Wait -PassThru
         if ($MasterUiSelfTest.ExitCode -ne 0) { throw "Master packaged UI startup self-test failed." }
         $MasterUiResult = Get-Content -LiteralPath (Join-Path $MasterRuntime "master-package-ui-self-test.json") -Raw | ConvertFrom-Json
         if (-not $MasterUiResult.ok) { throw "Master package UI self-test reported a startup failure." }
