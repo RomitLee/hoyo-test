@@ -569,8 +569,8 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
   <div v-if="!token" class="login-stage">
     <div class="login-hero" aria-hidden="true"><span>专注经营，安心托管</span><strong>你的梦幻经营数据<br>随时都在身边</strong><img :src="loginHero" alt=""></div>
     <section class="login-card m-surface">
-      <span class="eyebrow">MAIPI PLAYER CLOUD</span>
-      <h1>欢迎使用麦皮云助手</h1>
+      <span class="eyebrow">XILIAN ASSISTANT</span>
+      <h1>欢迎使用西联助手</h1>
       <p>一个账号，随时掌握角色状态、摊位行情与经营数据。</p>
       <form @submit.prevent="login">
         <label>账号<input v-model="username" autocomplete="username" required minlength="3" maxlength="32"></label>
@@ -582,7 +582,7 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
   </div>
   <div v-else class="app-shell">
     <aside class="sidebar m-rail">
-      <div class="brand"><span class="brand-mark">M</span><div><strong>麦皮云助手</strong><small>MAIPI PLAYER CLOUD</small></div></div>
+      <div class="brand"><span class="brand-mark">西</span><div><strong>西联助手</strong><small>XILIAN ASSISTANT</small></div></div>
       <nav aria-label="管理板块">
         <button v-for="item in pages" :key="item.key" :class="['nav-item', { active: page === item.key }]" @click="choose(item.key)">
           <span class="nav-icon" aria-hidden="true"><img :src="item.icon" alt=""></span><span class="nav-copy"><strong>{{ item.label }}</strong><small>{{ item.hint }}</small></span><em v-if="item.key === 'alerts' && pending">{{ pending }}</em>
@@ -591,7 +591,7 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
       <div class="sidebar-foot"><span>{{ accountName || username }}</span><button @click="logout()">退出登录</button></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div><span class="eyebrow">MAIPI CLOUD · {{ pages.find(item => item.key === page)?.label }}</span><h1>{{ pages.find(item => item.key === page)?.label }}</h1><p>{{ pages.find(item => item.key === page)?.hint }}</p></div><div class="top-actions"><button v-if="ringing" class="primary" @click="stopSound">停止提示音</button><span :class="['connection', { offline: !connected }]">{{ connected ? '实时连接' : '连接中断' }}</span><button class="secondary refresh-button" :disabled="loading" @click="refresh">{{ loading ? '同步中…' : '同步数据' }}</button><span class="account-chip"><b>{{ (accountName || username).slice(0, 1).toUpperCase() }}</b><span>{{ accountName || username }}</span></span></div></header>
+      <header class="topbar"><div><span class="eyebrow">XILIAN ASSISTANT · {{ pages.find(item => item.key === page)?.label }}</span><h1>{{ pages.find(item => item.key === page)?.label }}</h1><p>{{ pages.find(item => item.key === page)?.hint }}</p></div><div class="top-actions"><button v-if="ringing" class="primary" @click="stopSound">停止提示音</button><span :class="['connection', { offline: !connected }]">{{ connected ? '实时连接' : '连接中断' }}</span><button class="secondary refresh-button" :disabled="loading" @click="refresh">{{ loading ? '同步中…' : '同步数据' }}</button><span class="account-chip"><b>{{ (accountName || username).slice(0, 1).toUpperCase() }}</b><span>{{ accountName || username }}</span></span></div></header>
       <main>
         <p v-if="error" class="message error" role="alert">{{ error }}</p>
         <p v-if="notice" class="message success" role="status">{{ notice }}</p>
@@ -661,7 +661,7 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
             <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存告警设置</button><button class="secondary" type="button" @click="testBark">测试手机推送</button><button v-if="bark.web_sound_enabled && !soundReady" class="secondary" type="button" @click="unlockWebSound()">允许当前浏览器播放</button></div>
           </form></Panel></div></template>
       </main>
-      <footer>麦皮云助手 Web · 数据每 5 秒安全同步</footer>
+      <footer>西联助手 Web · 数据每 5 秒安全同步</footer>
     </div>
   </div>
   <div v-if="preview" class="modal-backdrop" @click.self="preview = ''"><div class="preview-card m-surface"><div class="preview-bar"><button class="secondary" @click="preview = ''">关闭截图</button><span v-if="previewTime" class="preview-time">截图时间：{{ previewTime }}</span><span v-if="historyCharacter" class="preview-time">账号 ID：{{ historyCharacter }}</span></div><div class="preview-image-row"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || historyIndex === 0" aria-label="更新一张历史截图" @click="navigateHistory(-1).catch(fail)">‹</button><img :src="preview" alt="游戏窗口截图" referrerpolicy="no-referrer" @error="previewError = '图片加载失败或链接已过期，请关闭后重试'"><button v-if="historyCharacter" class="secondary preview-arrow" :disabled="historyBusy || (!historyHasMore && historyIndex >= history.length - 1)" aria-label="更早一张历史截图" @click="navigateHistory(1).catch(fail)">›</button></div><p v-if="historyCharacter" class="preview-counter">第 {{ historyIndex + 1 }} / {{ historyTotal }} 张 · 从新到旧 · 左右方向键可翻看 · 保留最近 30 天</p><p v-if="previewError" class="message error">{{ previewError }}</p></div></div>
