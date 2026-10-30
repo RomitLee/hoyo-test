@@ -8,6 +8,15 @@ import { api, json, online, time, TOKEN_KEY, USERNAME_KEY, Unauthorized } from '
 import { estimateStamina } from './stamina'
 import { sortRolesByServer } from './roleSort'
 import alarmSoundUrl from './assets/inventory-alarm-loop-v1.wav'
+import monitorIcon from './assets/official/monitor.png'
+import alertsIcon from './assets/official/alerts.png'
+import devicesIcon from './assets/official/devices.png'
+import logsIcon from './assets/official/logs.png'
+import stallsIcon from './assets/official/stalls.png'
+import marketIcon from './assets/official/market.png'
+import merchantIcon from './assets/official/merchant.png'
+import settingsIcon from './assets/official/settings.png'
+import loginHero from './assets/official/login-hero.png'
 
 type Page = 'monitor' | 'alerts' | 'devices' | 'logs' | 'my-stalls' | 'products' | 'merchant' | 'settings'
 type WindowStatus = { window_id: string; server_name?: string; role_name?: string; character_id?: string; status?: string; empty_slots?: number; occupied_slots?: number; confidence?: number; occlusion_percent?: number; minimized?: boolean; monitoring?: boolean; cash?: number | null; money_confirmed_at?: string; money_readable?: boolean; updated_at?: string; screenshot_at?: string | null }
@@ -20,14 +29,14 @@ type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; l
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
 
 const pages: { key: Page; label: string; hint: string; icon: string }[] = [
-  { key: 'monitor', label: '实时监控', hint: '角色状态与现金', icon: '⌁' },
-  { key: 'alerts', label: '告警中心', hint: '待处理事件', icon: '!' },
-  { key: 'devices', label: '设备', hint: '客户端与连接', icon: '▣' },
-  { key: 'logs', label: '监控日志', hint: '操作与截图', icon: '≡' },
-  { key: 'my-stalls', label: '我的摊位', hint: '价格与同行对比', icon: '◇' },
-  { key: 'products', label: '商品行情', hint: '宝石市场价格', icon: '◫' },
-  { key: 'merchant', label: '经营工具', hint: '合成与利润测算', icon: '↗' },
-  { key: 'settings', label: '偏好设置', hint: '上报与通知', icon: '⚙' },
+  { key: 'monitor', label: '实时监控', hint: '角色状态与现金', icon: monitorIcon },
+  { key: 'alerts', label: '告警中心', hint: '待处理事件', icon: alertsIcon },
+  { key: 'devices', label: '设备', hint: '客户端与连接', icon: devicesIcon },
+  { key: 'logs', label: '监控日志', hint: '操作与截图', icon: logsIcon },
+  { key: 'my-stalls', label: '我的摊位', hint: '价格与同行对比', icon: stallsIcon },
+  { key: 'products', label: '商品行情', hint: '宝石市场价格', icon: marketIcon },
+  { key: 'merchant', label: '经营工具', hint: '合成与利润测算', icon: merchantIcon },
+  { key: 'settings', label: '偏好设置', hint: '上报与通知', icon: settingsIcon },
 ]
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
 const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', stall_sold: '商品售出', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
@@ -558,6 +567,7 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
 
 <template>
   <div v-if="!token" class="login-stage">
+    <div class="login-hero" aria-hidden="true"><span>专注经营，安心托管</span><strong>你的梦幻经营数据<br>随时都在身边</strong><img :src="loginHero" alt=""></div>
     <section class="login-card m-surface">
       <span class="eyebrow">MAIPI PLAYER CLOUD</span>
       <h1>欢迎使用麦皮云助手</h1>
@@ -575,7 +585,7 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
       <div class="brand"><span class="brand-mark">M</span><div><strong>麦皮云助手</strong><small>MAIPI PLAYER CLOUD</small></div></div>
       <nav aria-label="管理板块">
         <button v-for="item in pages" :key="item.key" :class="['nav-item', { active: page === item.key }]" @click="choose(item.key)">
-          <span class="nav-icon" aria-hidden="true">{{ item.icon }}</span><span class="nav-copy"><strong>{{ item.label }}</strong><small>{{ item.hint }}</small></span><em v-if="item.key === 'alerts' && pending">{{ pending }}</em>
+          <span class="nav-icon" aria-hidden="true"><img :src="item.icon" alt=""></span><span class="nav-copy"><strong>{{ item.label }}</strong><small>{{ item.hint }}</small></span><em v-if="item.key === 'alerts' && pending">{{ pending }}</em>
         </button>
       </nav>
       <div class="sidebar-foot"><span>{{ accountName || username }}</span><button @click="logout()">退出登录</button></div>

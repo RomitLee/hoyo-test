@@ -9,7 +9,7 @@
 | 组件 | 当前版本 | 获取方式 |
 | --- | --- | --- |
 | Windows 从机 | V2.16.1 | [下载从机 ZIP](https://jiankong.maipi.top/api/v1/updates/download/slave/V2.16.1) |
-| 云端服务 | 2.31.0 | [用户 Web 端](https://jiankong.maipi.top/) · [项目总后台](https://jiankong.maipi.top/admin) |
+| 云端服务 | 2.31.1 | [用户 Web 端](https://jiankong.maipi.top/) · [项目总后台](https://jiankong.maipi.top/admin) |
 | Windows 主机（历史版本，不再使用） | V2.3.0 | 由网页管理界面替代 |
 
 网页管理界面覆盖监控、现金、告警、从机管理、监控日志、截图和统一告警设置，可在电脑与手机浏览器使用。监控页宽屏每行展示五个窗口，点击画面可按账号 ID 翻看历史。设置页按账号配置 1～60 分钟自动截图周期，默认 5 分钟。截图从从机直传私有 COS，查看时提供 1 小时读取链接。旧版 H5 暂保留在 `/legacy`。电脑网页提示音需要浏览器允许声音且网页保持打开；关闭或休眠浏览器后，持续告警依靠服务端 Bark。
