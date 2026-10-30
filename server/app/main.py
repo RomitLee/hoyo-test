@@ -29,7 +29,7 @@ from .gem_config import GemSettings
 from .releases import ReleaseStore
 from .screenshots import MAX_SCREENSHOT_BYTES, VIEW_URL_EXPIRES_SECONDS, ScreenshotStore, validate_jpeg
 
-VERSION = "2.29.5"
+VERSION = "2.30.0"
 WEB_ROOT = Path(__file__).parent / "web"
 ADMIN_ROOT = Path(__file__).parent / "web-admin"
 SESSION_DAYS = 30
@@ -247,6 +247,16 @@ class MarketGemQuotesIn(BaseModel):
     server_name: str = Field(min_length=1, max_length=128)
     observer_character_id: str | None = Field(default=None, max_length=64)
     stall_owner_id: str = Field(min_length=6, max_length=12, pattern=r"^[0-9]+$")
+    quotes: list[MarketGemQuoteIn] = Field(min_length=1, max_length=8)
+
+
+class OwnStallGemQuotesIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    occurred_at: datetime
+    server_name: str = Field(min_length=1, max_length=128)
+    role_name: str | None = Field(default=None, max_length=128)
+    character_id: str = Field(min_length=1, max_length=64)
     quotes: list[MarketGemQuoteIn] = Field(min_length=1, max_length=8)
 
 
@@ -815,6 +825,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database.save_market_gem_quotes(identity.account_id, payload.model_dump(mode="json"))
         return {"accepted": True}
 
+    @app.post("/api/v1/slave/own-stall-gem-quotes", status_code=status.HTTP_202_ACCEPTED)
+    def save_own_stall_gem_quotes(payload: OwnStallGemQuotesIn,
+                                  identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, bool]:  # noqa: B008
+        database.save_own_stall_gem_quotes(identity.account_id, payload.model_dump(mode="json"))
+        return {"accepted": True}
+
     @app.put("/api/v1/slave/monitor-logs/{event_id}/screenshot")
     async def upload_monitor_screenshot(event_id: str, request: Request,
             identity: DeviceIdentity = Depends(authenticate_device)):  # noqa: B008
@@ -880,6 +896,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/master/market-gem-statistics")
     def market_gem_statistics(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
         return {"items": database.market_gem_statistics(account_id),
+                "merchants": database.market_gem_merchants(account_id)}
+
+    @app.get("/api/v1/master/own-stalls")
+    def own_stalls(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return {"stalls": database.own_stall_gem_quotes(account_id),
                 "merchants": database.market_gem_merchants(account_id)}
 
     @app.put("/api/v1/master/gem-settings")

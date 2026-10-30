@@ -28,6 +28,12 @@ class StallMarketReading:
     confidence: float = field(compare=False)
 
 
+@dataclass(frozen=True)
+class OwnStallReading:
+    quotes: tuple[tuple[str, int], ...]
+    confidence: float = field(compare=False)
+
+
 class StallMarketDetector:
     def __init__(self, recognizer=None) -> None:
         self.recognizer = recognizer or recognize_shared_text
@@ -136,6 +142,90 @@ class StallMarketDetector:
         while len(self.cache) > 32:
             self.cache.popitem(last=False)
         return result
+
+
+class OwnStallMarketDetector:
+    """Read visible first-level gem bids from the player's own buying stall."""
+
+    def __init__(self, recognizer=None) -> None:
+        self.recognizer = recognizer or recognize_shared_text
+
+    @staticmethod
+    def _crop(image: np.ndarray, panel: PanelObservation,
+              rect: tuple[int, int, int, int]) -> np.ndarray | None:
+        if panel.bbox is None:
+            return None
+        x, y, right, _ = panel.bbox
+        scale = (right - x) / 94
+        left = round(x + rect[0] * scale)
+        top = round(y + rect[1] * scale)
+        r = round(x + rect[2] * scale)
+        bottom = round(y + rect[3] * scale)
+        if left < 0 or top < 0 or r > image.shape[1] or bottom > image.shape[0] or r <= left or bottom <= top:
+            return None
+        return cv2.resize(image[top:bottom, left:r], (rect[2] - rect[0], rect[3] - rect[1]),
+                          interpolation=cv2.INTER_AREA)
+
+    def _vote(self, field: np.ndarray, kind: str) -> tuple[str, float] | None:
+        gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
+        candidates: list[tuple[str, float]] = []
+        for threshold in (70, 85, 100, 115, 130, 145, 160):
+            result = self.recognizer((gray < threshold).astype(np.uint8) * 255)
+            if result is None:
+                continue
+            value, confidence = result
+            if kind == "name":
+                value = value.strip(" ，。,.·、■□")
+            valid = (_NAME_PATTERN.fullmatch(value) if kind == "name" else
+                     re.fullmatch(r"[1-9][0-9]{0,8}", value))
+            if valid and confidence >= .75:
+                candidates.append((value, confidence))
+        counts = Counter(value for value, _ in candidates)
+        ranked = counts.most_common()
+        if not ranked or len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            return None
+        winner = ranked[0][0]
+        winner_scores = [score for value, score in candidates if value == winner]
+        if ranked[0][1] < 2 and max(winner_scores) < .95:
+            return None
+        return winner, min(winner_scores)
+
+    def analyze(self, image: np.ndarray, panel: PanelObservation) -> OwnStallReading | None:
+        if panel.panel_type != "stall_buy" or panel.bbox is None or image.ndim != 3:
+            return None
+        quotes: dict[str, tuple[int, float]] = {}
+        ambiguous: set[str] = set()
+        try:
+            for row in range(5):
+                dy = row * 60
+                for name_rect, price_rect in (((-205, 91 + dy, -103, 113 + dy),
+                                                (-201, 121 + dy, -105, 141 + dy)),
+                                               ((-49, 91 + dy, 58, 113 + dy),
+                                                (-49, 121 + dy, 56, 141 + dy))):
+                    name_field = self._crop(image, panel, name_rect)
+                    price_field = self._crop(image, panel, price_rect)
+                    if name_field is None or price_field is None:
+                        continue
+                    name = self._vote(name_field, "name")
+                    price = self._vote(price_field, "price")
+                    if name is None or price is None:
+                        continue
+                    gem = name[0][2:]
+                    amount = int(price[0])
+                    if gem in quotes and quotes[gem][0] != amount:
+                        ambiguous.add(gem)
+                    else:
+                        quotes[gem] = amount, min(name[1], price[1])
+        except Exception:  # noqa: BLE001 - optional OCR cannot interrupt monitoring
+            return None
+        for gem in ambiguous:
+            quotes.pop(gem, None)
+        if not quotes:
+            return None
+        return OwnStallReading(
+            tuple(sorted((name, price) for name, (price, _) in quotes.items())),
+            min(confidence for _, confidence in quotes.values()),
+        )
 
 
 class StallMarketTracker:

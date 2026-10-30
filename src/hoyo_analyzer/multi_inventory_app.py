@@ -1238,6 +1238,15 @@ class InventoryMonitorWindow(QMainWindow):
                 "stall_owner_id": event.payload["stall_owner_id"], "quotes": event.payload["quotes"],
             })
             return
+        if event.type == "own_stall_gem_quotes":
+            self.relay_client.send_own_stall_quotes({
+                "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
+                "server_name": session.account.secondary_region,
+                "role_name": session.account.role_name,
+                "character_id": session.account.role_id,
+                "quotes": event.payload["quotes"],
+            })
+            return
         if session.minimized and not supplemental and (event.type not in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}
                                   or is_window_minimized(hwnd)):
             return

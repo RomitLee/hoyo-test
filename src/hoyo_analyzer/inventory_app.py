@@ -34,7 +34,7 @@ from .sampler import AdaptiveSampler, SamplingProfile
 from .screenshots import capture_panel_screenshot
 from .stamina import StaminaDetector
 from .stall_stock import StallStockDetector, StallStockTracker
-from .stall_market import StallMarketDetector, StallVisitTracker
+from .stall_market import OwnStallMarketDetector, StallMarketDetector, StallVisitTracker
 from .storage import JsonlEventSink
 from .wgc import is_window_available, is_window_minimized, list_capturable_windows
 
@@ -158,6 +158,7 @@ class InventoryMonitorWorker(QObject):
         self._snapshot_request: str | None = None
         self._market_lock = Lock()
         self._market_detector = StallMarketDetector()
+        self._own_stall_detector = OwnStallMarketDetector()
         self._market_future: Future | None = None
         identity = parse_account_info(window_title).role_id or f"hwnd-{hwnd}"
         self._market_directory = application_root() / "runtime" / "market-ocr-queue" / identity
@@ -197,7 +198,8 @@ class InventoryMonitorWorker(QObject):
                 and isinstance(item.get("file"), str)
                 and Path(item["file"]).name == item["file"]
                 and item["file"].endswith(".png")
-                and isinstance(item.get("bbox"), list) and len(item["bbox"]) == 4]
+                and isinstance(item.get("bbox"), list) and len(item["bbox"]) == 4
+                and item.get("panel_type", "stall_other_buy") in {"stall_other_buy", "stall_buy"}]
 
     def _save_market_queue_locked(self) -> None:
         self._market_directory.mkdir(parents=True, exist_ok=True)
@@ -219,6 +221,7 @@ class InventoryMonitorWorker(QObject):
             (self._market_directory / filename).write_bytes(data.tobytes())
             entry = {
                 "id": entry_id, "file": filename, "bbox": list(panel.bbox),
+                "panel_type": panel.panel_type,
                 "timestamp_ms": timestamp_ms, "frame_index": frame_index,
                 "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"), "attempts": 0,
             }
@@ -252,8 +255,10 @@ class InventoryMonitorWorker(QObject):
         image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise OSError("queued market screenshot is unreadable")
-        panel = PanelObservation("stall_other_buy", 1.0, tuple(int(value) for value in task["bbox"]))
-        return task, self._market_detector.analyze(image, panel)
+        panel_type = task.get("panel_type", "stall_other_buy")
+        panel = PanelObservation(panel_type, 1.0, tuple(int(value) for value in task["bbox"]))
+        detector = self._own_stall_detector if panel_type == "stall_buy" else self._market_detector
+        return task, detector.analyze(image, panel)
 
     def _market_ocr_finished(self, future: Future) -> None:
         task: dict[str, Any] | None = getattr(future, "market_task", None)
@@ -277,14 +282,16 @@ class InventoryMonitorWorker(QObject):
                 else:
                     task = self._market_queue.pop(0)
                     if reading is not None:
+                        own_stall = task.get("panel_type") == "stall_buy"
                         event = Event(
-                            uuid4().hex, int(task["timestamp_ms"]), "market_gem_quotes",
+                            uuid4().hex, int(task["timestamp_ms"]),
+                            "own_stall_gem_quotes" if own_stall else "market_gem_quotes",
                             confidence=reading.confidence,
                             payload={
-                                "stall_owner_id": reading.owner_id,
                                 "quotes": [{"gem_name": name, "price_coins": price}
                                            for name, price in reading.quotes],
                                 "occurred_at": task["occurred_at"],
+                                **({} if own_stall else {"stall_owner_id": reading.owner_id}),
                             }, evidence_frame_index=int(task["frame_index"]),
                         )
                 self._save_market_queue_locked()
@@ -518,6 +525,13 @@ class InventoryMonitorWorker(QObject):
                         # One lossless image per confirmed visit.  The durable
                         # FIFO survives restarts and never lets later stalls
                         # overwrite earlier, still-unprocessed stalls.
+                        self._enqueue_market_visit(
+                            packet.image, panel, packet.timestamp_ms, packet.frame_index
+                        )
+                    if any(
+                        event.type == "panel_opened" and event.payload.get("panel_type") == "stall_buy"
+                        for event in panel_events
+                    ):
                         self._enqueue_market_visit(
                             packet.image, panel, packet.timestamp_ms, packet.frame_index
                         )

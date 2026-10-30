@@ -51,6 +51,31 @@ def test_market_gem_statistics_keep_every_merchant_quote(tmp_path: Path) -> None
         }
 
 
+def test_own_stalls_keep_role_prices_separate_from_competitor_statistics(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        competitor = {
+            "event_id": "other-1", "occurred_at": "2026-10-30T10:00:00+08:00",
+            "server_name": "秦淮风光", "observer_character_id": "123456",
+            "stall_owner_id": "800001", "quotes": [{"gem_name": "光芒石", "price_coins": 20000}],
+        }
+        own = {
+            "event_id": "own-1", "occurred_at": "2026-10-30T10:01:00+08:00",
+            "server_name": "秦淮风光", "role_name": "收货一号", "character_id": "123456",
+            "quotes": [{"gem_name": "光芒石", "price_coins": 22000},
+                       {"gem_name": "月亮石", "price_coins": 40000}],
+        }
+        assert client.post("/api/v1/slave/market-gem-quotes", headers=device_headers(), json=competitor).status_code == 202
+        assert client.post("/api/v1/slave/own-stall-gem-quotes", headers=device_headers(), json=own).status_code == 202
+        result = client.get("/api/v1/master/own-stalls", headers=master_headers()).json()
+        assert result["stalls"][0]["role_name"] == "收货一号"
+        assert {item["gem_name"]: item["price_coins"] for item in result["stalls"][0]["quotes"]} == {
+            "光芒石": 22000, "月亮石": 40000,
+        }
+        assert result["merchants"][0]["quotes"][0]["price_coins"] == 20000
+        summary = client.get("/api/v1/master/market-gem-statistics", headers=master_headers()).json()["items"]
+        assert summary[0]["merchant_count"] == 1 and summary[0]["average_price"] == 20000
+
+
 def test_legacy_cash_observations_are_acknowledged_without_statistics(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         payload = {"event_id": "balance-1", "character_id": "123456", "stream_id": "run1",

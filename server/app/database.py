@@ -67,6 +67,15 @@ class RelayDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_gem_quotes_summary
                     ON market_gem_quotes(account_id,server_name,gem_name);
+                CREATE TABLE IF NOT EXISTS own_stall_gem_quotes (
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    server_name TEXT NOT NULL, character_id TEXT NOT NULL, role_name TEXT,
+                    gem_name TEXT NOT NULL, price_coins INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL, received_at TEXT NOT NULL,
+                    PRIMARY KEY(account_id,character_id,gem_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_own_stall_quotes_account
+                    ON own_stall_gem_quotes(account_id,server_name,character_id);
                 CREATE TABLE IF NOT EXISTS monitor_screenshots (
                     log_id INTEGER PRIMARY KEY REFERENCES monitor_logs(id) ON DELETE CASCADE,
                     object_key TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
@@ -1060,6 +1069,40 @@ class RelayDatabase:
             counts[server_name] = counts.get(server_name, 0) + 1
         return sorted(merchants.values(),
                       key=lambda item: (-counts[item["server_name"]], item["server_name"], item["stall_owner_id"]))
+
+    def save_own_stall_gem_quotes(self, account_id: int, payload: dict[str, Any]) -> None:
+        received = utc_now()
+        with self._connect() as connection:
+            for quote in payload["quotes"]:
+                connection.execute("""INSERT INTO own_stall_gem_quotes(
+                    account_id,server_name,character_id,role_name,gem_name,price_coins,observed_at,received_at)
+                    VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(account_id,character_id,gem_name) DO UPDATE SET
+                    server_name=excluded.server_name,role_name=excluded.role_name,
+                    price_coins=excluded.price_coins,observed_at=excluded.observed_at,
+                    received_at=excluded.received_at""",
+                    (account_id, payload["server_name"], payload["character_id"], payload.get("role_name"),
+                     quote["gem_name"], quote["price_coins"], payload["occurred_at"], received))
+
+    def own_stall_gem_quotes(self, account_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("""SELECT server_name,character_id,role_name,gem_name,
+                price_coins,observed_at FROM own_stall_gem_quotes WHERE account_id=?
+                ORDER BY server_name,role_name,character_id,gem_name""", (account_id,)).fetchall()
+        stalls: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = stalls.setdefault(row["character_id"], {
+                "server_name": row["server_name"], "character_id": row["character_id"],
+                "role_name": row["role_name"], "latest_at": row["observed_at"], "quotes": [],
+            })
+            item["quotes"].append({"gem_name": row["gem_name"], "price_coins": row["price_coins"],
+                                   "observed_at": row["observed_at"]})
+            if row["observed_at"] > item["latest_at"]:
+                item["latest_at"] = row["observed_at"]
+        counts: dict[str, int] = {}
+        for item in stalls.values():
+            counts[item["server_name"]] = counts.get(item["server_name"], 0) + 1
+        return sorted(stalls.values(), key=lambda item: (
+            -counts[item["server_name"]], item["server_name"], item["role_name"] or "", item["character_id"]))
 
     def get_gem_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:

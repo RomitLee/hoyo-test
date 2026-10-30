@@ -196,6 +196,11 @@ class SlaveRelayClient(QObject):
         self._save_log_outbox()
         self._send_next_log()
 
+    def send_own_stall_quotes(self, payload: dict[str, Any]) -> None:
+        self._log_outbox.append({"device_id": self._device_id, "payload": payload, "route": "own_stall_quotes"})
+        self._save_log_outbox()
+        self._send_next_log()
+
     def _save_log_outbox(self) -> None:
         # Windows scanners can briefly hold the destination without delete sharing.
         # Keep the current queue in memory and retry on the Qt timer, never sleep
@@ -235,7 +240,8 @@ class SlaveRelayClient(QObject):
             if item["device_id"] == self._device_id:
                 self._log_inflight = True
                 path = ({"cash": "/api/v1/slave/cash-observations",
-                         "market_quotes": "/api/v1/slave/market-gem-quotes"}.get(item.get("route"),
+                         "market_quotes": "/api/v1/slave/market-gem-quotes",
+                         "own_stall_quotes": "/api/v1/slave/own-stall-gem-quotes"}.get(item.get("route"),
                                                                                  "/api/v1/slave/monitor-logs"))
                 self._post(path, item["payload"], "monitor_log")
                 return
