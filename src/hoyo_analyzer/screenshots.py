@@ -92,12 +92,13 @@ class ScreenshotUploader(QObject):
         except OSError:
             logger.warning("截图上传队列暂时无法保存，将继续重试")
 
-    def enqueue(self, event_id: str, path: str):
+    def enqueue(self, event_id: str, path: str, kind: str = "monitor"):
         candidate = Path(path).resolve()
         if candidate.parent != self.directory.resolve() or not candidate.is_file():
             return
         self.queue.append(
-            {"device_id": self.device_id, "event_id": event_id, "file": candidate.name, "created": time()}
+            {"device_id": self.device_id, "event_id": event_id, "file": candidate.name,
+             "kind": kind, "created": time()}
         )
         self._save()
         # Normal uploads start as soon as the log is acknowledged. This timer
@@ -124,7 +125,11 @@ class ScreenshotUploader(QObject):
                     self._remove(item)
                     continue
                 data = path.read_bytes()
-                route = f"/api/v1/slave/monitor-logs/{quote(item['event_id'], safe='')}/screenshot"
+                if item.get("kind") == "recognition":
+                    route = (f"/api/v1/slave/market-recognition-logs/"
+                             f"{quote(item['event_id'], safe='')}/evidence")
+                else:
+                    route = f"/api/v1/slave/monitor-logs/{quote(item['event_id'], safe='')}/screenshot"
                 request = QNetworkRequest(QUrl(urljoin(self.base_url + "/", route)))
                 request.setRawHeader(b"Authorization", f"Bearer {self.token}".encode())
                 request.setRawHeader(b"X-Device-ID", self.device_id.encode())
@@ -152,9 +157,21 @@ class ScreenshotUploader(QObject):
         if success:
             self._remove(item)
             self.soon.start(100)
-        elif status in {413, 415, 422}:
-            logger.warning("截图内容被服务器拒绝，已跳过该图片，监控日志不受影响")
+        elif status in {400, 403, 404, 413, 415, 422}:
+            logger.warning("截图被服务器拒绝（%s），已跳过该图片", status)
             self._remove(item)
+        else:
+            # Never let one failing item block every later screenshot.
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            if item["attempts"] >= 5:
+                logger.warning("截图连续上传失败 %s 次，已放弃", item["attempts"])
+                self._remove(item)
+            else:
+                if item in self.queue:
+                    self.queue.remove(item)
+                    self.queue.append(item)
+                self._save()
+                self.soon.start(5_000)
         reply.deleteLater()
 
     def _remove(self, item):

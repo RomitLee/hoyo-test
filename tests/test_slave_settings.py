@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,6 +15,8 @@ from hoyo_analyzer.slave_settings import (
     CAPACITY_ALERT_NONE,
     SlaveSettings,
     load_slave_settings,
+    matches_monitored_window,
+    plan_window_restore,
     save_slave_settings,
 )
 
@@ -43,6 +46,7 @@ def test_slave_settings_are_saved_and_loaded(tmp_path) -> None:
         "device_token",
         "installation_id",
         "pairing_code",
+            "monitored_windows",
     }
 
 
@@ -112,3 +116,32 @@ def test_settings_dialog_shows_login_status_without_local_alert_controls() -> No
     finally:
         dialog.close()
         app.processEvents()
+
+def test_monitored_windows_round_trip_and_restore_plan(tmp_path: Path) -> None:
+    settings = SlaveSettings(
+        monitored_windows=[
+            {"title": "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[123456])", "role_id": "123456",
+             "server": "秦淮风光", "role_name": "甲"},
+            {"title": "梦幻西游 ONLINE - (广东3区[罗浮山] - 乙[654321])", "role_id": "654321",
+             "server": "罗浮山", "role_name": "乙"},
+        ]
+    )
+    path = tmp_path / "slave_settings.json"
+    save_slave_settings(settings, path)
+    loaded = load_slave_settings(path)
+    assert [item["role_id"] for item in loaded.monitored_windows] == ["123456", "654321"]
+
+    windows = [(11, "999999", "别的窗口"), (12, "654321", "乙-改名了"), (13, "123456", "甲")]
+    assert plan_window_restore(loaded.monitored_windows, windows) == [13, 12]
+    assert plan_window_restore(loaded.monitored_windows, []) == []
+
+
+def test_monitored_windows_are_limited_and_fall_back_to_title(tmp_path: Path) -> None:
+    raw = {"monitored_windows": [{"role_id": str(index)} for index in range(12)]}
+    settings = SlaveSettings.from_mapping(raw)
+    assert len(settings.monitored_windows) == 8
+
+    by_title = {"title": "窗口标题没有账号", "role_id": ""}
+    assert matches_monitored_window(by_title, "", "窗口标题没有账号")
+    assert not matches_monitored_window(by_title, "", "别的标题")
+    assert matches_monitored_window({"role_id": "123456"}, "123456", "任意标题")

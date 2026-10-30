@@ -21,6 +21,30 @@ _NAME_PATTERN = re.compile(r"1级(" + "|".join(GEM_NAMES) + r")")
 _TEMPLATE_RECT = (19, 81, 148, 104)
 
 
+
+def _normalize_mask(mask: np.ndarray) -> np.ndarray:
+    """The OCR model expects dark glyphs on a light page.
+
+    Some stall skins draw white text on a dark plate; flipping a mostly-dark
+    mask keeps the recognizer working on both layouts.
+    """
+    return 255 - mask if mask.mean() < 127 else mask
+
+def _price_mask(field: np.ndarray, threshold: int) -> np.ndarray:
+    """Highlight digits against the dominant stall-plate colour.
+
+    The plate is a flat colour. Sampling the rightmost columns as "background"
+    breaks down whenever a scrollbar, a gem icon or the mouse cursor overlaps
+    that strip, which silently dropped whole rows from the reading. The mode of
+    the cell is stable in all of those cases.
+    """
+    quantized = (field // 8).reshape(-1, 3)
+    colors, counts = np.unique(quantized, axis=0, return_counts=True)
+    background = colors[int(counts.argmax())] * 8 + 4
+    distance = np.max(np.abs(field.astype(np.int16) - background.astype(np.int16)), axis=2)
+    return (distance > threshold).astype(np.uint8) * 255
+
+
 @dataclass(frozen=True)
 class StallMarketReading:
     owner_id: str
@@ -57,19 +81,27 @@ class StallMarketDetector:
         return cv2.resize(image[top:bottom, left:r], (rect[2] - rect[0], rect[3] - rect[1]),
                           interpolation=cv2.INTER_AREA)
 
-    def _vote(self, field: np.ndarray, kind: str) -> tuple[str, float] | None:
+    def _vote(self, field: np.ndarray, kind: str, dark_skin: bool = False) -> tuple[str, float] | None:
         gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
         candidates: list[tuple[str, float]] = []
-        for threshold in ((80, 95, 110, 125, 140) if kind == "id" else
-                          (105, 135, 165, 190) if kind == "name" else (25, 35, 45, 55, 65)):
+        for threshold in ((80, 95, 105, 115, 125, 135, 140) if kind == "id" else
+                          (105, 135, 165, 190) if kind == "name" else
+                          (50, 60, 70, 80) if dark_skin else (25, 35, 45, 55, 65)):
+            masks: list[np.ndarray] = []
             if kind == "id":
-                mask = gray < threshold
+                # Owner plates vary: dark digits on light, or the reverse.
+                masks = [(gray < threshold).astype(np.uint8) * 255,
+                         (gray > threshold).astype(np.uint8) * 255]
             elif kind == "name":
-                mask = gray > threshold
+                masks = [(((gray < threshold) if dark_skin else (gray > threshold))
+                          .astype(np.uint8) * 255)]
             else:
-                background = np.median(field[:, -8:], axis=(0, 1))
-                mask = np.max(np.abs(field.astype(np.int16) - background.astype(np.int16)), axis=2) > threshold
-            result = self.recognizer(mask.astype(np.uint8) * 255)
+                masks = [_price_mask(field, threshold)]
+            result = None
+            for mask in masks:
+                result = self.recognizer(mask if dark_skin else _normalize_mask(mask))
+                if result:
+                    break
             if result is None:
                 continue
             value, confidence = result
@@ -78,16 +110,30 @@ class StallMarketDetector:
                      re.fullmatch(r"[1-9][0-9]{0,8}", value))
             if valid and confidence >= .75:
                 candidates.append((value, confidence))
-        counts = Counter(value for value, _ in candidates)
+        # Prefer readings the model itself is confident about; low-confidence
+        # variants often add or drop a digit and would create phantom merchants.
+        strong = [(value, score) for value, score in candidates if score >= .85]
+        pool = strong or candidates
+        counts = Counter(value for value, _ in pool)
         winners = [value for value, count in counts.items() if count >= 2]
         if len(winners) == 1:
             winner = winners[0]
         else:
             ranked = counts.most_common()
-            if not ranked or len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            if not ranked:
                 return None
-            winner = ranked[0][0]
-        return winner, min(score for value, score in candidates if value == winner)
+            if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+                # Same support: prefer the clearer reading instead of dropping
+                # the whole stall (owner ids are required for pricing).
+                scores = {value: max(score for candidate, score in pool if candidate == value)
+                          for value, _ in ranked}
+                best, second = ranked[0][0], ranked[1][0]
+                if abs(scores[best] - scores[second]) < 0.05:
+                    return None
+                winner = best if scores[best] > scores[second] else second
+            else:
+                winner = ranked[0][0]
+        return winner, min(score for value, score in pool if value == winner)
 
     def analyze(self, image: np.ndarray, panel: PanelObservation) -> StallMarketReading | None:
         if panel.panel_type != "stall_other_buy" or panel.bbox is None or image.ndim != 3:
@@ -97,15 +143,17 @@ class StallMarketDetector:
         list_field = self._crop(image, panel, (75, 118, 339, 399))
         if owner_field is None or list_field is None:
             return None
+        # Two stall skins exist: light rows (dark text) and dark rows (white text).
+        dark_skin = float(np.median(cv2.cvtColor(list_field, cv2.COLOR_BGR2GRAY))) < 90
         key = hashlib.sha256(owner_field.tobytes() + list_field.tobytes()).digest()
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key]
         try:
             owner = self._vote(owner_field, "id")
-            if owner is None:
-                result = None
-            else:
+            owner_id = owner[0] if owner is not None else ""
+            owner_confidence = owner[1] if owner is not None else 0.0
+            if True:
                 quotes: dict[str, tuple[int, float]] = {}
                 ambiguous: set[str] = set()
                 for row in range(5):
@@ -114,17 +162,29 @@ class StallMarketDetector:
                                                    (114, 148 + dy, 176, 162 + dy)),
                                                   ((238, 119 + dy, 330, 139 + dy),
                                                    (274, 148 + dy, 336, 162 + dy))):
-                        name_field = self._crop(image, panel, name_rect)
-                        if name_field is None:
-                            continue
-                        name = self._vote(name_field, "name")
-                        if name is None:
+                        if dark_skin:
+                            # Leave a margin so the leading "1级" is not clipped.
+                            name_rect = (name_rect[0] - 4, name_rect[1], name_rect[2], name_rect[3])
+                        # The dark skin drifts a couple of pixels per row; try
+                        # small offsets so the last rows keep their level prefix.
+                        name = None
+                        price = None
+                        for offset in ((0, 2, 4) if dark_skin else (0,)):
+                            shifted_name = (name_rect[0], name_rect[1] + offset,
+                                            name_rect[2], name_rect[3] + offset)
+                            shifted_price = (price_rect[0], price_rect[1] + offset,
+                                             price_rect[2], price_rect[3] + offset)
+                            name_field = self._crop(image, panel, shifted_name)
+                            price_field = self._crop(image, panel, shifted_price)
+                            if name_field is None or price_field is None:
+                                continue
+                            name = self._vote(name_field, "name", dark_skin)
+                            price = self._vote(price_field, "price", dark_skin)
+                            if name is not None and price is not None:
+                                break
+                        if name is None or price is None:
                             continue
                         gem = name[0][2:]
-                        price_field = self._crop(image, panel, price_rect)
-                        price = self._vote(price_field, "price") if price_field is not None else None
-                        if price is None:
-                            continue
                         amount = int(price[0])
                         if gem in quotes and quotes[gem][0] != amount:
                             ambiguous.add(gem)
@@ -132,8 +192,8 @@ class StallMarketDetector:
                             quotes[gem] = amount, min(name[1], price[1])
                 for gem in ambiguous:
                     quotes.pop(gem, None)
-                result = (StallMarketReading(owner[0], tuple(sorted((name, price) for name, (price, _) in quotes.items())),
-                                             min([owner[1], *(confidence for _, confidence in quotes.values())]))
+                result = (StallMarketReading(owner_id, tuple(sorted((name, price) for name, (price, _) in quotes.items())),
+                                             min([owner_confidence, *(confidence for _, confidence in quotes.values())]))
                           if quotes else None)
         except Exception:  # noqa: BLE001 - optional market OCR cannot interrupt monitoring
             result = None
@@ -169,8 +229,13 @@ class OwnStallMarketDetector:
     def _vote(self, field: np.ndarray, kind: str) -> tuple[str, float] | None:
         gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
         candidates: list[tuple[str, float]] = []
-        for threshold in (70, 85, 100, 115, 130, 145, 160):
-            result = self.recognizer((gray < threshold).astype(np.uint8) * 255)
+        thresholds = ((70, 85, 100, 115, 130, 145, 160) if kind == "name"
+                      else (30, 40, 50, 60, 70, 80))
+        for threshold in thresholds:
+            if kind == "price":
+                result = self.recognizer(_normalize_mask(_price_mask(field, threshold)))
+            else:
+                result = self.recognizer(_normalize_mask((gray < threshold).astype(np.uint8) * 255))
             if result is None:
                 continue
             value, confidence = result

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import hashlib
 import os
 import shutil
@@ -12,6 +13,7 @@ import sys
 import time
 import uuid
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 
@@ -149,12 +151,13 @@ def perform_update(args: argparse.Namespace) -> int:
     process: subprocess.Popen[bytes] | None = None
     try:
         process = _launch(installed_executable, health_file)
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             if health_file.is_file():
                 shutil.rmtree(backup, ignore_errors=True)
                 shutil.rmtree(extracted, ignore_errors=True)
                 archive.unlink(missing_ok=True)
+                (updates_root / f"install-failed-{args.new_version}.json").unlink(missing_ok=True)
                 return 0
             if process.poll() is not None:
                 break
@@ -170,6 +173,28 @@ def perform_update(args: argparse.Namespace) -> int:
     finally:
         health_file.unlink(missing_ok=True)
 
+
+
+def record_failed_install(updates_root: Path, version: str | None) -> None:
+    """Remember a rolled-back install so the client can back off instead of looping."""
+    if not version:
+        return
+    path = updates_root / f"install-failed-{version}.json"
+    attempts = 1
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        attempts = int(previous.get("attempts", 0)) + 1
+    except (OSError, ValueError, TypeError):
+        attempts = 1
+    try:
+        updates_root.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": version, "attempts": attempts,
+                        "at": datetime.now(UTC).isoformat(timespec="seconds")}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -198,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return perform_update(args)
     except Exception as exc:  # noqa: BLE001 - updater must persist every failure
+        record_failed_install(Path(args.app_root).resolve() / "runtime" / "updates", args.new_version)
         try:
             root = Path(args.app_root).resolve()
             log = root / "runtime" / "updates" / "update.log"

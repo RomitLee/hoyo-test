@@ -62,11 +62,27 @@ from .inventory_app import (
 )
 from .models import Event
 from .panels import PANEL_NAMES
+
+# Panels that flash the small bottom-right confirmation toast.
+PANEL_TOAST_TITLES = {
+    "attributes": "已识别属性面板",
+    "stall": "已识别我的卖货摊位",
+    "stall_buy": "已识别我的收货摊位",
+    "trade": "已识别交易面板",
+    "give": "已识别给予面板",
+    "stall_other_buy": "已检测到他人收货摊位",
+}
 from .paths import application_root
 from .relay_client import SlaveRelayClient, make_event_payload
 from .screenshots import EVENT_SCREENSHOT_PANELS
 from .settings_dialog import SlaveSettingsDialog
-from .slave_settings import load_slave_settings, save_slave_settings
+from .slave_settings import (
+    load_slave_settings,
+    monitored_window_key,
+    normalize_monitored_windows,
+    plan_window_restore,
+    save_slave_settings,
+)
 from .wgc import (
     WindowOcclusionStatus,
     is_window_available,
@@ -160,6 +176,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._full_position = None
         self._closing = False
         self._authenticated = False
+        self._restore_deadline = 0.0
         self._build_ui()
         self.auth_client = DeviceAuthClient(self)
         self.auth_client.result.connect(self._on_auth_result)
@@ -431,6 +448,8 @@ class InventoryMonitorWindow(QMainWindow):
             title = self._window_titles[hwnd]
             if title != session.title:
                 self._update_session_identity(session, title)
+
+        self._restore_monitored_windows()
 
         available = [window for window in windows if window.hwnd not in self.sessions]
         self.add_window_button.setEnabled(bool(available) and len(self.sessions) < MAX_MONITORED_WINDOWS)
@@ -802,6 +821,9 @@ class InventoryMonitorWindow(QMainWindow):
         self.full_content.show()
         self._configure_relay()
         self._refresh_host_status()
+        if self.slave_settings.monitored_windows:
+            # Give the game windows a few minutes to come back after a restart.
+            self._restore_deadline = monotonic() + 300
         self.scan_timer.start()
         self.window_state_timer.start()
         self.occlusion_timer.start()
@@ -929,6 +951,59 @@ class InventoryMonitorWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, target=hwnd: self._add_window(target))
         menu.exec(self.add_window_button.mapToGlobal(self.add_window_button.rect().bottomLeft()))
 
+    def _remember_monitored_window(self, title: str, account: Any) -> None:
+        """Persist this window so a restart can add it back without the user."""
+        key = monitored_window_key(account.role_id, title)
+        entries = [item for item in self.slave_settings.monitored_windows
+                   if monitored_window_key(str(item.get("role_id", "")), str(item.get("title", ""))) != key]
+        entries.insert(0, {
+            "title": title,
+            "role_id": account.role_id or "",
+            "server": account.secondary_region or "",
+            "role_name": account.role_name or "",
+        })
+        self.slave_settings.monitored_windows = normalize_monitored_windows(entries)
+        try:
+            save_slave_settings(self.slave_settings)
+        except OSError:
+            pass
+
+    def _forget_monitored_window(self, title: str, account: Any) -> None:
+        key = monitored_window_key(account.role_id, title)
+        entries = [item for item in self.slave_settings.monitored_windows
+                   if monitored_window_key(str(item.get("role_id", "")), str(item.get("title", ""))) != key]
+        if len(entries) == len(self.slave_settings.monitored_windows):
+            return
+        self.slave_settings.monitored_windows = normalize_monitored_windows(entries)
+        try:
+            save_slave_settings(self.slave_settings)
+        except OSError:
+            pass
+
+    def _restore_monitored_windows(self) -> None:
+        """Re-add previously monitored windows after an update or restart."""
+        if not self._authenticated or not self.slave_settings.monitored_windows:
+            return
+        if self._restore_deadline <= 0 or monotonic() > self._restore_deadline:
+            return
+        if len(self.sessions) >= MAX_MONITORED_WINDOWS:
+            return
+        candidates = [
+            (hwnd, parse_account_info(title).role_id, title)
+            for hwnd, title in self._window_titles.items()
+            if hwnd not in self.sessions
+        ]
+        targets = plan_window_restore(self.slave_settings.monitored_windows, candidates)
+        restored = 0
+        for hwnd in targets[:MAX_MONITORED_WINDOWS - len(self.sessions)]:
+            self._add_window(hwnd)
+            if hwnd in self.sessions:
+                restored += 1
+        if restored:
+            self.log.appendPlainText(f"已自动恢复 {restored} 个正在监控的游戏窗口（无需手动添加）")
+        elif len(self.sessions) >= len(self.slave_settings.monitored_windows):
+            self._restore_deadline = 0.0
+
     def _add_window(self, hwnd: int) -> None:
         if not self._authenticated:
             return
@@ -963,6 +1038,7 @@ class InventoryMonitorWindow(QMainWindow):
             output_occlusion=output_occlusion,
         )
         self.sessions[hwnd] = session
+        self._remember_monitored_window(title, account)
         if account.role_id:
             # Persist first sight locally; the outbox retries even if this window closes immediately.
             self.relay_client.send_monitor_payload({
@@ -1023,7 +1099,7 @@ class InventoryMonitorWindow(QMainWindow):
             "QPushButton{min-height:18px;padding:0;border:0;color:#66768D;background:transparent;font-size:10px;}"
             "QPushButton:hover{color:#B42335;background:#FFE2E7;border-radius:5px;}"
         )
-        remove_button.clicked.connect(lambda _checked=False, target=hwnd: self._request_remove_window(target))
+        remove_button.clicked.connect(lambda _checked=False, target=hwnd: self._remove_window_clicked(target))
         header.addWidget(title, 1)
         header.addWidget(remove_button)
         panel_layout.addLayout(header)
@@ -1074,6 +1150,13 @@ class InventoryMonitorWindow(QMainWindow):
         available = any(hwnd not in self.sessions for hwnd in self._window_titles)
         self.add_window_button.setEnabled(available and len(self.sessions) < MAX_MONITORED_WINDOWS)
         self._refresh_mini_status()
+
+    def _remove_window_clicked(self, hwnd: int) -> None:
+        """User pressed the panel button: stop monitoring and forget the window."""
+        session = self.sessions.get(hwnd)
+        if session is not None:
+            self._forget_monitored_window(session.title, session.account)
+        self._request_remove_window(hwnd)
 
     def _request_remove_window(self, hwnd: int, reason: str = "") -> None:
         session = self.sessions.get(hwnd)
@@ -1237,10 +1320,24 @@ class InventoryMonitorWindow(QMainWindow):
         session = self.sessions.get(hwnd)
         if session is None or self.monitoring_paused:
             return
-        supplemental = getattr(event, "payload", {}).get("supplemental") is True
-        if (event.type == "panel_opened" and event.payload.get("panel_type") == "stall_other_buy"
+        payload = getattr(event, "payload", None) or {}
+        supplemental = payload.get("supplemental") is True
+        opened_panel = str(payload.get("panel_type") or "")
+        if ((event.type == "panel_opened" and opened_panel in PANEL_TOAST_TITLES)
                 or event.type == "market_stall_changed"):
             self._show_market_toast(session.account.secondary_region, event)
+        if event.type == "market_recognition":
+            self.relay_client.send_market_recognition({
+                "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
+                "status": event.payload.get("status", "ok"),
+                "server_name": session.account.secondary_region,
+                "observer_character_id": session.account.role_id or None,
+                "role_name": session.account.role_name,
+                "stall_owner_id": event.payload.get("stall_owner_id") or None,
+                "quotes": event.payload.get("quotes") or [],
+                "evidence_file": event.payload.get("evidence_file") or "",
+            })
+            return
         if event.type == "market_gem_quotes":
             self.relay_client.send_market_quotes({
                 "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
@@ -1300,7 +1397,7 @@ class InventoryMonitorWindow(QMainWindow):
             layout = QVBoxLayout(toast)
             layout.setContentsMargins(16, 12, 16, 12)
             layout.setSpacing(5)
-            self._market_toast_title = QLabel("已检测到他人摊位", toast)
+            self._market_toast_title = QLabel("已检测到他人收货摊位", toast)
             self._market_toast_title.setObjectName("toastTitle")
             self._market_toast_detail = QLabel(toast)
             self._market_toast_detail.setObjectName("toastDetail")
@@ -1313,6 +1410,8 @@ class InventoryMonitorWindow(QMainWindow):
         except ValueError:
             detected_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         assert self._market_toast_detail is not None and self._market_toast is not None
+        panel_type = str(event.payload.get("panel_type") or "")
+        self._market_toast_title.setText(PANEL_TOAST_TITLES.get(panel_type, "已检测到他人收货摊位"))
         self._market_toast_detail.setText(f"区服：{server_name or '未知区服'}\n检测时间：{detected_at}")
         self._market_toast.adjustSize()
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()

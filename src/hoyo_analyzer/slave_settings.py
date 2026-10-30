@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -45,6 +45,8 @@ class SlaveSettings:
     device_token: str = ""
     installation_id: str = ""
     pairing_code: str = ""
+    # Window identities that should be restored automatically after a restart.
+    monitored_windows: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def inventory_capacity_alert_enabled(self) -> bool:
@@ -90,8 +92,71 @@ class SlaveSettings:
             device_token=str(raw.get("device_token", "")).strip(),
             installation_id=str(raw.get("installation_id", "")).strip() or uuid4().hex,
             pairing_code=str(raw.get("pairing_code", "")).strip().upper(),
+            monitored_windows=normalize_monitored_windows(raw.get("monitored_windows")),
         )
 
+
+
+def normalize_monitored_windows(value: Any) -> list[dict[str, str]]:
+    """Keep at most eight sanitised window identities from the settings file."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip()[:255]
+        role_id = str(item.get("role_id", "")).strip()[:64]
+        if not title and not role_id:
+            continue
+        key = role_id or title
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "title": title,
+            "role_id": role_id,
+            "server": str(item.get("server", "")).strip()[:64],
+            "role_name": str(item.get("role_name", "")).strip()[:64],
+        })
+        if len(result) >= 8:
+            break
+    return result
+
+
+def monitored_window_key(role_id: str, title: str) -> str:
+    return role_id.strip() or title.strip()
+
+
+def matches_monitored_window(entry: dict[str, Any], role_id: str, title: str) -> bool:
+    """Prefer the game account id; fall back to the exact window title."""
+    saved_role = str(entry.get("role_id", "")).strip()
+    current_role = role_id.strip()
+    if saved_role and current_role:
+        return saved_role == current_role
+    saved_title = str(entry.get("title", "")).strip()
+    return bool(saved_title) and saved_title == title.strip()
+
+
+def plan_window_restore(
+    entries: list[dict[str, str]],
+    windows: list[tuple[int, str, str]],
+) -> list[int]:
+    """Pick one hwnd per saved identity; newer duplicates are ignored.
+
+    ``windows`` is ``[(hwnd, role_id, title), ...]`` for windows that are not
+    monitored yet, so the result can be handed straight to the add-window flow.
+    """
+    remaining = list(windows)
+    chosen: list[int] = []
+    for entry in entries:
+        for index, (hwnd, role_id, title) in enumerate(remaining):
+            if matches_monitored_window(entry, role_id, title):
+                chosen.append(hwnd)
+                remaining.pop(index)
+                break
+    return chosen
 
 def settings_path() -> Path:
     local_data = os.environ.get("LOCALAPPDATA")

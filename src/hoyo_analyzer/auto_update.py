@@ -14,6 +14,7 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any, Literal
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
@@ -198,6 +199,31 @@ class UpdateController(QObject):
         except Exception as exc:  # noqa: BLE001 - update failures must never terminate monitoring
             self._check_finished.emit(None, f"{type(exc).__name__}: {exc}")
 
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _recent_install_failure(version: str) -> bool:
+        """Skip a version that already failed twice within six hours."""
+        marker = application_root() / "runtime" / "updates" / f"install-failed-{version}.json"
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            attempts = int(data.get("attempts", 0))
+            failed_at = datetime.fromisoformat(str(data.get("at", "")))
+        except (OSError, ValueError, TypeError):
+            return False
+        if failed_at.tzinfo is None:
+            failed_at = failed_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) - failed_at > timedelta(hours=6):
+            marker.unlink(missing_ok=True)
+            return False
+        return attempts >= 2
+
     def _fetch_and_prepare(self) -> dict[str, Any] | None:
         request = Request(
             f"{UPDATE_MANIFEST_URL}/{self.role}",
@@ -212,6 +238,9 @@ class UpdateController(QObject):
             raise UpdateError("更新清单格式无效")
         package = select_update(document, self.role, self.current_version)
         if package is None:
+            return None
+        if self._recent_install_failure(str(package["client_version"])):
+            _write_update_log(f"{package['client_version']} 连续安装失败，已暂停自动重试 6 小时")
             return None
 
         manifest_origin = urlparse(UPDATE_MANIFEST_URL)
@@ -228,6 +257,13 @@ class UpdateController(QObject):
         download_dir.mkdir(parents=True, exist_ok=True)
         final_path = download_dir / f"{package['client_version']}-{self.role}.zip"
         temporary_path = final_path.with_suffix(".zip.part")
+        if final_path.is_file():
+            try:
+                if (final_path.stat().st_size == int(package["size"])
+                        and self._file_sha256(final_path) == str(package["sha256"]).lower()):
+                    return {**package, "archive": str(final_path), "helper": str(helper)}
+            except OSError:
+                pass
         digest = hashlib.sha256()
         received = 0
         download_request = Request(download_url, headers={"User-Agent": f"HoyoMonitor/{self.current_version}"})

@@ -1,5 +1,6 @@
 import os
 from itertools import pairwise
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +11,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from hoyo_analyzer import SLAVE_VERSION as __version__
+from hoyo_analyzer.config import AppConfig
 from hoyo_analyzer.inventory_app import (
     APP_NAME,
     MAX_MONITORED_WINDOWS,
+    InventoryMonitorWorker,
     _analysis_signal,
     is_mhxy_game_window_title,
     parse_account_info,
@@ -1093,3 +1096,259 @@ def test_sounding_desktop_alert_loops_until_user_closes_it(monkeypatch) -> None:
     finally:
         window.close()
         app.processEvents()
+
+
+class _RestoreStub:
+    """Minimal stand-in so the restore loop can be tested without a GUI window."""
+
+    def __init__(self, windows, saved, authenticated=True, deadline_in=30.0):
+        from hoyo_analyzer.slave_settings import SlaveSettings
+
+        self._authenticated = authenticated
+        self._window_titles = dict(windows)
+        self._restore_deadline = monotonic() + deadline_in
+        self.sessions = {}
+        self.slave_settings = SlaveSettings(monitored_windows=list(saved))
+        self.added = []
+        self.lines = []
+        self.log = SimpleNamespace(appendPlainText=self.lines.append)
+
+    def _add_window(self, hwnd):
+        self.added.append(hwnd)
+
+
+def test_saved_windows_are_restored_without_manual_steps() -> None:
+    first = "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])"
+    second = "梦幻西游 ONLINE - (广东3区[罗浮山] - 月下独酌[12345678])"
+    stub = _RestoreStub(
+        {101: first, 102: second},
+        [
+            {"title": second, "role_id": "12345678"},
+            {"title": first, "role_id": "54588235"},
+        ],
+    )
+    InventoryMonitorWindow._restore_monitored_windows(stub)
+    assert stub.added == [102, 101]
+
+
+def test_restore_is_skipped_before_login_or_after_deadline() -> None:
+    title = "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[54588235])"
+    saved = [{"title": "", "role_id": "54588235"}]
+
+    offline = _RestoreStub({101: title}, saved, authenticated=False)
+    InventoryMonitorWindow._restore_monitored_windows(offline)
+    assert offline.added == []
+
+    expired = _RestoreStub({101: title}, saved, deadline_in=-1)
+    InventoryMonitorWindow._restore_monitored_windows(expired)
+    assert expired.added == []
+
+def test_panel_toasts_cover_every_monitored_panel(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.auth_timer.stop()
+    shown: list[str] = []
+    try:
+        window._authenticated = True
+        window.sessions = {
+            123: SimpleNamespace(
+                account=SimpleNamespace(secondary_region="秦淮风光", role_name="测试角色", role_id="123456"),
+                minimized=False,
+                monitor_session_id="session-1",
+            )
+        }
+        monkeypatch.setattr(window, "_show_market_toast",
+                            lambda server, event: shown.append(str(event.payload.get("panel_type"))))
+        monkeypatch.setattr(window.relay_client, "send_monitor_payload", lambda *args, **kwargs: None)
+        for panel in ("attributes", "stall", "stall_buy", "trade", "give", "stall_other_buy"):
+            event = Event(
+                "panel-" + panel, 100, "panel_opened", confidence=1.0,
+                payload={"panel_type": panel, "message": "打开面板",
+                         "occurred_at": "2026-10-30T20:30:00+08:00"},
+            )
+            window._on_event(123, event)
+        assert shown == ["attributes", "stall", "stall_buy", "trade", "give", "stall_other_buy"]
+    finally:
+        window.sessions = {}
+        window.close()
+        app.processEvents()
+
+
+def test_toast_titles_cover_monitored_panels() -> None:
+    from hoyo_analyzer.multi_inventory_app import PANEL_TOAST_TITLES
+
+    assert PANEL_TOAST_TITLES == {
+        "attributes": "已识别属性面板",
+        "stall": "已识别我的卖货摊位",
+        "stall_buy": "已识别我的收货摊位",
+        "trade": "已识别交易面板",
+        "give": "已识别给予面板",
+        "stall_other_buy": "已检测到他人收货摊位",
+    }
+
+def test_recognition_events_merge_and_skip_transition_frames(monkeypatch) -> None:
+    worker = InventoryMonitorWorker(1, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[54588235])")
+    emitted = []
+    worker.event_for_window = SimpleNamespace(emit=lambda hwnd, event: emitted.append(event))
+
+    def recognition(quotes, owner="55440393"):
+        return Event("e-" + str(len(emitted)) + "-" + str(len(quotes)), 100, "market_recognition",
+                     payload={"occurred_at": "2026-10-31T01:53:00+08:00",
+                              "stall_owner_id": owner, "quotes": quotes, "status": "ok"})
+
+    full = [{"gem_name": "太阳石", "price_coins": 50000},
+            {"gem_name": "舍利子", "price_coins": 80000}]
+    try:
+        worker._emit_recognition(recognition(full))
+        worker._emit_recognition(recognition(full))
+        worker._emit_recognition(recognition([full[0]]))
+        worker._emit_recognition(recognition([], owner=""))
+        assert len(emitted) == 1
+        assert emitted[0].payload["status"] == "ok"
+        assert len(emitted[0].payload["quotes"]) == 2
+    finally:
+        worker.stop()
+
+def test_visit_merges_best_reading_and_keeps_ownerless_quotes(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    worker = InventoryMonitorWorker(1, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 捡币[1408633])")
+    worker._market_directory = tmp_path
+    try:
+        best = SimpleNamespace(owner_id="13779120",
+                               quotes=(("星辉石", 145000), ("舍利子", 82000)), confidence=.9)
+        state = {"pending": 0, "captured": 3, "best": best,
+                 "best_task": {"file": "", "occurred_at": "2026-10-31T02:20:58+08:00",
+                               "timestamp_ms": 10, "frame_index": 5}, "files": []}
+        quotes_event, recognition = worker._finish_market_visit_locked("v1", state)
+        assert quotes_event is not None
+        assert quotes_event.payload["stall_owner_id"] == "13779120"
+        assert len(quotes_event.payload["quotes"]) == 2
+        assert recognition.payload["status"] == "ok"
+
+        ownerless = SimpleNamespace(owner_id="", quotes=(("太阳石", 56000),), confidence=.4)
+        state = {"pending": 0, "captured": 3, "best": ownerless,
+                 "best_task": {"file": "", "occurred_at": "2026-10-31T02:21:00+08:00",
+                               "timestamp_ms": 11, "frame_index": 6}, "files": []}
+        quotes_event, recognition = worker._finish_market_visit_locked("v2", state)
+        assert quotes_event is None  # unknown merchant never enters peer statistics
+        assert recognition.payload["status"] == "ok"
+        assert recognition.payload["quotes"]
+
+        state = {"pending": 0, "captured": 1, "best": None, "best_task": None, "files": []}
+        quotes_event, recognition = worker._finish_market_visit_locked("v3", state)
+        assert quotes_event is None
+        assert recognition.payload["status"] == "short"
+    finally:
+        worker.stop()
+
+def test_own_stall_visit_emits_own_quote_event(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    worker = InventoryMonitorWorker(1, AppConfig(), "梦幻西游 ONLINE - (陕西区[大雁塔] - 店员章天翔[54784018])")
+    worker._market_directory = tmp_path
+    try:
+        reading = SimpleNamespace(owner_id="", quotes=(("太阳石", 51000), ("黑宝石", 146000)), confidence=.8)
+        state = {"pending": 0, "captured": 1, "best": reading,
+                 "best_task": {"file": "", "panel_type": "stall_buy",
+                               "occurred_at": "2026-10-31T06:09:03+08:00",
+                               "timestamp_ms": 10, "frame_index": 1}, "files": []}
+        quotes_event, recognition = worker._finish_market_visit_locked("own-1", state)
+        assert quotes_event is not None
+        assert quotes_event.type == "own_stall_gem_quotes"
+        assert len(quotes_event.payload["quotes"]) == 2
+        assert recognition is None
+    finally:
+        worker.stop()
+
+def test_own_stall_ocr_queue_emits_detected_quotes(tmp_path) -> None:
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (陕西区[大雁塔] - 店员章天翔[54784018])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    task = {
+        "id": "own-entry", "file": "own-entry.png", "bbox": [0, 0, 100, 100],
+        "panel_type": "stall_buy", "visit_id": "own-visit", "attempt": 0,
+        "timestamp_ms": 10, "frame_index": 1,
+        "occurred_at": "2026-10-31T06:09:03+08:00", "attempts": 0,
+    }
+    worker._market_queue = [dict(task)]
+    worker._visit_state["own-visit"] = {
+        "pending": 1, "captured": 1, "best": None, "best_task": None,
+        "files": [task["file"]],
+    }
+    future = Future()
+    reading = SimpleNamespace(
+        owner_id="", quotes=(("太阳石", 51000), ("黑宝石", 146000)), confidence=.8
+    )
+    future.set_result((task, reading))
+    future.market_task = task
+    worker._market_future = future
+    try:
+        worker._market_ocr_finished(future)
+        assert len(emitted) == 1
+        hwnd, event = emitted[0]
+        assert hwnd == 1
+        assert event.type == "own_stall_gem_quotes"
+        assert event.payload["quotes"] == [
+            {"gem_name": "太阳石", "price_coins": 51000},
+            {"gem_name": "黑宝石", "price_coins": 146000},
+        ]
+    finally:
+        worker.stop()
+
+
+def test_own_stall_quote_event_is_uploaded_with_character_context(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.auth_timer.stop()
+    uploaded = []
+    account = SimpleNamespace(
+        secondary_region="大雁塔", role_name="店员章天翔", role_id="54784018"
+    )
+    window._authenticated = True
+    window.sessions[0x1234] = SimpleNamespace(
+        account=account, minimized=False, monitor_session_id="session-1"
+    )
+    monkeypatch.setattr(window.relay_client, "send_own_stall_quotes", uploaded.append)
+    event = Event(
+        "own-quotes", 10, "own_stall_gem_quotes",
+        payload={
+            "occurred_at": "2026-10-31T06:09:03+08:00",
+            "quotes": [{"gem_name": "太阳石", "price_coins": 51000}],
+        },
+    )
+    try:
+        window._on_event(0x1234, event)
+        assert uploaded == [{
+            "event_id": "own-quotes",
+            "occurred_at": "2026-10-31T06:09:03+08:00",
+            "server_name": "大雁塔",
+            "role_name": "店员章天翔",
+            "character_id": "54784018",
+            "quotes": [{"gem_name": "太阳石", "price_coins": 51000}],
+        }]
+    finally:
+        window.sessions.clear()
+        window.close()
+        app.processEvents()
+
+
+def test_own_stall_signature_detects_price_edits() -> None:
+    base = bytes([120] * 1536)
+    assert not InventoryMonitorWorker._own_signature_differs(base, base)
+    edited = bytearray(base)
+    for index in range(0, 200):
+        edited[index] = 60
+    assert InventoryMonitorWorker._own_signature_differs(bytes(edited), base)

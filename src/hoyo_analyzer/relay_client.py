@@ -6,6 +6,7 @@ import json
 import logging
 import platform
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 from urllib.parse import urljoin
 from uuid import uuid4
@@ -85,7 +86,8 @@ class SlaveRelayClient(QObject):
             self._log_outbox = saved if isinstance(saved, list) else []
         except (OSError, ValueError):
             self._log_outbox = []
-        self._log_inflight = False
+        self._log_inflight: set[str] = set()
+        self._log_last_success = 0.0
         self._log_dirty = False
         self._log_timer = QTimer(self)
         self._log_timer.setInterval(5000)
@@ -196,6 +198,15 @@ class SlaveRelayClient(QObject):
         self._save_log_outbox()
         self._send_next_log()
 
+    def send_market_recognition(self, payload: dict[str, Any]) -> None:
+        evidence = payload.pop("evidence_file", "")
+        if evidence:
+            self.screenshots.enqueue(payload["event_id"], evidence, kind="recognition")
+        self._log_outbox.append({"device_id": self._device_id, "payload": payload,
+                                 "route": "market_recognition"})
+        self._save_log_outbox()
+        self._send_next_log()
+
     def send_own_stall_quotes(self, payload: dict[str, Any]) -> None:
         self._log_outbox.append({"device_id": self._device_id, "payload": payload, "route": "own_stall_quotes"})
         self._save_log_outbox()
@@ -230,21 +241,34 @@ class SlaveRelayClient(QObject):
             self._save_log_outbox()
         self._send_next_log()
 
+    # Recognition logs are diagnostic: a record that arrives minutes late is
+    # almost useless, so they jump ahead of queued monitor logs.
+    _ROUTE_PRIORITY = {"market_recognition": 0, "market_quotes": 1, "own_stall_quotes": 1, "cash": 2}
+
     def _send_next_log(self) -> None:
-        if not self.configured or self._log_inflight:
+        # Two slots: one stalled request must not hold up the whole outbox.
+        if not self.configured or len(self._log_inflight) >= 2:
             return
-        for item in self._log_outbox:
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for index, item in enumerate(self._log_outbox):
             if not item["device_id"]:
                 item["device_id"] = self._device_id
                 self._save_log_outbox()
-            if item["device_id"] == self._device_id:
-                self._log_inflight = True
-                path = ({"cash": "/api/v1/slave/cash-observations",
-                         "market_quotes": "/api/v1/slave/market-gem-quotes",
-                         "own_stall_quotes": "/api/v1/slave/own-stall-gem-quotes"}.get(item.get("route"),
-                                                                                 "/api/v1/slave/monitor-logs"))
-                self._post(path, item["payload"], "monitor_log")
-                return
+            if item["device_id"] != self._device_id:
+                continue
+            if item["payload"]["event_id"] in self._log_inflight:
+                continue
+            candidates.append((self._ROUTE_PRIORITY.get(item.get("route"), 3), index, item))
+        if not candidates:
+            return
+        _, _, item = min(candidates, key=lambda row: (row[0], row[1]))
+        self._log_inflight.add(item["payload"]["event_id"])
+        path = ({"cash": "/api/v1/slave/cash-observations",
+                 "market_quotes": "/api/v1/slave/market-gem-quotes",
+                 "own_stall_quotes": "/api/v1/slave/own-stall-gem-quotes",
+                 "market_recognition": "/api/v1/slave/market-recognition-logs"}.get(item.get("route"),
+                                                                         "/api/v1/slave/monitor-logs"))
+        self._post(path, item["payload"], "monitor_log")
 
     def flush_monitor_logs(self, timeout_ms: int = 2000) -> None:
         """Give normal shutdown a bounded chance to deliver; retain failures on disk."""
@@ -295,7 +319,7 @@ class SlaveRelayClient(QObject):
             )
         except Exception as exc:  # noqa: BLE001 - report network setup failures to the UI
             if kind == "monitor_log":
-                self._log_inflight = False
+                self._log_inflight.discard(payload["event_id"])
             message = f"无法发起 HTTPS 请求：{exc}"
             self._set_online(False, message)
             if kind == "event":
@@ -309,7 +333,7 @@ class SlaveRelayClient(QObject):
             reply.setProperty("log_event_id", payload["event_id"])
         timeout_timer = QTimer(reply)
         timeout_timer.setSingleShot(True)
-        timeout_timer.setInterval(12_000)
+        timeout_timer.setInterval(8_000)
         timeout_timer.timeout.connect(lambda current=reply: self._on_reply_timeout(current))
         reply.setProperty("relay_timeout_timer", timeout_timer)
         reply.finished.connect(lambda current=reply: self._on_finished(current))
@@ -329,7 +353,7 @@ class SlaveRelayClient(QObject):
             return
         reply.setProperty("relay_timed_out", True)
         if str(reply.property("relay_kind")) == "monitor_log":
-            self._log_inflight = False
+            self._log_inflight.discard(str(reply.property("log_event_id")))
         message = "连接超时，请检查云端地址、网络或 HTTPS 证书"
         self._set_online(False, message)
         if str(reply.property("relay_kind")) == "event":
@@ -368,13 +392,40 @@ class SlaveRelayClient(QObject):
                     message = "云端返回的数据格式不正确"
         reply.deleteLater()
         if kind == "monitor_log":
-            self._log_inflight = False
+            log_id = reply.property("log_event_id")
+            self._log_inflight.discard(str(log_id))
             if success:
-                log_id = reply.property("log_event_id")
+                self._log_last_success = monotonic()
                 self._log_outbox = [item for item in self._log_outbox
                                     if item["payload"]["event_id"] != log_id]
                 self._save_log_outbox()
                 self.screenshots.retry()
+                self._send_next_log()
+            else:
+                item = next((entry for entry in self._log_outbox
+                             if entry["payload"]["event_id"] == log_id), None)
+                if item is not None:
+                    item["failures"] = int(item.get("failures", 0)) + 1
+                    item.setdefault("first_fail_at", monotonic())
+                    recent_success = self._log_last_success > item["first_fail_at"]
+                    # A permanently rejected or poisoned item must not block the
+                    # queue: after repeated failures while other items succeed,
+                    # drop it so newer logs get through.
+                    if item["failures"] >= 5 and recent_success:
+                        self._log_outbox.remove(item)
+                        logging.getLogger(__name__).warning(
+                            "丢弃反复失败的监控日志：%s（%s 次）", log_id, item["failures"])
+                        self._save_log_outbox()
+                        self._send_next_log()
+            if not success and status in {400, 413, 415, 422}:
+                # The server will never accept this item; dropping it keeps the
+                # rest of the queue moving instead of retrying forever.
+                before = len(self._log_outbox)
+                self._log_outbox = [item for item in self._log_outbox
+                                    if item["payload"]["event_id"] != log_id]
+                if len(self._log_outbox) != before:
+                    logging.getLogger(__name__).warning("丢弃被服务端拒绝的监控日志：%s (%s)", log_id, status)
+                    self._save_log_outbox()
                 self._send_next_log()
         if success:
             if kind in {"heartbeat", "profile", "status"} and data.get("display_name"):

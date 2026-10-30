@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event as ThreadEvent
 from threading import Lock
-from time import monotonic
+from time import monotonic, time as wall_time
 from typing import Any, ClassVar
 from uuid import uuid4
 
@@ -68,7 +68,7 @@ MAX_MONITORED_WINDOWS = 8
 # never run in the per-window capture loop, otherwise panel-open events wait
 # behind OCR and multiple windows amplify the delay.  A small shared pool keeps
 # the UI/capture threads responsive without letting OCR saturate the machine.
-_MARKET_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hoyo-market-ocr")
+_MARKET_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hoyo-market-ocr")
 _PANEL_DETAIL_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hoyo-panel-detail")
 
 
@@ -166,6 +166,18 @@ class InventoryMonitorWorker(QObject):
         self._market_directory = application_root() / "runtime" / "market-ocr-queue" / identity
         self._market_manifest = self._market_directory / "queue.json"
         self._market_queue = self._load_market_queue()
+        self._recognition_lock = Lock()
+        self._recognition_recent: dict[str, tuple[tuple[tuple[str, int], ...], float]] = {}
+        self._recognition_last_ok = 0.0
+        self._market_settle_ms: int | None = None
+        self._market_visit: dict[str, Any] | None = None
+        self._visit_state: dict[str, dict[str, Any]] = {}
+        self._finished_visits: set[str] = set()
+        self._visit_traces: dict[str, dict[str, Any]] = {}
+        self._own_pending_sig: bytes | None = None
+        self._own_stable = 0
+        self._own_active_sig: bytes | None = None
+        self._own_last_enqueue_ms: int | None = None
         self._detail_futures: set[Future] = set()
 
     def request_live_snapshot(self, request_id: str = "") -> None:
@@ -221,8 +233,29 @@ class InventoryMonitorWorker(QObject):
         temporary.write_text(json.dumps(self._market_queue, ensure_ascii=False), encoding="utf-8")
         temporary.replace(self._market_manifest)
 
+    @staticmethod
+    def _own_stall_signature(image: Any, panel: PanelObservation) -> bytes | None:
+        if panel.bbox is None:
+            return None
+        x, y, right, bottom = (int(value) for value in panel.bbox)
+        bottom = min(bottom, image.shape[0])
+        right = min(right, image.shape[1])
+        if right - x < 20 or bottom - y < 20:
+            return None
+        field = image[max(0, y):bottom, max(0, x):right]
+        gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, (48, 32), interpolation=cv2.INTER_AREA).tobytes()
+
+    @staticmethod
+    def _own_signature_differs(left: bytes | None, right: bytes | None) -> bool:
+        if left is None or right is None:
+            return left is not right
+        changed = sum(1 for a, b in zip(left, right) if abs(a - b) > 8)
+        return changed >= max(24, len(left) // 12)
+
     def _enqueue_market_visit(self, image: Any, panel: PanelObservation,
-                              timestamp_ms: int, frame_index: int) -> None:
+                              timestamp_ms: int, frame_index: int,
+                              visit_id: str = "", attempt: int = 0) -> None:
         if panel.bbox is None:
             return
         entry_id = uuid4().hex
@@ -235,12 +268,28 @@ class InventoryMonitorWorker(QObject):
             (self._market_directory / filename).write_bytes(data.tobytes())
             entry = {
                 "id": entry_id, "file": filename, "bbox": list(panel.bbox),
-                "panel_type": panel.panel_type,
+                "panel_type": panel.panel_type, "visit_id": visit_id or entry_id,
+                "attempt": attempt,
                 "timestamp_ms": timestamp_ms, "frame_index": frame_index,
                 "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"), "attempts": 0,
             }
             with self._market_lock:
                 self._market_queue.append(entry)
+                state = self._visit_state.setdefault(entry["visit_id"], {
+                    "pending": 0, "captured": 0, "best": None, "best_task": None, "files": [],
+                })
+                state["pending"] += 1
+                state["captured"] += 1
+                state["files"].append(filename)
+                trace = self._visit_traces.get(entry["visit_id"])
+                if trace is not None:
+                    trace["captures"].append({
+                        "attempt": attempt,
+                        "at": wall_time(),
+                        "at_iso": entry["occurred_at"],
+                        "frame": frame_index,
+                        "bytes": len(data.tobytes()),
+                    })
                 self._save_market_queue_locked()
                 if self._market_future is None:
                     self._submit_market_ocr_locked()
@@ -265,6 +314,7 @@ class InventoryMonitorWorker(QObject):
         future.add_done_callback(self._market_ocr_finished)
 
     def _run_market_ocr(self, task: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        task["ocr_started_at"] = wall_time()
         path = self._market_directory / Path(task["file"]).name
         image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
@@ -272,7 +322,9 @@ class InventoryMonitorWorker(QObject):
         panel_type = task.get("panel_type", "stall_other_buy")
         panel = PanelObservation(panel_type, 1.0, tuple(int(value) for value in task["bbox"]))
         detector = self._own_stall_detector if panel_type == "stall_buy" else self._market_detector
-        return task, detector.analyze(image, panel)
+        reading = detector.analyze(image, panel)
+        task["ocr_finished_at"] = wall_time()
+        return task, reading
 
     def _market_ocr_finished(self, future: Future) -> None:
         task: dict[str, Any] | None = getattr(future, "market_task", None)
@@ -282,49 +334,217 @@ class InventoryMonitorWorker(QObject):
             task, reading = future.result()
         except Exception:  # noqa: BLE001 - optional OCR must not interrupt monitoring
             failed = True
-        event: Event | None = None
+
+        quotes_event: Event | None = None
+        recognition: Event | None = None
         with self._market_lock:
             self._market_future = None
             current = self._market_queue[0] if self._market_queue else None
+            if task is not None:
+                task.setdefault("ocr_finished_at", wall_time())
             if current is not None and (task is None or current["id"] == task["id"]):
+                visit_id = str(current.get("visit_id") or current["id"])
+                if visit_id in self._finished_visits:
+                    self._market_queue.pop(0)
+                    try:
+                        (self._market_directory / Path(current["file"]).name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    if not self._stop_requested.is_set():
+                        self._submit_market_ocr_locked()
+                    return
+                state = self._visit_state.setdefault(visit_id, {
+                    "pending": 1, "captured": 1, "best": None, "best_task": None,
+                    "files": [current["file"]],
+                })
                 if failed:
                     current["attempts"] = int(current.get("attempts", 0)) + 1
                     if current["attempts"] < 3:
                         self._save_market_queue_locked()
+                        task = None
                     else:
-                        task = self._market_queue.pop(0)
+                        self._market_queue.pop(0)
+                        state["pending"] = max(0, state["pending"] - 1)
                 else:
-                    task = self._market_queue.pop(0)
+                    self._market_queue.pop(0)
+                    state["pending"] = max(0, state["pending"] - 1)
+                    trace = self._visit_traces.get(visit_id)
+                    if trace is not None and current.get("panel_type") != "stall_buy":
+                        started = current.get("ocr_started_at")
+                        finished = current.get("ocr_finished_at")
+                        trace["ocr"].append({
+                            "attempt": current.get("attempt", 0),
+                            "queued_at": wall_time(),
+                            "started_at": started,
+                            "finished_at": finished,
+                            "wait_ms": round((started - wall_time()) * 1000) if started else None,
+                            "duration_ms": round((finished - started) * 1000) if started and finished else None,
+                            "quotes": len(getattr(reading, "quotes", ()) or ()),
+                            "owner": getattr(reading, "owner_id", "") or "",
+                            "failed": failed,
+                        })
+                    # Both own and other stalls need their best OCR frame kept;
+                    # only the recognition-trace bookkeeping above is exclusive
+                    # to other-player stalls.
                     if reading is not None:
-                        own_stall = task.get("panel_type") == "stall_buy"
-                        event = Event(
-                            uuid4().hex, int(task["timestamp_ms"]),
-                            "own_stall_gem_quotes" if own_stall else "market_gem_quotes",
-                            confidence=reading.confidence,
-                            payload={
-                                "quotes": [{"gem_name": name, "price_coins": price}
-                                           for name, price in reading.quotes],
-                                "occurred_at": task["occurred_at"],
-                                **({} if own_stall else {"stall_owner_id": reading.owner_id}),
-                            }, evidence_frame_index=int(task["frame_index"]),
-                        )
+                        best = state.get("best")
+                        if best is None or len(reading.quotes) > len(best.quotes):
+                            state["best"] = reading
+                            state["best_task"] = dict(current)
+                best = state.get("best")
+                ready = (best is not None and best.quotes and str(getattr(best, "owner_id", "") or ""))
+                if state["pending"] == 0 or (ready and not state.get("done")):
+                    state["done"] = True
+                    self._finished_visits.add(visit_id)
+                    if len(self._finished_visits) > 64:
+                        self._finished_visits.pop()
+                    self._market_queue = [item for item in self._market_queue
+                                          if str(item.get("visit_id")) != visit_id]
+                    quotes_event, recognition = self._finish_market_visit_locked(visit_id, state)
                 self._save_market_queue_locked()
-                if task is not None and (not failed or int(task.get("attempts", 0)) >= 3):
+                if task is not None:
                     try:
-                        (self._market_directory / Path(task["file"]).name).unlink(missing_ok=True)
+                        (self._market_directory / Path(current["file"]).name).unlink(missing_ok=True)
                     except OSError:
                         pass
             if not self._stop_requested.is_set():
                 self._submit_market_ocr_locked()
-        if event is not None:
+
+        if quotes_event is not None:
             account = parse_account_info(self.window_title)
-            event.payload.setdefault("window_hwnd", self.hwnd)
-            event.payload.setdefault("window_title", self.window_title)
-            event.payload.setdefault("secondary_region", account.secondary_region)
-            event.payload.setdefault("role_name", account.role_name)
-            event.payload.setdefault("role_id", account.role_id)
-            self.event_ready.emit(event)
-            self.event_for_window.emit(self.hwnd, event)
+            quotes_event.payload.setdefault("window_hwnd", self.hwnd)
+            quotes_event.payload.setdefault("window_title", self.window_title)
+            quotes_event.payload.setdefault("secondary_region", account.secondary_region)
+            quotes_event.payload.setdefault("role_name", account.role_name)
+            quotes_event.payload.setdefault("role_id", account.role_id)
+            self.event_ready.emit(quotes_event)
+            self.event_for_window.emit(self.hwnd, quotes_event)
+        if recognition is not None:
+            recognition.payload.setdefault("window_hwnd", self.hwnd)
+            recognition.payload.setdefault("window_title", self.window_title)
+            account = parse_account_info(self.window_title)
+            recognition.payload.setdefault("secondary_region", account.secondary_region)
+            recognition.payload.setdefault("role_name", account.role_name)
+            recognition.payload.setdefault("role_id", account.role_id)
+            self._emit_recognition(recognition)
+
+    def _finish_market_visit_locked(self, visit_id: str, state: dict[str, Any]) -> tuple[Event | None, Event | None]:
+        """Build one quote event plus one recognition record for the whole visit."""
+        best = state.get("best")
+        best_task = state.get("best_task") or {}
+        captured = int(state.get("captured", 1))
+        owner = str(getattr(best, "owner_id", "") or "")
+        quotes = [{"gem_name": name, "price_coins": price} for name, price in
+                  (best.quotes if best is not None else [])]
+        occurred_at = best_task.get("occurred_at") or datetime.now(UTC).isoformat(timespec="milliseconds")
+        timestamp_ms = int(best_task.get("timestamp_ms") or 0)
+        frame_index = int(best_task.get("frame_index") or 0)
+
+        own_stall = str(best_task.get("panel_type") or "") == "stall_buy"
+        quotes_event = None
+        if quotes and own_stall:
+            # Own stall prices have no merchant id; they must still reach the
+            # console, otherwise editing a price never updates the web page.
+            quotes_event = Event(
+                uuid4().hex, timestamp_ms, "own_stall_gem_quotes",
+                confidence=best.confidence,
+                payload={"quotes": quotes, "occurred_at": occurred_at},
+                evidence_frame_index=frame_index,
+            )
+        # Without a readable owner the quote cannot be attributed to a merchant;
+        # keep it in the recognition log instead of dropping the whole visit.
+        elif quotes and owner:
+            quotes_event = Event(
+                uuid4().hex, timestamp_ms, "market_gem_quotes",
+                confidence=best.confidence,
+                payload={"quotes": quotes, "occurred_at": occurred_at, "stall_owner_id": owner},
+                evidence_frame_index=frame_index,
+            )
+        evidence_file = ""
+        if best is not None and best_task:
+            evidence_file = self._save_evidence_frame(best_task.get("file", ""))
+        status = "ok" if quotes else ("short" if captured < 3 else "empty")
+        trace = self._visit_traces.pop(visit_id, None)
+        if trace is not None:
+            trace["finalize_at"] = wall_time()
+            trace["chosen_attempt"] = int(best_task.get("attempt", 0) or 0)
+            trace["captured"] = captured
+            trace["status"] = status
+            trace["quote_count"] = len(quotes)
+            trace["evidence_file"] = Path(evidence_file).name if evidence_file else ""
+            if evidence_file:
+                trace["evidence_at"] = wall_time()
+        if own_stall:
+            return quotes_event, None
+        recognition = Event(
+            uuid4().hex, timestamp_ms, "market_recognition",
+            confidence=best.confidence if best is not None else 0.0,
+            payload={
+                "occurred_at": occurred_at,
+                "stall_owner_id": owner,
+                "quotes": quotes,
+                "status": status,
+                "evidence_file": evidence_file,
+                "attempts": captured,
+                "trace": trace,
+            }, evidence_frame_index=frame_index,
+        )
+        for name in state.get("files", []):
+            try:
+                (self._market_directory / Path(name).name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._visit_state.pop(visit_id, None)
+        return quotes_event, recognition
+
+    def _save_evidence_frame(self, filename: str) -> str:
+        """Keep the exact OCR frame as a JPEG for the recognition log."""
+        if not filename:
+            return ""
+        source = self._market_directory / Path(filename).name
+        try:
+            image = cv2.imdecode(np.fromfile(source, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                return ""
+            encoded, data = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if not encoded:
+                return ""
+            target_dir = application_root() / "runtime" / "screenshot-outbox"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{uuid4().hex}.jpg"
+            target.write_bytes(data.tobytes())
+            return str(target)
+        except (OSError, cv2.error):
+            return ""
+
+    def _emit_recognition(self, event: Event) -> None:
+        """Keep one useful record per stall visit and drop transition frames."""
+        quotes = tuple(sorted((str(item["gem_name"]), int(item["price_coins"]))
+                              for item in event.payload.get("quotes") or []))
+        owner = str(event.payload.get("stall_owner_id") or "")
+        now = monotonic()
+        with self._recognition_lock:
+            if not quotes:
+                # A frame captured mid-fade: ignore when this stall just read.
+                if now - self._recognition_last_ok < 8:
+                    return
+                event.payload["status"] = "empty"
+            else:
+                previous = self._recognition_recent.get(owner)
+                if previous is not None:
+                    previous_quotes, previous_at = previous
+                    if now - previous_at < 120 and (
+                        quotes == previous_quotes or set(quotes) <= set(previous_quotes)
+                    ):
+                        return
+                self._recognition_recent[owner] = (quotes, now)
+                self._recognition_last_ok = now
+                event.payload["status"] = "ok"
+                if len(self._recognition_recent) > 32:
+                    oldest = min(self._recognition_recent,
+                                 key=lambda key: self._recognition_recent[key][1])
+                    self._recognition_recent.pop(oldest, None)
+        self.event_for_window.emit(self.hwnd, event)
 
     def _schedule_panel_detail(self, event: Event, image: Any, panel: PanelObservation) -> None:
         """Run attributes/recipient OCR after the fast panel event has been confirmed."""
@@ -535,13 +755,54 @@ class InventoryMonitorWorker(QObject):
                         event.payload.get("panel_type") == "stall_other_buy"
                         and event.type in {"panel_opened", "market_stall_changed"}
                         for event in panel_events + visit_events
-                    ):
-                        # One lossless image per confirmed visit.  The durable
-                        # FIFO survives restarts and never lets later stalls
-                        # overwrite earlier, still-unprocessed stalls.
-                        self._enqueue_market_visit(
-                            packet.image, panel, packet.timestamp_ms, packet.frame_index
-                        )
+                    ) and self._market_visit is None:
+                        # Three captures per visit: the first stable frame plus
+                        # two retries, so a slow fade-in or a fast page flip
+                        # cannot turn a readable stall into an empty result.
+                        self._market_visit = {"id": uuid4().hex, "start_ms": packet.timestamp_ms, "attempt": 0}
+                        self._visit_traces[self._market_visit["id"]] = {
+                            "visit_id": self._market_visit["id"],
+                            "panel_at": wall_time(),
+                            "captures": [],
+                            "ocr": [],
+                        }
+                    visit = self._market_visit
+                    if visit is not None:
+                        if panel.panel_type != "stall_other_buy":
+                            self._market_visit = None
+                        elif (visit["attempt"] < 3
+                              and packet.timestamp_ms - visit["start_ms"] >= 400 * (visit["attempt"] + 1)):
+                            self._enqueue_market_visit(
+                                packet.image, panel, packet.timestamp_ms, packet.frame_index,
+                                visit["id"], visit["attempt"],
+                            )
+                            visit["attempt"] += 1
+                            if visit["attempt"] >= 3:
+                                self._market_visit = None
+                    if panel.panel_type == "stall_buy" and panel_tracker.stable == "stall_buy":
+                        signature = self._own_stall_signature(packet.image, panel)
+                        if signature is not None:
+                            if self._own_signature_differs(signature, self._own_pending_sig):
+                                self._own_pending_sig, self._own_stable = signature, 1
+                            else:
+                                self._own_stable += 1
+                            throttled = (self._own_last_enqueue_ms is not None
+                                         and packet.timestamp_ms - self._own_last_enqueue_ms < 3000)
+                            changed = (self._own_stable >= 2
+                                       and self._own_signature_differs(signature, self._own_active_sig))
+                            fallback = (self._own_last_enqueue_ms is None
+                                        or packet.timestamp_ms - self._own_last_enqueue_ms >= 30_000)
+                            if (changed or fallback) and not throttled:
+                                self._own_active_sig = signature
+                                self._own_last_enqueue_ms = packet.timestamp_ms
+                                self._enqueue_market_visit(
+                                    packet.image, panel, packet.timestamp_ms, packet.frame_index
+                                )
+                    elif panel.panel_type != "stall_buy":
+                        self._own_pending_sig = None
+                        self._own_stable = 0
+                        self._own_active_sig = None
+                        self._own_last_enqueue_ms = None
                     if any(
                         event.type == "panel_opened" and event.payload.get("panel_type") == "stall_buy"
                         for event in panel_events

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -88,7 +89,7 @@ def test_role_manifest_is_bound_to_role_and_independent_version(monkeypatch):
 def test_compatibility_uses_protocol_instead_of_equal_versions():
     from hoyo_analyzer import MASTER_VERSION, SLAVE_VERSION, client_version, slave_protocol
     assert client_version("master") == MASTER_VERSION == "V2.3.0"
-    assert client_version("slave") == SLAVE_VERSION == "V2.17.0"
+    assert client_version("slave") == SLAVE_VERSION == "V2.18.15"
     assert slave_protocol({"app_version": "V2.0.0"}) == 1
     assert slave_protocol({"app_version": "V1.9.0"}) == 1
     assert slave_protocol({"app_version": "V9.0.0", "protocol_version": 1}) == 1
@@ -105,7 +106,36 @@ def test_controller_uses_own_role_version(monkeypatch):
     master = auto_update.UpdateController("master")
     slave.timer.stop()
     master.timer.stop()
-    assert slave.current_version == "V2.17.0"
+    assert slave.current_version == "V2.18.15"
     assert master.current_version == "V2.3.0"
     slave.deleteLater()
     master.deleteLater()
+
+def test_update_backs_off_after_repeated_install_failures(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(auto_update, "application_root", lambda: tmp_path)
+    updates = tmp_path / "runtime" / "updates"
+    updates.mkdir(parents=True)
+    marker = updates / "install-failed-V2.18.1.json"
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+
+    marker.write_text(json.dumps({"version": "V2.18.1", "attempts": 2, "at": now}), encoding="utf-8")
+    assert auto_update.UpdateController._recent_install_failure("V2.18.1")
+    assert not auto_update.UpdateController._recent_install_failure("V2.18.0")
+
+    marker.write_text(json.dumps({"version": "V2.18.1", "attempts": 1, "at": now}), encoding="utf-8")
+    assert not auto_update.UpdateController._recent_install_failure("V2.18.1")
+
+    old = (datetime.now(UTC) - timedelta(hours=7)).isoformat(timespec="seconds")
+    marker.write_text(json.dumps({"version": "V2.18.1", "attempts": 5, "at": old}), encoding="utf-8")
+    assert not auto_update.UpdateController._recent_install_failure("V2.18.1")
+    assert not marker.exists()
+
+
+def test_failed_install_marker_counts_attempts(tmp_path) -> None:
+    from hoyo_analyzer.updater import record_failed_install
+
+    record_failed_install(tmp_path, "V2.18.1")
+    record_failed_install(tmp_path, "V2.18.1")
+    data = json.loads((tmp_path / "install-failed-V2.18.1.json").read_text(encoding="utf-8"))
+    assert data["attempts"] == 2
+    assert data["version"] == "V2.18.1"
