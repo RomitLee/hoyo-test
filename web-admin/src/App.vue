@@ -42,6 +42,16 @@ const pages: { key: Page; label: string; hint: string; icon: string }[] = [
 const statusLabels: Record<string, string> = { full: '背包已满', almost_full: '接近满格', not_full: '背包未满', inventory_closed: '背包未打开', window_closed: '窗口已关闭', waiting: '等待检测', unknown: '未知状态' }
 const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', stall_sold: '商品售出', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
 const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '卖货摊位', stall_buy: '收货摊位', stall_records: '摊位记录面板', stall_other_buy: '他人收货摊位' }
+type EventScreenshotPanel = 'give' | 'trade' | 'attributes' | 'stall' | 'stall_buy' | 'stall_other_buy'
+type LiveScreenshotSettings = { interval_minutes: number; event_screenshots: Record<EventScreenshotPanel, boolean> }
+const eventScreenshotOptions: { key: EventScreenshotPanel; label: string }[] = [
+  { key: 'give', label: '给予面板' },
+  { key: 'trade', label: '交易面板' },
+  { key: 'attributes', label: '属性面板' },
+  { key: 'stall', label: '我的卖货摊位' },
+  { key: 'stall_buy', label: '我的收购摊位' },
+  { key: 'stall_other_buy', label: '他人收货摊位' },
+]
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
 const settingsTabs: { key: SettingsTab; label: string; hint: string }[] = [
   { key: 'alerts', label: '告警规则', hint: '阈值与提醒项目' },
@@ -86,6 +96,14 @@ const historyCharacter = ref('')
 const historyHasMore = ref(false)
 const historyBusy = ref(false)
 const snapshotInterval = ref(5)
+const eventScreenshots = reactive<Record<EventScreenshotPanel, boolean>>({
+  give: true,
+  trade: true,
+  attributes: true,
+  stall: true,
+  stall_buy: true,
+  stall_other_buy: true,
+})
 const thumbnails = reactive<Record<string, string>>({})
 const thumbnailDates = reactive<Record<string, string>>({})
 const thumbnailExpiresAt = reactive<Record<string, number>>({})
@@ -346,7 +364,7 @@ async function loadSettings() {
       api<Policy>('/api/v1/master/monitor-log-settings'),
       api<Bark>('/api/v1/master/notifications/bark'),
       api<{ account: { display_name?: string; username?: string } }>('/api/v1/master/account'),
-      api<{ interval_minutes: number }>('/api/v1/master/live-screenshot-settings'),
+      api<LiveScreenshotSettings>('/api/v1/master/live-screenshot-settings'),
     ])
     Object.assign(policy, storedPolicy)
     Object.assign(bark, storedBark)
@@ -354,6 +372,7 @@ async function loadSettings() {
     if (!webSound.value) stopSound()
     else if (alarmAudio && !alarmAudio.paused) soundReady.value = true
     snapshotInterval.value = liveSettings.interval_minutes
+    for (const option of eventScreenshotOptions) eventScreenshots[option.key] = liveSettings.event_screenshots?.[option.key] ?? true
     accountName.value = account.account?.display_name || account.account?.username || username.value
   } catch (cause) { fail(cause) }
 }
@@ -531,9 +550,13 @@ async function savePolicy() {
 async function saveSnapshotInterval() {
   busy.value = true
   try {
-    const result = await api<{ interval_minutes: number }>('/api/v1/master/live-screenshot-settings', json('PUT', { interval_minutes: snapshotInterval.value }))
+    const result = await api<LiveScreenshotSettings>('/api/v1/master/live-screenshot-settings', json('PUT', {
+      interval_minutes: snapshotInterval.value,
+      event_screenshots: eventScreenshots,
+    }))
     snapshotInterval.value = result.interval_minutes
-    notice.value = `截图周期已设为 ${result.interval_minutes} 分钟`
+    for (const option of eventScreenshotOptions) eventScreenshots[option.key] = result.event_screenshots[option.key]
+    notice.value = `窗口截图设置已保存，自动截图周期为 ${result.interval_minutes} 分钟`
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause) }
   finally { busy.value = false }
 }
@@ -766,7 +789,16 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
                 <form class="form-grid" @submit.prevent="saveSnapshotInterval">
                   <label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label>
                   <p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p>
-                  <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存截图周期</button></div>
+                  <div class="alert-rule">
+                    <strong>事件触发截图</strong>
+                    <p class="hint">仅勾选的面板会截图并上传；未勾选时事件日志仍正常上报。自动周期截图和手动实时截图不受影响。</p>
+                    <div class="role-mode-choices">
+                      <label v-for="option in eventScreenshotOptions" :key="option.key" class="check">
+                        <input v-model="eventScreenshots[option.key]" type="checkbox"> {{ option.label }}
+                      </label>
+                    </div>
+                  </div>
+                  <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存窗口截图设置</button></div>
                 </form>
               </Panel>
               <Panel title="遮挡日志上报" meta="账号级设置">

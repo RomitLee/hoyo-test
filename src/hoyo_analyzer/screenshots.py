@@ -17,12 +17,12 @@ from .paths import application_root
 
 logger = logging.getLogger(__name__)
 MAX_BYTES = 2 * 1024 * 1024
+EVENT_SCREENSHOT_PANELS = ("give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy")
 
 
-def capture_panel_screenshot(event, image) -> str | None:
-    if event.payload.get("panel_type") not in {
-        "give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy"
-    }:
+def capture_panel_screenshot(event, image, enabled_panels=EVENT_SCREENSHOT_PANELS) -> str | None:
+    panel_type = event.payload.get("panel_type")
+    if panel_type not in EVENT_SCREENSHOT_PANELS or panel_type not in enabled_panels:
         return None
     if event.type not in {"panel_opened", "market_stall_changed"} and not (
         event.type == "panel_target_changed" and event.payload.get("panel_type") in {"give", "trade"}

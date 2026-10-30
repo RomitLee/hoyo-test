@@ -20,6 +20,7 @@ from hoyo_analyzer.inventory_app import (
 from hoyo_analyzer.inventory_fullness import InventoryAnalysis, InventoryStatus, SlotResult, SlotState
 from hoyo_analyzer.multi_inventory_app import InventoryMonitorWindow
 from hoyo_analyzer.models import Event
+from hoyo_analyzer.screenshots import EVENT_SCREENSHOT_PANELS
 from hoyo_analyzer.slave_settings import SlaveSettings
 from hoyo_analyzer.wgc import OccludingWindow, WindowInfo, WindowOcclusionStatus
 
@@ -178,6 +179,70 @@ def test_periodic_screenshots_are_dispatched_one_window_at_a_time(monkeypatch) -
         app.processEvents()
 
 
+def test_live_control_applies_event_screenshot_panels_to_all_workers(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.auth_timer.stop()
+    received: list[frozenset[str]] = []
+    try:
+        window._authenticated = True
+        window.monitoring_paused = True
+        window.sessions = {
+            first: SimpleNamespace(
+                removing=False,
+                worker=SimpleNamespace(set_event_screenshot_panels=received.append),
+            )
+            for first in (1, 2)
+        }
+        enabled = {"give": True, "stall_other_buy": True}
+
+        window._on_live_control(
+            {
+                "interval_minutes": 12,
+                "event_screenshots": {
+                    panel: enabled.get(panel, False) for panel in EVENT_SCREENSHOT_PANELS
+                },
+            }
+        )
+
+        expected = frozenset({"give", "stall_other_buy"})
+        assert window._event_screenshot_panels == expected
+        assert received == [expected, expected]
+    finally:
+        window.sessions = {}
+        window.close()
+        app.processEvents()
+
+
+def test_live_control_without_event_screenshot_settings_preserves_all_panels(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
+    window = InventoryMonitorWindow()
+    window.auth_timer.stop()
+    received: list[frozenset[str]] = []
+    try:
+        window._authenticated = True
+        window.monitoring_paused = True
+        window._event_screenshot_panels = frozenset()
+        window.sessions = {
+            1: SimpleNamespace(
+                removing=False,
+                worker=SimpleNamespace(set_event_screenshot_panels=received.append),
+            )
+        }
+
+        window._on_live_control({"interval_minutes": 5})
+
+        expected = frozenset(EVENT_SCREENSHOT_PANELS)
+        assert window._event_screenshot_panels == expected
+        assert received == [expected]
+    finally:
+        window.sessions = {}
+        window.close()
+        app.processEvents()
+
+
 def test_login_gate_blocks_monitoring_until_verified_and_logout_stops_it(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
@@ -214,6 +279,7 @@ def test_login_gate_blocks_monitoring_until_verified_and_logout_stops_it(monkeyp
         assert not window._authenticated and window.login_content.isVisible()
         assert not window.relay_client.configured
         assert not window.scan_timer.isActive() and not window.status_timer.isActive()
+        assert not window._event_screenshot_panels
         assert saved[-1] == ""
     finally:
         window.close()

@@ -181,9 +181,20 @@ class WindowStatusSnapshotIn(BaseModel):
     windows: list[WindowStatusIn] = Field(default_factory=list, max_length=8)
 
 
+class EventScreenshotSettingsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    give: bool = True
+    trade: bool = True
+    attributes: bool = True
+    stall: bool = True
+    stall_buy: bool = True
+    stall_other_buy: bool = True
+
+
 class LiveSnapshotSettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     interval_minutes: int = Field(ge=1, le=60, strict=True)
+    event_screenshots: EventScreenshotSettingsIn | None = None
 
 
 class LiveSnapshotUploadIn(BaseModel):
@@ -1060,17 +1071,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return f"{base}/{capture_id}.jpg" if capture_id else f"{base}.jpg"
 
     @app.get("/api/v1/master/live-screenshot-settings")
-    def get_live_settings(account_id: int = Depends(authenticate_master)) -> dict[str, int]:
-        return {"interval_minutes": database.snapshot_interval(account_id)}
+    def get_live_settings(account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return database.snapshot_settings(account_id)
 
     @app.put("/api/v1/master/live-screenshot-settings")
-    def put_live_settings(payload: LiveSnapshotSettingsIn, account_id: int = Depends(authenticate_master)) -> dict[str, int]:
-        return {"interval_minutes": database.set_snapshot_interval(account_id, payload.interval_minutes)}
+    def put_live_settings(payload: LiveSnapshotSettingsIn, account_id: int = Depends(authenticate_master)) -> dict[str, Any]:
+        return database.set_snapshot_settings(
+            account_id,
+            payload.interval_minutes,
+            payload.event_screenshots.model_dump() if payload.event_screenshots is not None else None,
+        )
 
     @app.get("/api/v1/slave/live-screenshots/control")
     def live_control(identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008
-        return {"interval_minutes": database.snapshot_interval(identity.account_id),
-                "requests": database.snapshot_requests(identity.device_id)}
+        return {
+            **database.snapshot_settings(identity.account_id),
+            "requests": database.snapshot_requests(identity.device_id),
+        }
 
     @app.post("/api/v1/slave/live-screenshots/permission")
     def live_permission(payload: LiveSnapshotPermissionIn, identity: DeviceIdentity = Depends(authenticate_device)) -> dict[str, Any]:  # noqa: B008

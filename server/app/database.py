@@ -16,6 +16,9 @@ from .gem_config import default_gem_settings
 from .panel_log_merge import BOUNDARY_TYPES, POSITION, merge_confirmation, remember_confirmation, target_message
 
 
+EVENT_SCREENSHOT_PANELS = ("give", "trade", "attributes", "stall", "stall_buy", "stall_other_buy")
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
@@ -83,7 +86,13 @@ class RelayDatabase:
                 );
                 CREATE TABLE IF NOT EXISTS live_snapshot_settings (
                     account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-                    interval_minutes INTEGER NOT NULL DEFAULT 5
+                    interval_minutes INTEGER NOT NULL DEFAULT 5,
+                    give INTEGER NOT NULL DEFAULT 1,
+                    trade INTEGER NOT NULL DEFAULT 1,
+                    attributes INTEGER NOT NULL DEFAULT 1,
+                    stall INTEGER NOT NULL DEFAULT 1,
+                    stall_buy INTEGER NOT NULL DEFAULT 1,
+                    stall_other_buy INTEGER NOT NULL DEFAULT 1
                 );
                 CREATE TABLE IF NOT EXISTS live_snapshots (
                     device_id TEXT NOT NULL, window_id TEXT NOT NULL,
@@ -254,6 +263,8 @@ class RelayDatabase:
             for name, kind in (("cash", "INTEGER"), ("bank_money", "INTEGER"), ("money_confirmed_at", "TEXT"), ("money_readable", "INTEGER NOT NULL DEFAULT 0")):
                 self._ensure_column(connection, "device_window_status", name, kind)
             self._ensure_column(connection, "live_snapshot_history", "event_type", "TEXT")
+            for name in EVENT_SCREENSHOT_PANELS:
+                self._ensure_column(connection, "live_snapshot_settings", name, "INTEGER NOT NULL DEFAULT 1")
             for name in ("last_device_id", "last_window_id", "last_seen_at"):
                 self._ensure_column(connection, "game_role_accounts", name, "TEXT")
             self._ensure_column(connection, "game_role_accounts", "monitor_session_id", "TEXT")
@@ -1706,6 +1717,48 @@ class RelayDatabase:
         with self._connect() as connection:
             row = connection.execute("SELECT interval_minutes FROM live_snapshot_settings WHERE account_id=?", (account_id,)).fetchone()
         return int(row[0]) if row else 5
+
+    def snapshot_settings(self, account_id: int) -> dict[str, Any]:
+        fields = ", ".join(("interval_minutes", *EVENT_SCREENSHOT_PANELS))
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {fields} FROM live_snapshot_settings WHERE account_id=?", (account_id,)
+            ).fetchone()
+        if not row:
+            return {
+                "interval_minutes": 5,
+                "event_screenshots": {name: True for name in EVENT_SCREENSHOT_PANELS},
+            }
+        return {
+            "interval_minutes": int(row["interval_minutes"]),
+            "event_screenshots": {name: bool(row[name]) for name in EVENT_SCREENSHOT_PANELS},
+        }
+
+    def set_snapshot_settings(
+        self, account_id: int, minutes: int, event_panels: dict[str, bool] | None = None
+    ) -> dict[str, Any]:
+        if event_panels is None:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO live_snapshot_settings(account_id,interval_minutes) VALUES (?,?) "
+                    "ON CONFLICT(account_id) DO UPDATE SET interval_minutes=excluded.interval_minutes",
+                    (account_id, minutes),
+                )
+            return self.snapshot_settings(account_id)
+        columns = ("account_id", "interval_minutes", *EVENT_SCREENSHOT_PANELS)
+        values = (account_id, minutes, *(int(event_panels[name]) for name in EVENT_SCREENSHOT_PANELS))
+        updates = ", ".join(f"{name}=excluded.{name}" for name in columns[1:])
+        with self._connect() as connection:
+            connection.execute(
+                f"INSERT INTO live_snapshot_settings({','.join(columns)}) "
+                f"VALUES ({','.join('?' for _ in columns)}) "
+                f"ON CONFLICT(account_id) DO UPDATE SET {updates}",
+                values,
+            )
+        return {
+            "interval_minutes": minutes,
+            "event_screenshots": {name: bool(event_panels[name]) for name in EVENT_SCREENSHOT_PANELS},
+        }
 
     def set_snapshot_interval(self, account_id: int, minutes: int) -> int:
         with self._connect() as connection:

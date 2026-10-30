@@ -64,6 +64,7 @@ from .models import Event
 from .panels import PANEL_NAMES
 from .paths import application_root
 from .relay_client import SlaveRelayClient, make_event_payload
+from .screenshots import EVENT_SCREENSHOT_PANELS
 from .settings_dialog import SlaveSettingsDialog
 from .slave_settings import load_slave_settings, save_slave_settings
 from .wgc import (
@@ -170,6 +171,7 @@ class InventoryMonitorWindow(QMainWindow):
         self.relay_client.live_screenshots.control_received.connect(self._on_live_control)
         self.relay_client.live_screenshots.upload_failed.connect(self.log.appendPlainText)
         self._live_interval_minutes = 5
+        self._event_screenshot_panels = frozenset(EVENT_SCREENSHOT_PANELS)
         self._last_live_capture: dict[int, float] = {}
         self._seen_live_requests: set[str] = set()
         self._live_capture_queue: list[int] = []
@@ -819,6 +821,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._capacity_modes = frozenset({"buy"})
         self._cash_low_modes = frozenset({"buy"})
         self._own_stall_character_ids = frozenset()
+        self._event_screenshot_panels = frozenset()
         self._shown_local_alerts.clear()
         self.scan_timer.stop()
         self.window_state_timer.stop()
@@ -944,6 +947,7 @@ class InventoryMonitorWindow(QMainWindow):
         thread.setProperty("window_hwnd", hwnd)
         worker = InventoryMonitorWorker(hwnd, self.config, title)
         worker.set_paused(self.monitoring_paused)
+        worker.set_event_screenshot_panels(self._event_screenshot_panels)
         worker.moveToThread(thread)
         session = MonitorSession(
             hwnd=hwnd,
@@ -1623,6 +1627,18 @@ class InventoryMonitorWindow(QMainWindow):
             self._live_interval_minutes = max(1, min(60, interval))
         except (TypeError, ValueError):
             self._live_interval_minutes = 5
+        event_screenshots = control.get("event_screenshots")
+        if isinstance(event_screenshots, dict):
+            self._event_screenshot_panels = frozenset(
+                panel for panel in EVENT_SCREENSHOT_PANELS if event_screenshots.get(panel) is True
+            )
+        else:
+            # Older servers did not send this field; preserve their prior all-enabled behavior.
+            self._event_screenshot_panels = frozenset(EVENT_SCREENSHOT_PANELS)
+        for session in self.sessions.values():
+            setter = getattr(session.worker, "set_event_screenshot_panels", None)
+            if setter is not None:
+                setter(self._event_screenshot_panels)
         for item in control.get("requests", []):
             request_id = str(item.get("request_id") or "")
             window_id = str(item.get("window_id") or "")

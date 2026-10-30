@@ -13,7 +13,7 @@ from PySide6.QtNetwork import QNetworkReply
 from PySide6.QtWidgets import QApplication
 
 from hoyo_analyzer.models import Event
-from hoyo_analyzer.screenshots import ScreenshotUploader, capture_panel_screenshot
+from hoyo_analyzer.screenshots import EVENT_SCREENSHOT_PANELS, ScreenshotUploader, capture_panel_screenshot
 
 
 @pytest.fixture(scope="module")
@@ -65,6 +65,23 @@ def test_capture_disk_failure_does_not_interrupt_recognition(tmp_path, monkeypat
         )
         is None
     )
+
+
+def test_only_enabled_event_panels_create_screenshot_files(tmp_path, monkeypatch):
+    monkeypatch.setattr("hoyo_analyzer.screenshots.application_root", lambda: tmp_path)
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    disabled = Event("disabled", 100, "panel_opened", payload={"panel_type": "give"})
+
+    assert capture_panel_screenshot(disabled, image, {"trade"}) is None
+    assert disabled.evidence_path is None
+    assert not (tmp_path / "runtime" / "screenshot-outbox").exists()
+
+    enabled = Event("enabled", 200, "panel_opened", payload={"panel_type": "trade"})
+    path = capture_panel_screenshot(enabled, image, {"trade", "attributes"})
+
+    assert path == enabled.evidence_path
+    assert Path(path).is_file()
+    assert len(EVENT_SCREENSHOT_PANELS) == 6
 
 
 def test_queue_survives_restart_failure_and_never_uses_another_device(app, tmp_path, monkeypatch):

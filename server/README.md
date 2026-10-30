@@ -54,7 +54,7 @@
 - `DELETE /api/v1/master/devices/{device_id}`：移除从机并撤销凭据。
 - `POST /api/v1/master/devices/{device_id}/reissue`：撤销旧凭据并生成重新配对码。
 - `GET /api/v1/master/status`：读取当前账号的从机和全部游戏窗口状态。
-- `GET/PUT /api/v1/master/live-screenshot-settings`：读取或设置账号自动截图周期，1～60 分钟。
+- `GET/PUT /api/v1/master/live-screenshot-settings`：读取或设置账号自动截图周期（1～60 分钟）及事件截图面板开关；`event_screenshots` 包含 `give`、`trade`、`attributes`、`stall`、`stall_buy`、`stall_other_buy`，旧客户端省略该字段时保留原开关。
 - `GET /api/v1/slave/live-screenshots/control`：从机获取周期与待执行的即时截图请求。
 - `POST /api/v1/slave/live-screenshots/permission`：取得仅针对单张截图对象的 COS 上传链接；新版从机每张截图携带独立 `capture_id`，旧版从机仍可使用原固定对象链接。
 - `POST /api/v1/slave/live-screenshots/complete`：直传后登记截图时间和窗口关联，服务端检查对象存在。

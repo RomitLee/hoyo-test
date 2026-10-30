@@ -1,11 +1,14 @@
+import sqlite3
 from datetime import UTC, datetime
 
+from app.database import EVENT_SCREENSHOT_PANELS, RelayDatabase
 from app.config import Settings
 from app.main import create_app
 from fastapi.testclient import TestClient
 
 MASTER = {"Authorization": "Bearer " + "m" * 40}
 SLAVE = {"Authorization": "Bearer " + "s" * 40, "X-Device-ID": "slave"}
+ALL_EVENT_SCREENSHOTS = {panel: True for panel in EVENT_SCREENSHOT_PANELS}
 
 
 class Store:
@@ -30,16 +33,39 @@ def test_live_screenshot_settings_direct_upload_and_force_request(tmp_path):
     store = Store()
     app.state.screenshots = store
     with TestClient(app) as client:
-        assert client.get("/api/v1/master/live-screenshot-settings", headers=MASTER).json() == {"interval_minutes": 5}
+        assert client.get("/api/v1/master/live-screenshot-settings", headers=MASTER).json() == {
+            "interval_minutes": 5,
+            "event_screenshots": ALL_EVENT_SCREENSHOTS,
+        }
         for invalid in (0, 61, 1.5, "5"):
             assert client.put("/api/v1/master/live-screenshot-settings", headers=MASTER,
                               json={"interval_minutes": invalid}).status_code == 422
-        assert client.put("/api/v1/master/live-screenshot-settings", headers=MASTER,
-                          json={"interval_minutes": 12}).json() == {"interval_minutes": 12}
+        enabled_panels = {**ALL_EVENT_SCREENSHOTS, "give": False, "stall_other_buy": False}
+        settings = client.put("/api/v1/master/live-screenshot-settings", headers=MASTER,
+                              json={"interval_minutes": 12, "event_screenshots": enabled_panels})
+        assert settings.status_code == 200
+        assert settings.json() == {"interval_minutes": 12, "event_screenshots": enabled_panels}
+        assert client.put(
+            "/api/v1/master/live-screenshot-settings",
+            headers=MASTER,
+            json={"interval_minutes": 12, "event_screenshots": {**enabled_panels, "unknown": True}},
+        ).status_code == 422
+        legacy_save = client.put(
+            "/api/v1/master/live-screenshot-settings",
+            headers=MASTER,
+            json={"interval_minutes": 11},
+        )
+        assert legacy_save.status_code == 200
+        assert legacy_save.json() == {
+            "interval_minutes": 11,
+            "event_screenshots": enabled_panels,
+        }
         window = {"window_id": "hwnd:42", "character_id": "123456", "updated_at": datetime.now(UTC).isoformat(), "monitoring": True}
         assert client.post("/api/v1/slave/status", headers=SLAVE,
                            json={"reported_at": window["updated_at"], "windows": [window]}).status_code == 202
-        assert client.get("/api/v1/slave/live-screenshots/control", headers=SLAVE).json()["interval_minutes"] == 12
+        control = client.get("/api/v1/slave/live-screenshots/control", headers=SLAVE).json()
+        assert control["interval_minutes"] == 11
+        assert control["event_screenshots"] == enabled_panels
         assert client.post("/api/v1/slave/live-screenshots/permission", headers=SLAVE,
                            json={"window_id": "hwnd:missing"}).status_code == 404
         permission = client.post("/api/v1/slave/live-screenshots/permission", headers=SLAVE,
@@ -84,3 +110,20 @@ def test_live_screenshot_settings_direct_upload_and_force_request(tmp_path):
         older = client.get(f"/api/v1/master/live-screenshots/history?character_id=123456&before={newest['id']}", headers=MASTER)
         assert len(older.json()["items"]) == 1
         assert client.get(f"/api/v1/master/live-screenshots/history/{newest['id']}/view").status_code == 401
+
+
+def test_legacy_snapshot_settings_gain_all_event_screenshot_panels(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE live_snapshot_settings (account_id INTEGER PRIMARY KEY, interval_minutes INTEGER NOT NULL)"
+        )
+        connection.execute("INSERT INTO live_snapshot_settings VALUES (1, 9)")
+
+    database = RelayDatabase(path)
+    database.initialize()
+
+    assert database.snapshot_settings(1) == {
+        "interval_minutes": 9,
+        "event_screenshots": ALL_EVENT_SCREENSHOTS,
+    }

@@ -31,7 +31,7 @@ from .panel_targets import PanelTargetDetector, attach_target, target_payload
 from .panels import PanelDetector, PanelObservation, PanelTracker
 from .paths import application_root, resolve_application_path
 from .sampler import AdaptiveSampler, SamplingProfile
-from .screenshots import capture_panel_screenshot
+from .screenshots import EVENT_SCREENSHOT_PANELS, capture_panel_screenshot
 from .stamina import StaminaDetector
 from .stall_stock import StallStockDetector, StallStockTracker
 from .stall_market import OwnStallMarketDetector, StallMarketDetector, StallVisitTracker
@@ -156,6 +156,8 @@ class InventoryMonitorWorker(QObject):
         self._source: Any | None = None
         self._snapshot_lock = Lock()
         self._snapshot_request: str | None = None
+        self._event_screenshot_lock = Lock()
+        self._enabled_event_screenshot_panels = frozenset(EVENT_SCREENSHOT_PANELS)
         self._market_lock = Lock()
         self._market_detector = StallMarketDetector()
         self._own_stall_detector = OwnStallMarketDetector()
@@ -179,6 +181,18 @@ class InventoryMonitorWorker(QObject):
             self._pause_requested.set()
         else:
             self._pause_requested.clear()
+
+    def set_event_screenshot_panels(self, panels) -> None:
+        """Update which event panel types are allowed to create screenshots."""
+
+        with self._event_screenshot_lock:
+            self._enabled_event_screenshot_panels = frozenset(
+                panel for panel in panels if panel in EVENT_SCREENSHOT_PANELS
+            )
+
+    def _event_screenshot_panels(self) -> frozenset[str]:
+        with self._event_screenshot_lock:
+            return self._enabled_event_screenshot_panels
 
     def stop(self) -> None:
         self._stop_requested.set()
@@ -571,7 +585,7 @@ class InventoryMonitorWorker(QObject):
                         event.payload.setdefault("secondary_region", account.secondary_region)
                         event.payload.setdefault("role_name", account.role_name)
                         event.payload.setdefault("role_id", account.role_id)
-                        capture_panel_screenshot(event, packet.image)
+                        capture_panel_screenshot(event, packet.image, self._event_screenshot_panels())
                         sink.write(event)
                         if event.type in {"panel_opened", "panel_closed", "game_default", "panel_target_changed"}:
                             text_path = event_log_path.with_name("panel_events.log")
