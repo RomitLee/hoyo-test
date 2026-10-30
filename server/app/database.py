@@ -1112,6 +1112,14 @@ class RelayDatabase:
             )
             return cursor.rowcount > 0
 
+    def own_stall_character_ids(self, account_id: int) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT character_id FROM own_stall_gem_quotes WHERE account_id=? ORDER BY character_id",
+                (account_id,),
+            ).fetchall()
+        return [str(row["character_id"]) for row in rows]
+
     def get_gem_settings(self, account_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
@@ -1426,20 +1434,24 @@ class RelayDatabase:
                                 character_id: str | None, reported_mode: str | None) -> bool:
         settings = self.get_bark_settings(account_id)
         if event_type in {"inventory_full", "inventory_capacity"}:
-            enabled, modes = settings["capacity_enabled"], settings["capacity_modes"]
+            enabled = settings["capacity_enabled"]
         elif event_type == "cash_low":
-            enabled, modes = settings["cash_low_enabled"], settings["cash_low_modes"]
+            enabled = settings["cash_low_enabled"]
         else:
             return True
         if not enabled:
             return False
-        mode = reported_mode if isinstance(reported_mode, str) and reported_mode in {"buy", "sell", "unknown"} else None
-        if mode is None and character_id:
-            with self._connect() as connection:
-                role = connection.execute("""SELECT stall_mode FROM game_role_accounts
-                    WHERE account_id=? AND character_id=?""", (account_id, character_id)).fetchone()
-            mode = str(role["stall_mode"]) if role else None
-        return (mode or "unknown") in modes
+        # Legacy clients may omit the game ID. Keep accepting those events for
+        # protocol compatibility; current clients always include it and are
+        # filtered against the authoritative "My Stalls" list below.
+        if not character_id:
+            return True
+        with self._connect() as connection:
+            own_stall = connection.execute(
+                "SELECT 1 FROM own_stall_gem_quotes WHERE account_id=? AND character_id=? LIMIT 1",
+                (account_id, character_id),
+            ).fetchone()
+        return own_stall is not None
 
     def bark_notification_for_event(self, account_id: int, event_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1519,6 +1531,7 @@ class RelayDatabase:
                 "cash_low_enabled": alerts["cash_low_enabled"],
                 "capacity_modes": alerts["capacity_modes"],
                 "cash_low_modes": alerts["cash_low_modes"],
+                "own_stall_character_ids": self.own_stall_character_ids(account_id),
                 "stamina_full_enabled": alerts["stamina_full_enabled"],
                 "stall_sold_enabled": alerts["stall_sold_enabled"],
             },

@@ -30,6 +30,15 @@ def master_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {MASTER_TOKEN}"}
 
 
+def register_own_stall(client: TestClient, character_id: str = "123456") -> None:
+    response = client.post("/api/v1/slave/own-stall-gem-quotes", headers=device_headers(), json={
+        "event_id": f"own-{character_id}", "occurred_at": "2026-10-27T17:59:00+08:00",
+        "server_name": "秦淮风光", "role_name": "清风知夏", "character_id": character_id,
+        "quotes": [{"gem_name": "光芒石", "price_coins": 22000}],
+    })
+    assert response.status_code == 202
+
+
 def test_market_gem_statistics_keep_every_merchant_quote(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         route = "/api/v1/slave/market-gem-quotes"
@@ -231,6 +240,7 @@ def test_public_update_manifest_and_download(tmp_path: Path) -> None:
 
 def test_event_round_trip_and_duplicate_is_idempotent(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
+        register_own_stall(client, "54588235")
         assert client.get("/healthz").json()["status"] == "ok"
         payload = {
             "event_id": "slave-01:20260929:0001",
@@ -323,6 +333,7 @@ def test_bark_settings_test_and_new_event_push(tmp_path: Path, monkeypatch) -> N
 
     monkeypatch.setattr(main_module, "send_bark_notification", fake_send)
     with make_client(tmp_path) as client:
+        register_own_stall(client)
         settings = client.get("/api/v1/master/notifications/bark", headers=master_headers())
         assert settings.status_code == 200
         assert settings.json()["configured"] is False
@@ -377,6 +388,7 @@ def test_cash_low_event_push_contains_amount_and_rejects_non_low_amount(tmp_path
     sent = []
     monkeypatch.setattr(main_module, "send_bark_notification", lambda *args, **kwargs: sent.append(kwargs))
     with make_client(tmp_path) as client:
+        register_own_stall(client)
         assert client.put(
             "/api/v1/master/notifications/bark", headers=master_headers(),
             json={"enabled": True, "device_key": "BarkDeviceKey123"},
@@ -394,7 +406,7 @@ def test_cash_low_event_push_contains_amount_and_rejects_non_low_amount(tmp_path
         assert client.post("/api/v1/slave/events", headers=device_headers(), json=event).status_code == 422
 
 
-def test_capacity_and_cash_alert_switches_filter_role_modes(tmp_path: Path) -> None:
+def test_capacity_and_cash_alerts_follow_my_stall_membership(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         settings = client.get("/api/v1/master/notifications/bark", headers=master_headers()).json()
         assert settings["capacity_enabled"] is True and settings["cash_low_enabled"] is True
@@ -412,23 +424,11 @@ def test_capacity_and_cash_alert_switches_filter_role_modes(tmp_path: Path) -> N
             assert response.status_code == 202
             return response.json()
 
-        assert report("inventory_full", "sell", 1)["ignored"] is True
-        assert report("cash_low", "unknown", 2)["ignored"] is True
-        status = client.post("/api/v1/slave/status", headers=device_headers(), json={
-            "reported_at": "2026-10-27T18:00:00+08:00",
-            "windows": [{"window_id": "hwnd:1", "character_id": "123456", "status": "not_full",
-                         "monitoring": True, "monitor_session_id": "1234567890abcdef1234567890abcdef",
-                         "stall_panel_type": "stall", "updated_at": "2026-10-27T18:00:00+08:00"}],
-        })
-        assert status.status_code == 202
-        legacy = client.post("/api/v1/slave/events", headers=device_headers(), json={
-            "event_id": "role-filter-legacy", "event_type": "inventory_full",
-            "character_id": "123456", "occurred_at": "2026-10-27T18:00:00+08:00",
-            "empty_slots": 0,
-        })
-        assert legacy.status_code == 202 and legacy.json()["ignored"] is True
-        assert report("inventory_full", "buy", 3)["duplicate"] is False
-        assert report("cash_low", "buy", 4)["duplicate"] is False
+        assert report("inventory_full", "buy", 1)["ignored"] is True
+        assert report("cash_low", "buy", 2)["ignored"] is True
+        register_own_stall(client)
+        assert report("inventory_full", "unknown", 3)["duplicate"] is False
+        assert report("cash_low", "sell", 4)["duplicate"] is False
 
         updated = client.put("/api/v1/master/notifications/bark", headers=master_headers(),
                              json={"enabled": False, "capacity_enabled": False,
@@ -468,6 +468,7 @@ def test_account_alert_delivery_settings_reach_slave_and_survive_legacy_bark_upd
             "local_alert_enabled": True, "capacity_threshold": 3, "cash_threshold_wan": 500,
             "capacity_enabled": True, "cash_low_enabled": False,
             "capacity_modes": ["buy", "unknown"], "cash_low_modes": ["buy"],
+            "own_stall_character_ids": [],
             "stamina_full_enabled": True,
             "stall_sold_enabled": True,
         }

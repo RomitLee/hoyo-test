@@ -544,6 +544,7 @@ def test_enabled_capacity_alert_reports_full_inventory_to_host(monkeypatch) -> N
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    window._own_stall_character_ids = frozenset({account.role_id})
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None,
                               stall_mode="buy")
     sent: list[tuple[str, dict[str, object]]] = []
@@ -567,6 +568,7 @@ def test_capacity_alert_is_reported_even_when_local_sound_is_disabled(monkeypatc
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    window._own_stall_character_ids = frozenset({account.role_id})
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None,
                               stall_mode="buy")
     sent: list[str] = []
@@ -593,9 +595,11 @@ def test_slave_applies_account_alert_settings_without_using_local_alert_mode(mon
         assert window._capacity_threshold == 4
         window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 99, "cash_threshold_wan": 500})
         assert window._local_alert_enabled is True and window._capacity_threshold == 4
-        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 0, "cash_threshold_wan": 300})
+        window._apply_alert_settings({"local_alert_enabled": False, "capacity_threshold": 0, "cash_threshold_wan": 300,
+                                      "own_stall_character_ids": ["54588235"]})
         assert window._local_alert_enabled is False and window._capacity_threshold == 0
         assert window._cash_threshold_wan == 300
+        assert window._own_stall_character_ids == frozenset({"54588235"})
     finally:
         window.close()
         app.processEvents()
@@ -607,6 +611,7 @@ def test_cash_low_alert_uses_fresh_confirmed_cash_and_rearms_after_recovery(monk
     window = InventoryMonitorWindow()
     window._cash_threshold_wan = 500
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    window._own_stall_character_ids = frozenset({account.role_id})
     session = SimpleNamespace(account=account, cash_alert_active=False, stall_mode="buy")
     sent = []
     local = []
@@ -631,7 +636,7 @@ def test_cash_low_alert_uses_fresh_confirmed_cash_and_rearms_after_recovery(monk
         app.processEvents()
 
 
-def test_capacity_and_cash_alerts_apply_selected_role_modes(monkeypatch) -> None:
+def test_capacity_and_cash_alerts_apply_only_to_my_stall_roles(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
@@ -648,7 +653,7 @@ def test_capacity_and_cash_alerts_apply_selected_role_modes(monkeypatch) -> None
         window._update_cash_alert(session, cash)
         assert sent == []
 
-        session.stall_mode = "buy"
+        window._own_stall_character_ids = frozenset({account.role_id})
         window._update_capacity_alert(session, capacity, 30.0)
         window._update_capacity_alert(session, capacity, 35.0)
         window._update_cash_alert(session, cash)
@@ -724,6 +729,7 @@ def test_account_local_switch_plays_alarm_after_five_seconds(monkeypatch) -> Non
     window._local_alert_enabled = True
     window._capacity_threshold = 3
     account = parse_account_info("[梦幻西游 ONLINE - (江苏1区[秦淮风光] - 清风知夏[54588235])]")
+    window._own_stall_character_ids = frozenset({account.role_id})
     session = SimpleNamespace(account=account, capacity_alert_active=False, capacity_candidate_since=None,
                               stall_mode="buy")
     sent: list[tuple[str, dict[str, object]]] = []

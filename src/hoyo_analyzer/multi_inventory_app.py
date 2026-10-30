@@ -141,6 +141,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._cash_low_enabled = True
         self._capacity_modes = frozenset({"buy"})
         self._cash_low_modes = frozenset({"buy"})
+        self._own_stall_character_ids: frozenset[str] = frozenset()
         self._shown_local_alerts: set[int] = set()
         self.sessions: dict[int, MonitorSession] = {}
         self.alerts: set[QMessageBox] = set()
@@ -662,8 +663,12 @@ class InventoryMonitorWindow(QMainWindow):
         valid_modes = {"buy", "sell", "unknown"}
         capacity_modes = raw.get("capacity_modes", list(self._capacity_modes))
         cash_low_modes = raw.get("cash_low_modes", list(self._cash_low_modes))
+        own_stall_character_ids = raw.get("own_stall_character_ids", list(self._own_stall_character_ids))
         if (not isinstance(capacity_modes, list)
                 or not isinstance(cash_low_modes, list)
+                or not isinstance(own_stall_character_ids, list)
+                or any(not isinstance(character_id, str) or not character_id
+                       for character_id in own_stall_character_ids)
                 or any(not isinstance(mode, str) or mode not in valid_modes for mode in capacity_modes + cash_low_modes)):
             return
         capacity_enabled = raw.get("capacity_enabled", self._capacity_enabled) is True
@@ -682,6 +687,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._cash_low_enabled = cash_low_enabled
         self._capacity_modes = new_capacity_modes
         self._cash_low_modes = new_cash_low_modes
+        self._own_stall_character_ids = frozenset(own_stall_character_ids)
         if changed:
             for session in self.sessions.values():
                 if capacity_changed:
@@ -812,6 +818,7 @@ class InventoryMonitorWindow(QMainWindow):
         self._cash_low_enabled = True
         self._capacity_modes = frozenset({"buy"})
         self._cash_low_modes = frozenset({"buy"})
+        self._own_stall_character_ids = frozenset()
         self._shown_local_alerts.clear()
         self.scan_timer.stop()
         self.window_state_timer.stop()
@@ -1148,7 +1155,7 @@ class InventoryMonitorWindow(QMainWindow):
     def _update_capacity_alert(
         self, session: MonitorSession, signal: dict[str, Any], observed_at: float | None = None
     ) -> None:
-        if not self._capacity_enabled or session.stall_mode not in self._capacity_modes:
+        if not self._capacity_enabled or session.account.role_id not in self._own_stall_character_ids:
             session.capacity_alert_active = False
             session.capacity_candidate_since = None
             return
@@ -1197,7 +1204,7 @@ class InventoryMonitorWindow(QMainWindow):
             )
 
     def _update_cash_alert(self, session: MonitorSession, signal: dict[str, Any]) -> None:
-        if not self._cash_low_enabled or session.stall_mode not in self._cash_low_modes:
+        if not self._cash_low_enabled or session.account.role_id not in self._own_stall_character_ids:
             session.cash_alert_active = False
             return
         # MoneyTracker retains old confirmed values while the amount is unreadable.
