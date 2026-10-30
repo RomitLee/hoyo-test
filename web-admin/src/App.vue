@@ -27,6 +27,7 @@ type Alert = { server_event_id: number; event_type: string; display_name?: strin
 type Log = { id: number; event_type: string; panel_type?: string; message?: string; display_name?: string; device_id?: string; server_name?: string; role_name?: string; occurred_at?: string; reason?: string; target_status?: string; target_name?: string; target_level?: number; occlusion_percent?: number | null; minimized?: boolean | null; screenshot_ready?: boolean; screenshot_expires_at?: string }
 type Bark = { enabled: boolean; call_enabled: boolean; repeat_minutes: number; local_alert_enabled: boolean; web_sound_enabled: boolean; capacity_threshold: number; cash_threshold_wan: number; capacity_enabled: boolean; cash_low_enabled: boolean; stamina_full_enabled: boolean; stall_sold_enabled: boolean; configured?: boolean; masked_key?: string }
 type Policy = { occlusion_enabled: boolean; occlusion_percent: number; occlusion_seconds: number }
+type SettingsTab = 'alerts' | 'delivery' | 'monitoring' | 'zones'
 
 const pages: { key: Page; label: string; hint: string; icon: string }[] = [
   { key: 'monitor', label: '实时监控', hint: '角色状态与现金', icon: monitorIcon },
@@ -42,8 +43,15 @@ const statusLabels: Record<string, string> = { full: '背包已满', almost_full
 const alertLabels: Record<string, string> = { inventory_full: '背包已满', inventory_capacity: '背包容量不足', cash_low: '游戏币不足', stamina_full: '体力已满', stall_sold: '商品售出', inventory_closed: '背包未打开', inventory_occluded: '背包被遮挡', window_occluded: '窗口被遮挡', window_minimized: '窗口最小化' }
 const panelLabels: Record<string, string> = { inventory: '背包', give: '给予面板', trade: '交易面板', attributes: '属性面板', stall: '卖货摊位', stall_buy: '收货摊位', stall_records: '摊位记录面板', stall_other_buy: '他人收货摊位' }
 const reasons: Record<string, string> = { startup: '启动程序', resume: '点击开始', pause: '点击暂停', close: '关闭程序', recognition: '面板识别' }
+const settingsTabs: { key: SettingsTab; label: string; hint: string }[] = [
+  { key: 'alerts', label: '告警规则', hint: '阈值与提醒项目' },
+  { key: 'delivery', label: '通知方式', hint: '手机、设备与网页' },
+  { key: 'monitoring', label: '监控与截图', hint: '截图周期与遮挡日志' },
+  { key: 'zones', label: '区服比例', hint: '游戏币报价与换算' },
+]
 
 const page = ref<Page>('monitor')
+const settingsTab = ref<SettingsTab>('alerts')
 const monitorView = ref<'card' | 'list'>(localStorage.getItem('hoyo.monitorView') === 'list' ? 'list' : 'card')
 const token = ref(localStorage.getItem(TOKEN_KEY) || '')
 const username = ref(localStorage.getItem(USERNAME_KEY) || '')
@@ -645,21 +653,144 @@ onUnmounted(() => { stopLogStream(); window.removeEventListener('keydown', previ
         <template v-else-if="page === 'merchant'"><GemWorkspace mode="merchant" /></template>
         <template v-else-if="page === 'my-stalls'"><MyStalls /></template>
         <template v-else-if="page === 'products'"><ProductStatistics /></template>
-        <template v-else><div class="settings-grid"><GemWorkspace mode="zones" /><Panel title="窗口截图" meta="账号级设置"><form class="form-grid" @submit.prevent="saveSnapshotInterval"><label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label><p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p><button class="primary" :disabled="busy" type="submit">保存截图周期</button></form></Panel><Panel title="遮挡日志上报" meta="账号级设置"><form class="form-grid" @submit.prevent="savePolicy"><label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label><label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required></label><label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required></label><p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p><button class="primary" :disabled="busy" type="submit">保存上报规则</button></form></Panel>
-          <Panel title="告警方式" meta="账号级设置，所有从机共用"><form class="form-grid" @submit.prevent="saveBark">
-            <label class="check"><input v-model="bark.enabled" type="checkbox"> 手机是否推送</label>
-            <label class="check"><input v-model="bark.local_alert_enabled" type="checkbox"> 当前设备是否报警</label>
-            <label class="check"><input v-model="bark.web_sound_enabled" type="checkbox"> 电脑网页提示音</label>
-            <div class="alert-rule"><label class="check"><input v-model="bark.capacity_enabled" type="checkbox"> 背包剩余空格告警</label><label>剩余空格不超过<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required></label></div>
-            <div class="alert-rule"><label class="check"><input v-model="bark.cash_low_enabled" type="checkbox"> 游戏币低于告警</label><label>低于（万）<input v-model.number="bark.cash_threshold_wan" type="number" min="1" max="99999999" step="1" required></label></div>
-            <label class="check"><input v-model="bark.stamina_full_enabled" type="checkbox"> 体力满提醒（实测已满或持续监控下预测满）</label>
-            <label class="check"><input v-model="bark.stall_sold_enabled" type="checkbox"> 商品售出提醒（已确认在售数量减少）</label>
-            <p class="hint">背包空格和游戏币低额告警仅对“我的摊位”中当前存在的收货角色生效；将角色标记为“摊位下线”后会停止这两类告警。上方三个开关控制已产生告警的送达方式。网页提示音需要保持网页打开，并允许当前浏览器播放声音。</p>
-            <label class="check"><input v-model="bark.call_enabled" type="checkbox"> 手机连续呼叫</label>
-            <label>手机重复提醒间隔（分钟）<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label>
-            <label>Bark 设备密钥或测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label>
-            <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存告警设置</button><button class="secondary" type="button" @click="testBark">测试手机推送</button><button v-if="bark.web_sound_enabled && !soundReady" class="secondary" type="button" @click="unlockWebSound()">允许当前浏览器播放</button></div>
-          </form></Panel></div></template>
+        <template v-else>
+          <section class="settings-shell">
+            <header class="settings-heading">
+              <div>
+                <span class="eyebrow">ACCOUNT PREFERENCES</span>
+                <h2>偏好设置</h2>
+                <p>集中管理告警规则、通知渠道、监控留证和经营价格。</p>
+              </div>
+              <span class="settings-scope">账号级设置 · 所有从机共用</span>
+            </header>
+
+            <nav class="settings-tabs" role="tablist" aria-label="设置分类">
+              <button
+                v-for="tab in settingsTabs"
+                :id="`settings-tab-${tab.key}`"
+                :key="tab.key"
+                type="button"
+                role="tab"
+                :class="['settings-tab', { active: settingsTab === tab.key }]"
+                :aria-selected="settingsTab === tab.key"
+                :aria-controls="`settings-panel-${tab.key}`"
+                @click="settingsTab = tab.key"
+              >
+                <strong>{{ tab.label }}</strong>
+                <small>{{ tab.hint }}</small>
+              </button>
+            </nav>
+
+            <section
+              v-if="settingsTab === 'alerts'"
+              id="settings-panel-alerts"
+              class="settings-pane"
+              role="tabpanel"
+              aria-labelledby="settings-tab-alerts"
+            >
+              <Panel title="告警触发规则" meta="账号级设置，所有从机共用">
+                <form class="form-grid" @submit.prevent="saveBark">
+                  <p class="settings-intro">选择需要提醒的业务情况并设置阈值。这里只决定“什么时候产生告警”，发送渠道在“通知方式”中配置。</p>
+                  <div class="settings-rule-grid">
+                    <div class="alert-rule settings-rule">
+                      <label class="check"><input v-model="bark.capacity_enabled" type="checkbox"> 背包剩余空格告警</label>
+                      <small>空格数量达到阈值时提醒</small>
+                      <label>剩余空格不超过<input v-model.number="bark.capacity_threshold" type="number" min="0" max="20" step="1" required :disabled="!bark.capacity_enabled"></label>
+                    </div>
+                    <div class="alert-rule settings-rule">
+                      <label class="check"><input v-model="bark.cash_low_enabled" type="checkbox"> 游戏币低于告警</label>
+                      <small>现金严格低于阈值时提醒</small>
+                      <label>低于（万）<input v-model.number="bark.cash_threshold_wan" type="number" min="1" max="99999999" step="1" required :disabled="!bark.cash_low_enabled"></label>
+                    </div>
+                    <div class="alert-rule settings-rule">
+                      <label class="check"><input v-model="bark.stamina_full_enabled" type="checkbox"> 体力满提醒</label>
+                      <small>实测已满或持续监控下预测将满</small>
+                    </div>
+                    <div class="alert-rule settings-rule">
+                      <label class="check"><input v-model="bark.stall_sold_enabled" type="checkbox"> 商品售出提醒</label>
+                      <small>已确认的在售商品数量减少时提醒</small>
+                    </div>
+                  </div>
+                  <p class="hint">背包空格和游戏币低额告警仅对“我的摊位”中当前存在的收货角色生效；角色摊位下线后会停止这两类告警。</p>
+                  <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存告警规则</button></div>
+                </form>
+              </Panel>
+            </section>
+
+            <section
+              v-else-if="settingsTab === 'delivery'"
+              id="settings-panel-delivery"
+              class="settings-pane"
+              role="tabpanel"
+              aria-labelledby="settings-tab-delivery"
+            >
+              <Panel title="告警送达方式" meta="账号级设置，所有从机共用">
+                <form class="form-grid" @submit.prevent="saveBark">
+                  <p class="settings-intro">告警产生后可同时通过多个渠道送达。网页提示音需要保持页面打开并允许浏览器播放声音。</p>
+                  <div class="delivery-options">
+                    <label class="delivery-option">
+                      <input v-model="bark.enabled" type="checkbox">
+                      <span><strong>手机推送</strong><small>通过 Bark 推送到已绑定的手机</small></span>
+                    </label>
+                    <label class="delivery-option">
+                      <input v-model="bark.local_alert_enabled" type="checkbox">
+                      <span><strong>设备本机报警</strong><small>从机弹窗并播放本机提示音</small></span>
+                    </label>
+                    <label class="delivery-option">
+                      <input v-model="bark.web_sound_enabled" type="checkbox">
+                      <span><strong>网页提示音</strong><small>当前网页保持打开并在待处理时响铃</small></span>
+                    </label>
+                  </div>
+                  <div class="delivery-notification">
+                    <label class="check"><input v-model="bark.call_enabled" type="checkbox"> 手机连续呼叫</label>
+                    <label>手机重复提醒间隔<select v-model.number="bark.repeat_minutes"><option v-for="value in [5,10,30,60]" :key="value" :value="value">{{ value }} 分钟</option></select></label>
+                    <label class="delivery-key">Bark 设备密钥或测试地址<input v-model="barkKey" type="password" :placeholder="bark.configured ? `已配置 ${bark.masked_key}，留空不修改` : '请输入密钥'" autocomplete="off"></label>
+                  </div>
+                  <div class="form-actions">
+                    <button class="primary" :disabled="busy" type="submit">保存通知设置</button>
+                    <button class="secondary" type="button" @click="testBark">测试手机推送</button>
+                    <button v-if="bark.web_sound_enabled && !soundReady" class="secondary" type="button" @click="unlockWebSound()">允许当前浏览器播放</button>
+                  </div>
+                </form>
+              </Panel>
+            </section>
+
+            <section
+              v-else-if="settingsTab === 'monitoring'"
+              id="settings-panel-monitoring"
+              class="settings-pane settings-pane-grid"
+              role="tabpanel"
+              aria-labelledby="settings-tab-monitoring"
+            >
+              <Panel title="窗口截图" meta="账号级设置">
+                <form class="form-grid" @submit.prevent="saveSnapshotInterval">
+                  <label>自动截图周期（分钟）<input v-model.number="snapshotInterval" type="number" min="1" max="60" step="1" required></label>
+                  <p class="hint">可设置 1～60 分钟，默认 5 分钟。每个窗口的“获取实时截图”按钮不受周期限制。</p>
+                  <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存截图周期</button></div>
+                </form>
+              </Panel>
+              <Panel title="遮挡日志上报" meta="账号级设置">
+                <form class="form-grid" @submit.prevent="savePolicy">
+                  <label class="check"><input v-model="policy.occlusion_enabled" type="checkbox"> 上报遮挡日志</label>
+                  <label>遮挡比例达到（%）<input v-model.number="policy.occlusion_percent" type="number" min="0" max="100" step="0.1" required :disabled="!policy.occlusion_enabled"></label>
+                  <label>连续检测时间（秒）<input v-model.number="policy.occlusion_seconds" type="number" min="0" max="3600" step="1" required :disabled="!policy.occlusion_enabled"></label>
+                  <p class="hint">窗口状态仍正常同步；这里仅控制遮挡类型监控日志。</p>
+                  <div class="form-actions"><button class="primary" :disabled="busy" type="submit">保存上报规则</button></div>
+                </form>
+              </Panel>
+            </section>
+
+            <section
+              v-else
+              id="settings-panel-zones"
+              class="settings-pane"
+              role="tabpanel"
+              aria-labelledby="settings-tab-zones"
+            >
+              <GemWorkspace mode="zones" />
+            </section>
+          </section>
+        </template>
       </main>
       <footer>西联助手 Web · 数据每 5 秒安全同步</footer>
     </div>

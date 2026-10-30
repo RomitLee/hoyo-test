@@ -580,7 +580,7 @@ def test_mobile_status_page_and_static_assets_are_available(tmp_path: Path) -> N
         page = client.get("/")
         assert page.status_code == 200
         assert "text/html" in page.headers["content-type"]
-        assert "梦幻西游监控后台" in page.text
+        assert "西联助手" in page.text
         assert "assets/index-" in page.text
         assert page.headers["cache-control"] == "no-cache"
         admin_script = page.text.split('src="/assets/')[1].split('"')[0]
@@ -589,7 +589,8 @@ def test_mobile_status_page_and_static_assets_are_available(tmp_path: Path) -> N
         assert "api/v1/master/monitor-log-settings" in script.text
         assert "api/v1/master/status" in script.text
         assert "api/v1/auth/login" in script.text
-        assert "告警方式" in script.text
+        assert "告警规则" in script.text
+        assert "通知方式" in script.text
 
         page = client.get("/legacy")
         assert page.status_code == 200
