@@ -6,8 +6,9 @@ import numpy as np
 
 from hoyo_analyzer.config import AppConfig
 from hoyo_analyzer.inventory_app import InventoryMonitorWorker
+from hoyo_analyzer.money import MoneyDetector
 from hoyo_analyzer.panels import PanelObservation
-from hoyo_analyzer.stall_market import StallVisitTracker
+from hoyo_analyzer.stall_market import OwnStallMarketDetector, StallVisitTracker
 
 
 def key(seed: int) -> bytes:
@@ -63,7 +64,6 @@ def test_slow_market_ocr_uses_persistent_fifo_without_overwriting(tmp_path):
         def analyze(image, panel):
             started.set()
             release.wait(2)
-            return None
 
     worker._market_detector = SlowDetector()
     image = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -84,3 +84,46 @@ def test_slow_market_ocr_uses_persistent_fifo_without_overwriting(tmp_path):
     finally:
         release.set()
         worker.stop()
+
+
+def test_own_stall_name_repairs_only_a_dropped_first_level_prefix():
+    recognizer = lambda _mask: ("级太阳石", .95)
+    detector = OwnStallMarketDetector(recognizer)
+    field = np.full((22, 110, 3), 190, dtype=np.uint8)
+    assert detector._vote(field, "name") == ("1级太阳石", .95)
+
+    recognizer = lambda _mask: ("2级舍利子", .95)
+    detector = OwnStallMarketDetector(recognizer)
+    assert detector._vote(field, "name") is None
+
+    recognizer = lambda _mask: ("太阳石", .95)
+    detector = OwnStallMarketDetector(recognizer)
+    assert detector._vote(field, "name") is None
+
+
+def own_stall_price_field(text: str) -> np.ndarray:
+    field = np.full((20, 110, 3), (176, 184, 200), dtype=np.uint8)
+    digits = MoneyDetector().digits
+    x = 3
+    for value in text:
+        glyph = digits[value]
+        height, width = glyph.shape
+        area = field[5:5 + height, x:x + width]
+        area[glyph > 0] = (20, 20, 20)
+        x += width + 1
+    return field
+
+
+def test_own_stall_price_uses_stable_multi_threshold_template_votes():
+    detector = OwnStallMarketDetector(lambda _mask: None)
+    price = detector._vote(own_stall_price_field("155551"), "price")
+    assert price is not None
+    assert price[0] == "155551"
+
+
+def test_own_stall_price_ignores_full_height_scrollbar_contours():
+    detector = OwnStallMarketDetector(lambda _mask: None)
+    field = np.full((20, 110, 3), (176, 184, 200), dtype=np.uint8)
+    field[:, 8:18] = (20, 20, 20)
+    field[:, 25:33] = (20, 20, 20)
+    assert detector._vote(field, "price") is None

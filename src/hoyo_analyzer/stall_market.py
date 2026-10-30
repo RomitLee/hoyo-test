@@ -13,12 +13,15 @@ import cv2
 import numpy as np
 
 from .models import BEIJING_TZ, Event
+from .money import MoneyDetector
 from .panel_targets import recognize_shared_text
 from .panels import PanelObservation
 
 GEM_NAMES = ("光芒石", "月亮石", "太阳石", "红玛瑙", "五色灵尘", "星辉石", "黑宝石", "舍利子")
 _NAME_PATTERN = re.compile(r"1级(" + "|".join(GEM_NAMES) + r")")
+_MISSING_LEVEL_PATTERN = re.compile(r"级(" + "|".join(GEM_NAMES) + r")")
 _TEMPLATE_RECT = (19, 81, 148, 104)
+_PRICE_THRESHOLDS = range(88, 106)
 
 
 
@@ -43,6 +46,16 @@ def _price_mask(field: np.ndarray, threshold: int) -> np.ndarray:
     background = colors[int(counts.argmax())] * 8 + 4
     distance = np.max(np.abs(field.astype(np.int16) - background.astype(np.int16)), axis=2)
     return (distance > threshold).astype(np.uint8) * 255
+
+
+def _normalize_gem_name(value: str) -> str | None:
+    """Repair only the common dropped leading ``1`` on first-level gems."""
+    value = value.strip(" ，。,.·、■□")
+    if _NAME_PATTERN.fullmatch(value):
+        return value
+    if _MISSING_LEVEL_PATTERN.fullmatch(value):
+        return "1" + value
+    return None
 
 
 @dataclass(frozen=True)
@@ -209,6 +222,7 @@ class OwnStallMarketDetector:
 
     def __init__(self, recognizer=None) -> None:
         self.recognizer = recognizer or recognize_shared_text
+        self.digits = MoneyDetector().digits
 
     @staticmethod
     def _crop(image: np.ndarray, panel: PanelObservation,
@@ -226,7 +240,64 @@ class OwnStallMarketDetector:
         return cv2.resize(image[top:bottom, left:r], (rect[2] - rect[0], rect[3] - rect[1]),
                           interpolation=cv2.INTER_AREA)
 
+    def _decode_price_mask(self, mask: np.ndarray) -> tuple[int, float] | None:
+        boxes = sorted(
+            (cv2.boundingRect(contour)
+             for contour in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]),
+            key=lambda box: box[0],
+        )
+        # The stall's narrow scrollbar is 8-10 pixels wide and spans the full
+        # cell height. Actual digits are 8-10 pixels high and at most 7 wide.
+        boxes = [box for box in boxes if 8 <= box[3] <= 10 and 2 <= box[2] <= 7]
+        if not 1 <= len(boxes) <= 9:
+            return None
+        text = ""
+        scores: list[float] = []
+        previous_right = None
+        for x, y, width, height in boxes:
+            if previous_right is not None and not 1 <= x - previous_right <= 4:
+                return None
+            previous_right = x + width
+            glyph = mask[y:y + height, x:x + width] > 0
+            candidates: list[tuple[float, str]] = []
+            for digit, template in self.digits.items():
+                if abs(template.shape[1] - width) > 1:
+                    continue
+                resized = cv2.resize(
+                    template, (width, height), interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+                intersection = np.logical_and(glyph, resized).sum()
+                union = np.logical_or(glyph, resized).sum()
+                candidates.append((float(intersection / max(1, union)), digit))
+            candidates.sort(reverse=True)
+            if not candidates or candidates[0][0] < .75:
+                return None
+            scores.append(candidates[0][0])
+            text += candidates[0][1]
+        if len(text) > 1 and text.startswith("0"):
+            return None
+        return int(text), min(scores)
+
+    def _decode_price(self, field: np.ndarray) -> tuple[int, float] | None:
+        candidates: list[tuple[int, float]] = []
+        for threshold in _PRICE_THRESHOLDS:
+            decoded = self._decode_price_mask(_price_mask(field, threshold))
+            if decoded is not None:
+                candidates.append(decoded)
+        counts = Counter(value for value, _ in candidates)
+        ranked = counts.most_common()
+        if not ranked or ranked[0][1] < 2:
+            return None
+        if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+            return None
+        winner = ranked[0][0]
+        return winner, min(score for value, score in candidates if value == winner)
+
     def _vote(self, field: np.ndarray, kind: str) -> tuple[str, float] | None:
+        if kind == "price":
+            decoded = self._decode_price(field)
+            if decoded is not None:
+                return str(decoded[0]), decoded[1]
         gray = cv2.cvtColor(field, cv2.COLOR_BGR2GRAY)
         candidates: list[tuple[str, float]] = []
         thresholds = ((70, 85, 100, 115, 130, 145, 160) if kind == "name"
@@ -240,8 +311,8 @@ class OwnStallMarketDetector:
                 continue
             value, confidence = result
             if kind == "name":
-                value = value.strip(" ，。,.·、■□")
-            valid = (_NAME_PATTERN.fullmatch(value) if kind == "name" else
+                value = _normalize_gem_name(value)
+            valid = (value is not None if kind == "name" else
                      re.fullmatch(r"[1-9][0-9]{0,8}", value))
             if valid and confidence >= .75:
                 candidates.append((value, confidence))
