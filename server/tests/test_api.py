@@ -75,6 +75,9 @@ def test_own_stalls_keep_role_prices_separate_from_competitor_statistics(tmp_pat
         }
         assert client.post("/api/v1/slave/market-gem-quotes", headers=device_headers(), json=competitor).status_code == 202
         assert client.post("/api/v1/slave/own-stall-gem-quotes", headers=device_headers(), json=own).status_code == 202
+        own_seen_as_other = {**competitor, "event_id": "other-own", "stall_owner_id": "123456",
+                             "quotes": [{"gem_name": "光芒石", "price_coins": 99999}]}
+        assert client.post("/api/v1/slave/market-gem-quotes", headers=device_headers(), json=own_seen_as_other).status_code == 202
         result = client.get("/api/v1/master/own-stalls", headers=master_headers()).json()
         assert result["stalls"][0]["role_name"] == "收货一号"
         assert {item["gem_name"]: item["price_coins"] for item in result["stalls"][0]["quotes"]} == {
@@ -82,7 +85,7 @@ def test_own_stalls_keep_role_prices_separate_from_competitor_statistics(tmp_pat
         }
         assert result["merchants"][0]["quotes"][0]["price_coins"] == 20000
         summary = client.get("/api/v1/master/market-gem-statistics", headers=master_headers()).json()["items"]
-        assert summary[0]["merchant_count"] == 1 and summary[0]["average_price"] == 20000
+        assert summary[0]["merchant_count"] == 1 and summary[0]["average_price"] is None
 
         removed = client.delete("/api/v1/master/own-stalls/123456", headers=master_headers())
         assert removed.status_code == 200 and removed.json() == {"removed": True}

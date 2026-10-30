@@ -1039,19 +1039,29 @@ class RelayDatabase:
 
     def market_gem_statistics(self, account_id: int) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            rows = connection.execute("""SELECT server_name,gem_name,COUNT(*) AS merchant_count,
+            rows = connection.execute("""SELECT q.server_name,q.gem_name,COUNT(*) AS merchant_count,
                 ROUND(AVG(price_coins)) AS average_price,MIN(price_coins) AS minimum_price,
                 MAX(price_coins) AS maximum_price,MAX(observed_at) AS latest_at
-                FROM market_gem_quotes WHERE account_id=? GROUP BY server_name,gem_name
-                ORDER BY server_name,gem_name""", (account_id,)).fetchall()
-        return [dict(row) for row in rows]
+                FROM market_gem_quotes q WHERE q.account_id=? AND NOT EXISTS (
+                    SELECT 1 FROM own_stall_gem_quotes own WHERE own.account_id=q.account_id
+                    AND own.character_id=q.stall_owner_id)
+                GROUP BY q.server_name,q.gem_name ORDER BY q.server_name,q.gem_name""", (account_id,)).fetchall()
+        return [{**dict(row), "average_price": row["average_price"] if row["merchant_count"] >= 2 else None}
+                for row in rows]
 
     def market_gem_merchants(self, account_id: int) -> list[dict[str, Any]]:
         """Return every seller's latest quote set; never collapse merchants into min/max."""
         with self._connect() as connection:
-            rows = connection.execute("""SELECT server_name,stall_owner_id,observer_character_id,
-                gem_name,price_coins,observed_at FROM market_gem_quotes
-                WHERE account_id=? ORDER BY server_name,stall_owner_id,gem_name""", (account_id,)).fetchall()
+            rows = connection.execute("""SELECT q.server_name,q.stall_owner_id,q.observer_character_id,
+                q.gem_name,q.price_coins,q.observed_at FROM market_gem_quotes q
+                WHERE q.account_id=? AND NOT EXISTS (
+                    SELECT 1 FROM own_stall_gem_quotes own WHERE own.account_id=q.account_id
+                    AND own.character_id=q.stall_owner_id)
+                ORDER BY q.server_name,q.stall_owner_id,q.gem_name""", (account_id,)).fetchall()
+            screenshots = connection.execute("""SELECT l.id,l.server_name,l.character_id,l.occurred_at
+                FROM monitor_logs l JOIN monitor_screenshots s ON s.log_id=l.id
+                WHERE l.account_id=? AND l.panel_type='stall_other_buy' AND s.ready=1
+                ORDER BY l.id DESC""", (account_id,)).fetchall()
         merchants: dict[tuple[str, str], dict[str, Any]] = {}
         for row in rows:
             key = (row["server_name"], row["stall_owner_id"])
@@ -1064,6 +1074,15 @@ class RelayDatabase:
                                    "observed_at": row["observed_at"]})
             if row["observed_at"] > item["latest_at"]:
                 item["latest_at"] = row["observed_at"]
+        for item in merchants.values():
+            observed = datetime.fromisoformat(item["latest_at"]).timestamp()
+            candidates = [shot for shot in screenshots
+                          if shot["server_name"] == item["server_name"]
+                          and shot["character_id"] == item["observer_character_id"]]
+            if candidates:
+                closest = min(candidates, key=lambda shot: abs(datetime.fromisoformat(shot["occurred_at"]).timestamp() - observed))
+                if abs(datetime.fromisoformat(closest["occurred_at"]).timestamp() - observed) <= 120:
+                    item["screenshot_log_id"] = int(closest["id"])
         counts: dict[str, int] = {}
         for server_name, _ in merchants:
             counts[server_name] = counts.get(server_name, 0) + 1
