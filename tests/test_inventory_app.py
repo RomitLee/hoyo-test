@@ -1187,7 +1187,7 @@ def test_toast_titles_cover_monitored_panels() -> None:
         "stall_other_buy": "已检测到他人收货摊位",
     }
 
-def test_recognition_events_merge_and_skip_transition_frames(monkeypatch) -> None:
+def test_recognition_events_keep_diagnostics_but_mark_duplicates(monkeypatch) -> None:
     worker = InventoryMonitorWorker(1, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[54588235])")
     emitted = []
     worker.event_for_window = SimpleNamespace(emit=lambda hwnd, event: emitted.append(event))
@@ -1204,11 +1204,182 @@ def test_recognition_events_merge_and_skip_transition_frames(monkeypatch) -> Non
         worker._emit_recognition(recognition(full))
         worker._emit_recognition(recognition([full[0]]))
         worker._emit_recognition(recognition([], owner=""))
-        assert len(emitted) == 1
-        assert emitted[0].payload["status"] == "ok"
+        assert len(emitted) == 4
+        assert [item.payload["status"] for item in emitted] == ["ok", "ok", "ok", "empty"]
+        assert [item.payload["duplicate"] for item in emitted] == [False, True, True, True]
+        assert [item.payload["dedupe_reason"] for item in emitted] == [
+            "", "same_quotes_120s", "subset_quotes_120s", "within_8s_empty",
+        ]
         assert len(emitted[0].payload["quotes"]) == 2
     finally:
         worker.stop()
+
+
+def test_other_stall_visit_enqueues_immediately_and_traces_fast_close(tmp_path, monkeypatch) -> None:
+    from concurrent.futures import Future
+
+    import numpy as np
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[54588235])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    monkeypatch.setattr(worker, "_submit_market_ocr_locked", lambda: None)
+    image = np.zeros((20, 20, 3), dtype=np.uint8)
+    panel = SimpleNamespace(panel_type="stall_other_buy", bbox=(0, 0, 20, 20))
+    try:
+        worker._begin_other_stall_visit(image, panel, 1000, 1)
+        assert len(worker._market_queue) == 1
+        assert worker._market_queue[0]["attempt"] == 0
+        assert worker._market_visit["attempt"] == 1
+
+        # A panel closed before the first 400 ms retry must keep its initial
+        # frame and finalize only after that frame's OCR completes.
+        worker._advance_other_stall_visit(
+            image, SimpleNamespace(panel_type="unknown", bbox=None), 1050, 2
+        )
+        assert worker._market_visit is None
+        assert worker._visit_state[worker._market_queue[0]["visit_id"]]["capture_closed"]
+        assert emitted == []
+
+        task = dict(worker._market_queue[0])
+        queued_at = task["queued_at"]
+        task["ocr_started_at"] = queued_at + 0.1
+        task["ocr_finished_at"] = queued_at + 0.4
+        future = Future()
+        reading = SimpleNamespace(
+            owner_id="43208658", quotes=(("红玛瑙", 50000), ("五色灵尘", 70000)), confidence=.9
+        )
+        future.set_result((task, reading))
+        future.market_task = task
+        worker._market_future = future
+        worker._market_ocr_finished(future)
+
+        assert [item[1].type for item in emitted] == [
+            "market_gem_quotes", "market_recognition",
+        ]
+        event = emitted[1][1]
+        assert event.type == "market_recognition"
+        assert event.payload["status"] == "ok"
+        assert len(event.payload["quotes"]) == 2
+        trace = event.payload["trace"]
+        assert trace["closure_reason"] == "panel_closed"
+        assert trace["ocr"][0]["wait_ms"] == 100
+        assert trace["ocr"][0]["duration_ms"] == 300
+        assert trace["ocr"][0]["wait_ms"] >= 0
+    finally:
+        worker.stop()
+
+
+def test_other_stall_capture_failure_emits_explicit_failed_recognition(tmp_path, monkeypatch) -> None:
+    import numpy as np
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[54588235])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    monkeypatch.setattr(worker, "_enqueue_market_visit", lambda *args, **kwargs: False)
+    try:
+        worker._begin_other_stall_visit(
+            np.zeros((20, 20, 3), dtype=np.uint8),
+            SimpleNamespace(panel_type="stall_other_buy", bbox=(0, 0, 20, 20)),
+            1000,
+            1,
+        )
+
+        assert worker._market_visit is None
+        assert len(emitted) == 1
+        event = emitted[0][1]
+        assert event.payload["status"] == "failed"
+        assert event.payload["trace"]["failure_reason"] == "capture_failed"
+        assert event.payload["trace"]["closure_reason"] == "capture_failed"
+    finally:
+        worker.stop()
+
+
+def test_other_stall_empty_ocr_result_still_uploads_recognition(tmp_path, monkeypatch) -> None:
+    from concurrent.futures import Future
+
+    import numpy as np
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (江苏1区[秦淮风光] - 甲[54588235])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    monkeypatch.setattr(worker, "_submit_market_ocr_locked", lambda: None)
+    image = np.zeros((20, 20, 3), dtype=np.uint8)
+    panel = SimpleNamespace(panel_type="stall_other_buy", bbox=(0, 0, 20, 20))
+    try:
+        worker._begin_other_stall_visit(image, panel, 1000, 1)
+        worker._advance_other_stall_visit(
+            image, SimpleNamespace(panel_type="unknown", bbox=None), 1050, 2
+        )
+
+        task = dict(worker._market_queue[0])
+        task["ocr_started_at"] = task["queued_at"] + 0.05
+        task["ocr_finished_at"] = task["queued_at"] + 0.15
+        future = Future()
+        reading = SimpleNamespace(owner_id="", quotes=(), confidence=0.0)
+        future.set_result((task, reading))
+        future.market_task = task
+        worker._market_future = future
+        worker._market_ocr_finished(future)
+
+        assert len(emitted) == 1
+        event = emitted[0][1]
+        assert event.payload["status"] == "empty"
+        assert event.payload["quotes"] == []
+        assert event.payload["trace"]["ocr"][0]["quotes"] == 0
+        assert event.payload["trace"]["ocr"][0]["failed"] is False
+    finally:
+        worker.stop()
+
+
+def test_market_recognition_event_forwards_trace(monkeypatch) -> None:
+    sent = []
+    stub = SimpleNamespace(
+        _authenticated=True,
+        monitoring_paused=False,
+        sessions={
+            123: SimpleNamespace(
+                account=SimpleNamespace(
+                    secondary_region="秦淮风光", role_name="测试角色", role_id="123456"
+                ),
+                minimized=False,
+                monitor_session_id="session-1",
+            )
+        },
+        relay_client=SimpleNamespace(send_market_recognition=sent.append),
+    )
+    trace = {"captures": [{"attempt": 0, "at": 100.0}], "duplicate": False}
+    event = Event(
+        "recognition-trace", 100, "market_recognition",
+        payload={
+            "occurred_at": "2026-10-31T20:30:00+08:00",
+            "stall_owner_id": "55440393", "quotes": [], "status": "empty",
+            "trace": trace,
+        },
+    )
+    InventoryMonitorWindow._on_event(stub, 123, event)
+    assert sent[0]["trace"] is trace
 
 def test_visit_merges_best_reading_and_keeps_ownerless_quotes(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
@@ -1242,6 +1413,237 @@ def test_visit_merges_best_reading_and_keeps_ownerless_quotes(tmp_path, monkeypa
         assert recognition.payload["status"] == "short"
     finally:
         worker.stop()
+
+
+def test_market_visit_merges_all_ocr_frames_and_votes_on_conflicting_prices(
+    tmp_path, monkeypatch
+) -> None:
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 捡币[14038633])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    monkeypatch.setattr(worker, "_submit_market_ocr_locked", lambda: None)
+
+    tasks = []
+    for attempt in range(3):
+        tasks.append({
+            "id": f"entry-{attempt}", "file": f"entry-{attempt}.png",
+            "bbox": [0, 0, 100, 100], "panel_type": "stall_other_buy",
+            "visit_id": "visit-1", "attempt": attempt,
+            "timestamp_ms": 1000 + attempt * 400, "frame_index": attempt + 1,
+            "occurred_at": "2026-10-31T14:23:40+08:00", "attempts": 0,
+        })
+    worker._market_queue = [dict(task) for task in tasks]
+    state = {
+        "pending": 3, "captured": 3, "best": None, "best_task": None,
+        "files": [task["file"] for task in tasks], "capture_closed": True,
+    }
+    worker._visit_state["visit-1"] = state
+    readings = [
+        SimpleNamespace(
+            owner_id="14038633",
+            quotes=(("星辉石", 142000), ("五色灵尘", 340000), ("红玛瑙", 65000)),
+            confidence=.92,
+        ),
+        SimpleNamespace(
+            owner_id="14038633",
+            quotes=(("太阳石", 55000), ("红玛瑙", 650000), ("舍利子", 83000)),
+            confidence=.95,
+        ),
+        SimpleNamespace(
+            owner_id="14038633",
+            quotes=(
+                ("光芒石", 20000), ("黑宝石", 140000),
+                ("月亮石", 32000), ("红玛瑙", 65000),
+            ),
+            confidence=.90,
+        ),
+    ]
+
+    def finish(task, reading):
+        future = Future()
+        future.set_result((task, reading))
+        future.market_task = task
+        worker._market_future = future
+        worker._market_ocr_finished(future)
+
+    try:
+        finish(tasks[0], readings[0])
+        finish(tasks[1], readings[1])
+        assert emitted == []
+        assert len(state["readings"]) == 2
+
+        finish(tasks[2], readings[2])
+        assert [item[1].type for item in emitted] == [
+            "market_gem_quotes", "market_recognition",
+        ]
+        quotes_event = emitted[0][1]
+        quotes = {
+            item["gem_name"]: item["price_coins"]
+            for item in quotes_event.payload["quotes"]
+        }
+        assert quotes == {
+            "星辉石": 142000,
+            "五色灵尘": 340000,
+            "红玛瑙": 65000,
+            "太阳石": 55000,
+            "舍利子": 83000,
+            "光芒石": 20000,
+            "黑宝石": 140000,
+            "月亮石": 32000,
+        }
+        assert len(emitted[1][1].payload["quotes"]) == 8
+    finally:
+        worker.stop()
+
+
+def test_market_visit_inherits_owner_and_frozen_window_from_any_frame(
+    tmp_path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 捡币[14038633])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    task = {
+        "id": "entry-best", "file": "", "bbox": [0, 0, 100, 100],
+        "panel_type": "stall_other_buy", "visit_id": "visit-owner",
+        "attempt": 2, "timestamp_ms": 1800, "frame_index": 3,
+        "occurred_at": "2026-10-31T14:23:41+08:00", "attempts": 0,
+        "identity": {
+            "window_hwnd": 9876,
+            "window_title": "旧窗口标题",
+            "secondary_region": "罗浮山",
+            "role_name": "捡币",
+            "role_id": "14038633",
+        },
+    }
+    ownerless = SimpleNamespace(
+        owner_id="", confidence=.95,
+        quotes=(("星辉石", 142000), ("太阳石", 55000)),
+    )
+    owner_frame = SimpleNamespace(
+        owner_id="13955257", confidence=.75,
+        quotes=(("光芒石", 20000),),
+    )
+    state = {
+        "pending": 0,
+        "captured": 3,
+        "best": ownerless,
+        "best_task": task,
+        "identity": task["identity"],
+        "readings": [(ownerless, task), (owner_frame, {**task, "attempt": 1})],
+        "files": [],
+    }
+    try:
+        quotes_event, recognition = worker._finish_market_visit_locked(
+            "visit-owner", state
+        )
+        assert quotes_event is not None
+        assert quotes_event.payload["stall_owner_id"] == "13955257"
+        assert recognition.payload["stall_owner_id"] == "13955257"
+        assert recognition.payload["window_hwnd"] == 9876
+        assert recognition.payload["role_id"] == "14038633"
+
+        worker._emit_recognition(recognition)
+        assert emitted == [(9876, recognition)]
+    finally:
+        worker.stop()
+
+
+def test_market_workers_keep_window_identity_isolated(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    workers = [
+        InventoryMonitorWorker(
+            101, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 甲[1111])"
+        ),
+        InventoryMonitorWorker(
+            202, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 乙[2222])"
+        ),
+    ]
+    emitted: list[tuple[int, Event]] = []
+    task = {
+        "id": "entry", "file": "", "bbox": [0, 0, 100, 100],
+        "panel_type": "stall_other_buy", "visit_id": "visit-isolated",
+        "attempt": 0, "timestamp_ms": 1000, "frame_index": 1,
+        "occurred_at": "2026-10-31T14:23:41+08:00", "attempts": 0,
+    }
+    reading = SimpleNamespace(
+        owner_id="333", confidence=.9, quotes=(("红玛瑙", 65000),)
+    )
+    try:
+        for worker in workers:
+            worker._market_directory = tmp_path / str(worker.hwnd)
+            worker._market_manifest = worker._market_directory / "queue.json"
+            worker.event_ready = SimpleNamespace(emit=lambda event: None)
+            worker.event_for_window = SimpleNamespace(
+                emit=lambda hwnd, event: emitted.append((hwnd, event))
+            )
+            monkeypatch.setattr(worker, "_submit_market_ocr_locked", lambda: None)
+            worker._visit_traces["visit-isolated"] = {
+                "identity": worker._market_identity_snapshot()
+            }
+            state = {
+                "pending": 0, "captured": 1, "best": reading,
+                "best_task": task, "files": [],
+                "identity": worker._market_identity_snapshot(),
+            }
+            event = worker._finish_market_visit_locked("visit-isolated", state)[1]
+            worker._emit_recognition(event)
+
+        assert [hwnd for hwnd, _event in emitted] == [101, 202]
+        assert [event.payload["role_id"] for _hwnd, event in emitted] == ["1111", "2222"]
+    finally:
+        for worker in workers:
+            worker.stop()
+
+
+def test_own_stall_reuses_visit_id_for_cross_frame_ocr(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 捡币[14038633])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    monkeypatch.setattr(worker, "_submit_market_ocr_locked", lambda: None)
+    image = np.zeros((20, 20, 3), dtype=np.uint8)
+    panel = SimpleNamespace(panel_type="stall_buy", bbox=(0, 0, 20, 20))
+    try:
+        worker._begin_own_stall_visit(image, panel, 1000, 1)
+        visit_id = worker._own_market_visit["id"]
+        assert [item["visit_id"] for item in worker._market_queue] == [visit_id]
+
+        worker._advance_own_stall_visit(image, panel, 1399, 2)
+        worker._advance_own_stall_visit(image, panel, 1400, 3)
+        worker._advance_own_stall_visit(image, panel, 1800, 4)
+
+        assert [item["visit_id"] for item in worker._market_queue] == [visit_id] * 3
+        assert worker._own_market_visit is None
+        assert worker._visit_state[visit_id]["capture_closed"] is True
+        assert worker._visit_state[visit_id]["pending"] == 3
+    finally:
+        worker.stop()
+
 
 def test_own_stall_visit_emits_own_quote_event(tmp_path) -> None:
     from types import SimpleNamespace
@@ -1285,7 +1687,7 @@ def test_own_stall_ocr_queue_emits_detected_quotes(tmp_path) -> None:
     worker._market_queue = [dict(task)]
     worker._visit_state["own-visit"] = {
         "pending": 1, "captured": 1, "best": None, "best_task": None,
-        "files": [task["file"]],
+        "files": [task["file"]], "capture_closed": True,
     }
     future = Future()
     reading = SimpleNamespace(
@@ -1308,7 +1710,99 @@ def test_own_stall_ocr_queue_emits_detected_quotes(tmp_path) -> None:
         worker.stop()
 
 
-def test_own_stall_quote_event_is_uploaded_with_character_context(monkeypatch) -> None:
+def test_own_stall_merges_three_partial_frames_into_one_complete_upload(
+    tmp_path, monkeypatch
+) -> None:
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+
+    worker = InventoryMonitorWorker(
+        1, AppConfig(), "梦幻西游 ONLINE - (广东3区[罗浮山] - 捡币[14038633])"
+    )
+    worker._market_directory = tmp_path
+    worker._market_manifest = tmp_path / "queue.json"
+    emitted = []
+    worker.event_ready = SimpleNamespace(emit=lambda event: None)
+    worker.event_for_window = SimpleNamespace(
+        emit=lambda hwnd, event: emitted.append((hwnd, event))
+    )
+    monkeypatch.setattr(worker, "_submit_market_ocr_locked", lambda: None)
+
+    tasks = [
+        {
+            "id": f"own-entry-{attempt}", "file": f"own-entry-{attempt}.png",
+            "bbox": [0, 0, 100, 100], "panel_type": "stall_buy",
+            "visit_id": "own-visit-36441220", "attempt": attempt,
+            "timestamp_ms": 1000 + attempt * 400, "frame_index": attempt + 1,
+            "occurred_at": "2026-10-31T08:06:10+08:00", "attempts": 0,
+            "identity": {
+                "window_hwnd": 1,
+                "window_title": "梦幻西游 ONLINE - (广东3区[罗浮山] - 捡币[14038633])",
+                "secondary_region": "罗浮山",
+                "role_name": "捡币",
+                "role_id": "14038633",
+            },
+        }
+        for attempt in range(3)
+    ]
+    worker._market_queue = [dict(task) for task in tasks]
+    worker._visit_state["own-visit-36441220"] = {
+        "pending": 3, "captured": 3, "best": None, "best_task": None,
+        "files": [task["file"] for task in tasks], "capture_closed": True,
+    }
+    readings = [
+        SimpleNamespace(
+            owner_id="", confidence=.92,
+            quotes=(("星辉石", 142000), ("五色灵尘", 340000), ("红玛瑙", 65000)),
+        ),
+        SimpleNamespace(
+            owner_id="", confidence=.95,
+            quotes=(("太阳石", 55000), ("红玛瑙", 650000), ("舍利子", 83000)),
+        ),
+        SimpleNamespace(
+            owner_id="", confidence=.90,
+            quotes=(
+                ("光芒石", 20000), ("黑宝石", 140000),
+                ("月亮石", 32000), ("红玛瑙", 65000),
+            ),
+        ),
+    ]
+
+    def finish(task, reading):
+        future = Future()
+        future.set_result((task, reading))
+        future.market_task = task
+        worker._market_future = future
+        worker._market_ocr_finished(future)
+
+    try:
+        finish(tasks[0], readings[0])
+        finish(tasks[1], readings[1])
+        assert emitted == []
+
+        finish(tasks[2], readings[2])
+        assert len(emitted) == 1
+        hwnd, event = emitted[0]
+        assert hwnd == 1
+        assert event.type == "own_stall_gem_quotes"
+        assert event.payload["role_id"] == "14038633"
+        assert event.payload["quotes"] == [
+            {"gem_name": "星辉石", "price_coins": 142000},
+            {"gem_name": "五色灵尘", "price_coins": 340000},
+            {"gem_name": "红玛瑙", "price_coins": 65000},
+            {"gem_name": "太阳石", "price_coins": 55000},
+            {"gem_name": "舍利子", "price_coins": 83000},
+            {"gem_name": "光芒石", "price_coins": 20000},
+            {"gem_name": "黑宝石", "price_coins": 140000},
+            {"gem_name": "月亮石", "price_coins": 32000},
+        ]
+        assert not worker._market_queue
+        assert "own-visit-36441220" not in worker._visit_state
+    finally:
+        worker.stop()
+
+
+def test_own_stall_quote_event_prefers_payload_identity_with_session_fallback(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(InventoryMonitorWindow, "refresh_windows", lambda self: None)
     window = InventoryMonitorWindow()
@@ -1327,6 +1821,9 @@ def test_own_stall_quote_event_is_uploaded_with_character_context(monkeypatch) -
         payload={
             "occurred_at": "2026-10-31T06:09:03+08:00",
             "quotes": [{"gem_name": "太阳石", "price_coins": 51000}],
+            "secondary_region": "罗浮山",
+            "role_name": "捡币",
+            "role_id": "14038633",
         },
     )
     try:
@@ -1334,11 +1831,23 @@ def test_own_stall_quote_event_is_uploaded_with_character_context(monkeypatch) -
         assert uploaded == [{
             "event_id": "own-quotes",
             "occurred_at": "2026-10-31T06:09:03+08:00",
-            "server_name": "大雁塔",
-            "role_name": "店员章天翔",
-            "character_id": "54784018",
+            "server_name": "罗浮山",
+            "role_name": "捡币",
+            "character_id": "14038633",
             "quotes": [{"gem_name": "太阳石", "price_coins": 51000}],
         }]
+
+        fallback_event = Event(
+            "own-quotes-fallback", 11, "own_stall_gem_quotes",
+            payload={
+                "occurred_at": "2026-10-31T06:09:04+08:00",
+                "quotes": [{"gem_name": "黑宝石", "price_coins": 146000}],
+            },
+        )
+        window._on_event(0x1234, fallback_event)
+        assert uploaded[1]["server_name"] == "大雁塔"
+        assert uploaded[1]["role_name"] == "店员章天翔"
+        assert uploaded[1]["character_id"] == "54784018"
     finally:
         window.sessions.clear()
         window.close()

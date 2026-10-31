@@ -1327,31 +1327,40 @@ class InventoryMonitorWindow(QMainWindow):
                 or event.type == "market_stall_changed"):
             self._show_market_toast(session.account.secondary_region, event)
         if event.type == "market_recognition":
+            role_id = str(payload.get("role_id") or session.account.role_id or "")
+            role_name = str(payload.get("role_name") or session.account.role_name)
+            server_name = str(payload.get("secondary_region") or session.account.secondary_region)
             self.relay_client.send_market_recognition({
                 "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
                 "status": event.payload.get("status", "ok"),
-                "server_name": session.account.secondary_region,
-                "observer_character_id": session.account.role_id or None,
-                "role_name": session.account.role_name,
+                "server_name": server_name,
+                "observer_character_id": role_id or None,
+                "role_name": role_name,
                 "stall_owner_id": event.payload.get("stall_owner_id") or None,
                 "quotes": event.payload.get("quotes") or [],
                 "evidence_file": event.payload.get("evidence_file") or "",
+                "trace": event.payload.get("trace"),
             })
             return
         if event.type == "market_gem_quotes":
+            role_id = str(payload.get("role_id") or session.account.role_id or "")
+            server_name = str(payload.get("secondary_region") or session.account.secondary_region)
             self.relay_client.send_market_quotes({
                 "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
-                "server_name": session.account.secondary_region,
-                "observer_character_id": session.account.role_id or None,
+                "server_name": server_name,
+                "observer_character_id": role_id or None,
                 "stall_owner_id": event.payload["stall_owner_id"], "quotes": event.payload["quotes"],
             })
             return
         if event.type == "own_stall_gem_quotes":
+            role_id = str(payload.get("role_id") or session.account.role_id or "")
+            role_name = str(payload.get("role_name") or session.account.role_name)
+            server_name = str(payload.get("secondary_region") or session.account.secondary_region)
             self.relay_client.send_own_stall_quotes({
                 "event_id": event.event_id, "occurred_at": event.payload["occurred_at"],
-                "server_name": session.account.secondary_region,
-                "role_name": session.account.role_name,
-                "character_id": session.account.role_id,
+                "server_name": server_name,
+                "role_name": role_name,
+                "character_id": role_id,
                 "quotes": event.payload["quotes"],
             })
             return

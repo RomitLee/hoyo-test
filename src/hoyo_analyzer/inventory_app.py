@@ -171,6 +171,7 @@ class InventoryMonitorWorker(QObject):
         self._recognition_last_ok = 0.0
         self._market_settle_ms: int | None = None
         self._market_visit: dict[str, Any] | None = None
+        self._own_market_visit: dict[str, Any] | None = None
         self._visit_state: dict[str, dict[str, Any]] = {}
         self._finished_visits: set[str] = set()
         self._visit_traces: dict[str, dict[str, Any]] = {}
@@ -211,8 +212,41 @@ class InventoryMonitorWorker(QObject):
         if self._source is not None:
             self._source.close()
 
-    def _reset_market_analysis(self) -> None:
-        """Panel transitions must not discard already captured merchant visits."""
+    def _reset_market_analysis(self, reason: str = "panel_closed") -> None:
+        """Close active captures without dropping frames that are already queued."""
+        visit = self._market_visit
+        if visit is not None:
+            self._market_visit = None
+            self._close_other_stall_visit(str(visit["id"]), reason)
+        self._reset_own_stall_visit(reason)
+
+    def _market_identity_snapshot(self) -> dict[str, Any]:
+        """Freeze all identity fields that an asynchronous OCR event belongs to."""
+        account = parse_account_info(self.window_title)
+        return {
+            "window_hwnd": self.hwnd,
+            "window_title": self.window_title,
+            "secondary_region": account.secondary_region,
+            "role_name": account.role_name,
+            "role_id": account.role_id,
+        }
+
+    @staticmethod
+    def _identity_from_task(task: dict[str, Any]) -> dict[str, Any]:
+        identity = task.get("identity")
+        if not isinstance(identity, dict):
+            return {}
+        return {
+            key: identity.get(key)
+            for key in (
+                "window_hwnd",
+                "window_title",
+                "secondary_region",
+                "role_name",
+                "role_id",
+            )
+            if key in identity
+        }
 
     def _load_market_queue(self) -> list[dict[str, Any]]:
         try:
@@ -255,34 +289,39 @@ class InventoryMonitorWorker(QObject):
 
     def _enqueue_market_visit(self, image: Any, panel: PanelObservation,
                               timestamp_ms: int, frame_index: int,
-                              visit_id: str = "", attempt: int = 0) -> None:
+                              visit_id: str = "", attempt: int = 0) -> bool:
         if panel.bbox is None:
-            return
+            return False
+        identity = self._market_identity_snapshot()
         entry_id = uuid4().hex
         filename = f"{entry_id}.png"
         try:
             self._market_directory.mkdir(parents=True, exist_ok=True)
             encoded, data = cv2.imencode(".png", image)
             if not encoded:
-                return
+                return False
             (self._market_directory / filename).write_bytes(data.tobytes())
             entry = {
                 "id": entry_id, "file": filename, "bbox": list(panel.bbox),
                 "panel_type": panel.panel_type, "visit_id": visit_id or entry_id,
                 "attempt": attempt,
                 "timestamp_ms": timestamp_ms, "frame_index": frame_index,
-                "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"), "attempts": 0,
+                "occurred_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+                "queued_at": wall_time(), "attempts": 0,
+                "identity": identity,
             }
             with self._market_lock:
                 self._market_queue.append(entry)
                 state = self._visit_state.setdefault(entry["visit_id"], {
                     "pending": 0, "captured": 0, "best": None, "best_task": None, "files": [],
                 })
+                state.setdefault("identity", dict(identity))
                 state["pending"] += 1
                 state["captured"] += 1
                 state["files"].append(filename)
                 trace = self._visit_traces.get(entry["visit_id"])
                 if trace is not None:
+                    trace.setdefault("identity", dict(identity))
                     trace["captures"].append({
                         "attempt": attempt,
                         "at": wall_time(),
@@ -293,11 +332,172 @@ class InventoryMonitorWorker(QObject):
                 self._save_market_queue_locked()
                 if self._market_future is None:
                     self._submit_market_ocr_locked()
+            return True
         except (OSError, cv2.error):
             try:
                 (self._market_directory / filename).unlink(missing_ok=True)
             except OSError:
                 pass
+            return False
+
+    def _begin_other_stall_visit(self, image: Any, panel: PanelObservation,
+                                 timestamp_ms: int, frame_index: int) -> None:
+        """Capture the confirmed panel immediately, then schedule two retries."""
+        visit_id = uuid4().hex
+        identity = self._market_identity_snapshot()
+        self._market_visit = {
+            "id": visit_id,
+            "start_ms": timestamp_ms,
+            "attempt": 0,
+            "identity": identity,
+        }
+        self._visit_traces[visit_id] = {
+            "visit_id": visit_id,
+            "identity": identity,
+            "panel_at": wall_time(),
+            "captures": [],
+            "ocr": [],
+            "enqueue_failures": [],
+        }
+        enqueued = self._enqueue_market_visit(
+            image, panel, timestamp_ms, frame_index, visit_id, 0
+        )
+        if enqueued:
+            self._market_visit["attempt"] = 1
+            return
+        self._market_visit = None
+        self._close_other_stall_visit(visit_id, "capture_failed")
+
+    def _advance_other_stall_visit(self, image: Any, panel: PanelObservation,
+                                   timestamp_ms: int, frame_index: int) -> None:
+        """Stop or supplement a visit without losing its initial frame."""
+        visit = self._market_visit
+        if visit is None:
+            return
+        if panel.panel_type != "stall_other_buy":
+            self._market_visit = None
+            self._close_other_stall_visit(str(visit["id"]), "panel_closed")
+            return
+        if (visit["attempt"] >= 3
+                or timestamp_ms - visit["start_ms"] < 400 * visit["attempt"]):
+            return
+        attempt = int(visit["attempt"])
+        enqueued = self._enqueue_market_visit(
+            image, panel, timestamp_ms, frame_index, str(visit["id"]), attempt
+        )
+        visit["attempt"] = attempt + 1
+        if not enqueued:
+            trace = self._visit_traces.get(str(visit["id"]))
+            if trace is not None:
+                trace["enqueue_failures"].append({
+                    "attempt": attempt,
+                    "at": wall_time(),
+                    "reason": "capture_or_queue_failed",
+                })
+        if visit["attempt"] >= 3:
+            self._market_visit = None
+            self._close_other_stall_visit(str(visit["id"]), "capture_window_complete")
+
+    def _begin_own_stall_visit(self, image: Any, panel: PanelObservation,
+                               timestamp_ms: int, frame_index: int) -> None:
+        """Capture several frames from one stable own-stall page."""
+        visit_id = uuid4().hex
+        identity = self._market_identity_snapshot()
+        self._own_market_visit = {
+            "id": visit_id,
+            "start_ms": timestamp_ms,
+            "attempt": 0,
+            "identity": identity,
+        }
+        self._visit_traces[visit_id] = {
+            "visit_id": visit_id,
+            "identity": identity,
+            "panel_at": wall_time(),
+            "captures": [],
+            "ocr": [],
+            "enqueue_failures": [],
+        }
+        enqueued = self._enqueue_market_visit(
+            image, panel, timestamp_ms, frame_index, visit_id, 0
+        )
+        if enqueued:
+            self._own_market_visit["attempt"] = 1
+            return
+        self._own_market_visit = None
+        self._close_other_stall_visit(visit_id, "capture_failed")
+
+    def _advance_own_stall_visit(self, image: Any, panel: PanelObservation,
+                                 timestamp_ms: int, frame_index: int) -> None:
+        """Add two delayed frames while the own-stall price page stays stable."""
+        visit = self._own_market_visit
+        if visit is None or visit["attempt"] >= 3:
+            return
+        if timestamp_ms - visit["start_ms"] < 400 * visit["attempt"]:
+            return
+        attempt = int(visit["attempt"])
+        enqueued = self._enqueue_market_visit(
+            image, panel, timestamp_ms, frame_index, str(visit["id"]), attempt
+        )
+        visit["attempt"] = attempt + 1
+        if not enqueued:
+            trace = self._visit_traces.get(str(visit["id"]))
+            if trace is not None:
+                trace["enqueue_failures"].append({
+                    "attempt": attempt,
+                    "at": wall_time(),
+                    "reason": "capture_or_queue_failed",
+                })
+        if visit["attempt"] >= 3:
+            self._own_market_visit = None
+            self._close_other_stall_visit(str(visit["id"]), "capture_window_complete")
+
+    def _close_own_stall_visit(self, reason: str) -> None:
+        visit = self._own_market_visit
+        if visit is None:
+            return
+        self._own_market_visit = None
+        self._close_other_stall_visit(str(visit["id"]), reason)
+
+    def _reset_own_stall_visit(self, reason: str = "panel_closed") -> None:
+        self._close_own_stall_visit(reason)
+        self._own_pending_sig = None
+        self._own_stable = 0
+        self._own_active_sig = None
+        self._own_last_enqueue_ms = None
+
+    def _close_other_stall_visit(self, visit_id: str, reason: str) -> None:
+        """Mark a capture window closed and finalize it once OCR is idle."""
+        quotes_event: Event | None = None
+        recognition: Event | None = None
+        with self._market_lock:
+            trace = self._visit_traces.get(visit_id)
+            if trace is not None:
+                trace["panel_closed_at"] = wall_time()
+                trace["closure_reason"] = reason
+            state = self._visit_state.setdefault(visit_id, {
+                "pending": 0, "captured": 0, "best": None, "best_task": None,
+                "files": [],
+            })
+            trace_identity = (trace or {}).get("identity")
+            if isinstance(trace_identity, dict):
+                state.setdefault("identity", dict(trace_identity))
+            state["capture_closed"] = True
+            state["capture_close_reason"] = reason
+            if state.get("pending", 0) == 0 and not state.get("done"):
+                state["done"] = True
+                self._finished_visits.add(visit_id)
+                quotes_event, recognition = self._finish_market_visit_locked(visit_id, state)
+            self._save_market_queue_locked()
+        self._emit_market_visit_events(quotes_event, recognition)
+
+    def _emit_market_visit_events(self, quotes_event: Event | None,
+                                  recognition: Event | None) -> None:
+        if quotes_event is not None:
+            event_hwnd = int(quotes_event.payload.get("window_hwnd") or self.hwnd)
+            self.event_ready.emit(quotes_event)
+            self.event_for_window.emit(event_hwnd, quotes_event)
+        if recognition is not None:
+            self._emit_recognition(recognition)
 
     def _start_market_ocr_queue(self) -> None:
         with self._market_lock:
@@ -330,10 +530,12 @@ class InventoryMonitorWorker(QObject):
         task: dict[str, Any] | None = getattr(future, "market_task", None)
         reading = None
         failed = False
+        failure_detail = ""
         try:
             task, reading = future.result()
-        except Exception:  # noqa: BLE001 - optional OCR must not interrupt monitoring
+        except Exception as exc:  # noqa: BLE001 - optional OCR must not interrupt monitoring
             failed = True
+            failure_detail = type(exc).__name__
 
         quotes_event: Event | None = None
         recognition: Event | None = None
@@ -357,6 +559,33 @@ class InventoryMonitorWorker(QObject):
                     "pending": 1, "captured": 1, "best": None, "best_task": None,
                     "files": [current["file"]],
                 })
+                # OCR runs on a shallow task copy. Copy timing fields back to
+                # the queued entry before tracing, otherwise the trace has no
+                # real queue wait or OCR duration.
+                if task is not None:
+                    for key in ("ocr_started_at", "ocr_finished_at"):
+                        if key in task:
+                            current[key] = task[key]
+                trace = self._visit_traces.get(visit_id)
+                if trace is not None and current.get("panel_type") != "stall_buy":
+                    started = current.get("ocr_started_at")
+                    finished = current.get("ocr_finished_at")
+                    queued = current.get("queued_at")
+                    trace["ocr"].append({
+                        "attempt": current.get("attempt", 0),
+                        "retry": int(current.get("attempts", 0)),
+                        "queued_at": queued,
+                        "started_at": started,
+                        "finished_at": finished,
+                        "wait_ms": round((started - queued) * 1000)
+                        if started and queued else None,
+                        "duration_ms": round((finished - started) * 1000)
+                        if started and finished else None,
+                        "quotes": len(getattr(reading, "quotes", ()) or ()),
+                        "owner": getattr(reading, "owner_id", "") or "",
+                        "failed": failed,
+                        "error": failure_detail,
+                    })
                 if failed:
                     current["attempts"] = int(current.get("attempts", 0)) + 1
                     if current["attempts"] < 3:
@@ -365,35 +594,21 @@ class InventoryMonitorWorker(QObject):
                     else:
                         self._market_queue.pop(0)
                         state["pending"] = max(0, state["pending"] - 1)
+                        state["ocr_failed"] = int(state.get("ocr_failed", 0)) + 1
                 else:
                     self._market_queue.pop(0)
                     state["pending"] = max(0, state["pending"] - 1)
-                    trace = self._visit_traces.get(visit_id)
-                    if trace is not None and current.get("panel_type") != "stall_buy":
-                        started = current.get("ocr_started_at")
-                        finished = current.get("ocr_finished_at")
-                        trace["ocr"].append({
-                            "attempt": current.get("attempt", 0),
-                            "queued_at": wall_time(),
-                            "started_at": started,
-                            "finished_at": finished,
-                            "wait_ms": round((started - wall_time()) * 1000) if started else None,
-                            "duration_ms": round((finished - started) * 1000) if started and finished else None,
-                            "quotes": len(getattr(reading, "quotes", ()) or ()),
-                            "owner": getattr(reading, "owner_id", "") or "",
-                            "failed": failed,
-                        })
                     # Both own and other stalls need their best OCR frame kept;
                     # only the recognition-trace bookkeeping above is exclusive
                     # to other-player stalls.
                     if reading is not None:
+                        state.setdefault("readings", []).append((reading, dict(current)))
                         best = state.get("best")
                         if best is None or len(reading.quotes) > len(best.quotes):
                             state["best"] = reading
                             state["best_task"] = dict(current)
-                best = state.get("best")
-                ready = (best is not None and best.quotes and str(getattr(best, "owner_id", "") or ""))
-                if state["pending"] == 0 or (ready and not state.get("done")):
+                capture_closed = bool(state.get("capture_closed"))
+                if state["pending"] == 0 and capture_closed and not state.get("done"):
                     state["done"] = True
                     self._finished_visits.add(visit_id)
                     if len(self._finished_visits) > 64:
@@ -410,32 +625,103 @@ class InventoryMonitorWorker(QObject):
             if not self._stop_requested.is_set():
                 self._submit_market_ocr_locked()
 
-        if quotes_event is not None:
-            account = parse_account_info(self.window_title)
-            quotes_event.payload.setdefault("window_hwnd", self.hwnd)
-            quotes_event.payload.setdefault("window_title", self.window_title)
-            quotes_event.payload.setdefault("secondary_region", account.secondary_region)
-            quotes_event.payload.setdefault("role_name", account.role_name)
-            quotes_event.payload.setdefault("role_id", account.role_id)
-            self.event_ready.emit(quotes_event)
-            self.event_for_window.emit(self.hwnd, quotes_event)
-        if recognition is not None:
-            recognition.payload.setdefault("window_hwnd", self.hwnd)
-            recognition.payload.setdefault("window_title", self.window_title)
-            account = parse_account_info(self.window_title)
-            recognition.payload.setdefault("secondary_region", account.secondary_region)
-            recognition.payload.setdefault("role_name", account.role_name)
-            recognition.payload.setdefault("role_id", account.role_id)
-            self._emit_recognition(recognition)
+        self._emit_market_visit_events(quotes_event, recognition)
+
+    @staticmethod
+    def _merge_market_readings(
+        readings: list[tuple[Any, dict[str, Any]]],
+    ) -> tuple[Any | None, dict[str, Any], tuple[tuple[str, int], ...]]:
+        """Merge OCR frames by gem, voting on conflicts across captures."""
+        normalized: list[tuple[Any, dict[str, Any], list[tuple[str, int]], float]] = []
+        price_votes: dict[str, dict[int, list[float | int]]] = {}
+        for reading, task in readings:
+            quotes: list[tuple[str, int]] = []
+            for item in getattr(reading, "quotes", ()) or ():
+                try:
+                    name, price = item
+                    if not isinstance(name, str) or not name or isinstance(price, bool):
+                        continue
+                    normalized_price = int(price)
+                except (TypeError, ValueError):
+                    continue
+                if normalized_price <= 0:
+                    continue
+                quotes.append((name, normalized_price))
+            confidence = float(getattr(reading, "confidence", 0.0) or 0.0)
+            normalized.append((reading, dict(task), quotes, confidence))
+            for name, price in quotes:
+                vote = price_votes.setdefault(name, {}).setdefault(price, [0, 0.0, 0.0, 0])
+                vote[0] = int(vote[0]) + 1
+                vote[1] = float(vote[1]) + confidence
+                vote[2] = max(float(vote[2]), confidence)
+                vote[3] = max(int(vote[3]), int(task.get("timestamp_ms") or 0))
+
+        if not normalized:
+            return None, {}, ()
+
+        best_reading, best_task, _, _ = max(
+            normalized,
+            key=lambda item: (
+                len(item[2]),
+                item[3],
+                int(item[1].get("timestamp_ms") or 0),
+            ),
+        )
+        merged: list[tuple[str, int]] = []
+        for name, votes in price_votes.items():
+            price = max(
+                votes,
+                key=lambda candidate: (
+                    int(votes[candidate][0]),
+                    float(votes[candidate][1]),
+                    float(votes[candidate][2]),
+                    int(votes[candidate][3]),
+                ),
+            )
+            merged.append((name, price))
+        return best_reading, best_task, tuple(merged)
 
     def _finish_market_visit_locked(self, visit_id: str, state: dict[str, Any]) -> tuple[Event | None, Event | None]:
         """Build one quote event plus one recognition record for the whole visit."""
         best = state.get("best")
         best_task = state.get("best_task") or {}
+        readings = list(state.get("readings") or [])
+        if not readings and best is not None:
+            readings = [(best, best_task)]
+        merged_best, merged_task, merged_quotes = self._merge_market_readings(readings)
+        if merged_best is not None:
+            best = merged_best
+            best_task = merged_task
         captured = int(state.get("captured", 1))
-        owner = str(getattr(best, "owner_id", "") or "")
-        quotes = [{"gem_name": name, "price_coins": price} for name, price in
-                  (best.quotes if best is not None else [])]
+        identity = dict(
+            state.get("identity")
+            or self._identity_from_task(best_task)
+            or self._market_identity_snapshot()
+        )
+        # The most complete OCR frame is not guaranteed to contain the owner
+        # id. Recover it from any frame in the same visit so quotes are not
+        # discarded merely because the chosen frame missed the nameplate.
+        owner_candidates: dict[str, list[float]] = {}
+        for reading, _task in readings:
+            candidate = str(getattr(reading, "owner_id", "") or "").strip()
+            if not candidate:
+                continue
+            try:
+                confidence = float(getattr(reading, "confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            votes = owner_candidates.setdefault(candidate, [0, 0.0])
+            votes[0] = int(votes[0]) + 1
+            votes[1] = float(votes[1]) + confidence
+        owner = max(
+            owner_candidates,
+            key=lambda candidate: (
+                int(owner_candidates[candidate][0]),
+                float(owner_candidates[candidate][1]),
+            ),
+            default=str(getattr(best, "owner_id", "") or "").strip(),
+        )
+        quotes = [{"gem_name": name, "price_coins": price} for name, price in merged_quotes]
         occurred_at = best_task.get("occurred_at") or datetime.now(UTC).isoformat(timespec="milliseconds")
         timestamp_ms = int(best_task.get("timestamp_ms") or 0)
         frame_index = int(best_task.get("frame_index") or 0)
@@ -448,7 +734,7 @@ class InventoryMonitorWorker(QObject):
             quotes_event = Event(
                 uuid4().hex, timestamp_ms, "own_stall_gem_quotes",
                 confidence=best.confidence,
-                payload={"quotes": quotes, "occurred_at": occurred_at},
+                payload={"quotes": quotes, "occurred_at": occurred_at, **identity},
                 evidence_frame_index=frame_index,
             )
         # Without a readable owner the quote cannot be attributed to a merchant;
@@ -457,13 +743,25 @@ class InventoryMonitorWorker(QObject):
             quotes_event = Event(
                 uuid4().hex, timestamp_ms, "market_gem_quotes",
                 confidence=best.confidence,
-                payload={"quotes": quotes, "occurred_at": occurred_at, "stall_owner_id": owner},
+                payload={
+                    "quotes": quotes,
+                    "occurred_at": occurred_at,
+                    "stall_owner_id": owner,
+                    **identity,
+                },
                 evidence_frame_index=frame_index,
             )
         evidence_file = ""
         if best is not None and best_task:
             evidence_file = self._save_evidence_frame(best_task.get("file", ""))
-        status = "ok" if quotes else ("short" if captured < 3 else "empty")
+        failure_reason = str(state.get("capture_close_reason") or "")
+        ocr_failed = int(state.get("ocr_failed", 0))
+        if (failure_reason == "capture_failed"
+                or (captured == 0 and best is None)
+                or (best is None and ocr_failed > 0)):
+            status = "failed"
+        else:
+            status = "ok" if quotes else ("short" if captured < 3 else "empty")
         trace = self._visit_traces.pop(visit_id, None)
         if trace is not None:
             trace["finalize_at"] = wall_time()
@@ -474,21 +772,28 @@ class InventoryMonitorWorker(QObject):
             trace["evidence_file"] = Path(evidence_file).name if evidence_file else ""
             if evidence_file:
                 trace["evidence_at"] = wall_time()
-        if own_stall:
-            return quotes_event, None
-        recognition = Event(
-            uuid4().hex, timestamp_ms, "market_recognition",
-            confidence=best.confidence if best is not None else 0.0,
-            payload={
-                "occurred_at": occurred_at,
-                "stall_owner_id": owner,
-                "quotes": quotes,
-                "status": status,
-                "evidence_file": evidence_file,
-                "attempts": captured,
-                "trace": trace,
-            }, evidence_frame_index=frame_index,
-        )
+            if status == "failed":
+                trace["failure_reason"] = (
+                    failure_reason if failure_reason == "capture_failed"
+                    else "ocr_failed" if best is None and ocr_failed > 0
+                    else "no_capture_or_ocr_result"
+                )
+        recognition = None
+        if not own_stall:
+            recognition = Event(
+                uuid4().hex, timestamp_ms, "market_recognition",
+                confidence=best.confidence if best is not None else 0.0,
+                payload={
+                    "occurred_at": occurred_at,
+                    "stall_owner_id": owner,
+                    "quotes": quotes,
+                    "status": status,
+                    "evidence_file": evidence_file,
+                    "attempts": captured,
+                    "trace": trace,
+                    **identity,
+                }, evidence_frame_index=frame_index,
+            )
         for name in state.get("files", []):
             try:
                 (self._market_directory / Path(name).name).unlink(missing_ok=True)
@@ -518,33 +823,50 @@ class InventoryMonitorWorker(QObject):
             return ""
 
     def _emit_recognition(self, event: Event) -> None:
-        """Keep one useful record per stall visit and drop transition frames."""
+        """Emit every visit while marking business-level duplicate quotes."""
         quotes = tuple(sorted((str(item["gem_name"]), int(item["price_coins"]))
                               for item in event.payload.get("quotes") or []))
         owner = str(event.payload.get("stall_owner_id") or "")
         now = monotonic()
+        duplicate = False
+        dedupe_reason = ""
         with self._recognition_lock:
             if not quotes:
-                # A frame captured mid-fade: ignore when this stall just read.
+                # A transition frame is still useful diagnostic evidence. Keep
+                # it, but mark why its quotes must not update market statistics.
                 if now - self._recognition_last_ok < 8:
-                    return
-                event.payload["status"] = "empty"
+                    duplicate = True
+                    dedupe_reason = "within_8s_empty"
+                if event.payload.get("status") != "failed":
+                    event.payload["status"] = "empty"
             else:
                 previous = self._recognition_recent.get(owner)
                 if previous is not None:
                     previous_quotes, previous_at = previous
-                    if now - previous_at < 120 and (
-                        quotes == previous_quotes or set(quotes) <= set(previous_quotes)
-                    ):
-                        return
-                self._recognition_recent[owner] = (quotes, now)
+                    if now - previous_at < 120:
+                        if quotes == previous_quotes:
+                            duplicate = True
+                            dedupe_reason = "same_quotes_120s"
+                        elif set(quotes) <= set(previous_quotes):
+                            duplicate = True
+                            dedupe_reason = "subset_quotes_120s"
+                if not duplicate:
+                    self._recognition_recent[owner] = (quotes, now)
                 self._recognition_last_ok = now
                 event.payload["status"] = "ok"
                 if len(self._recognition_recent) > 32:
                     oldest = min(self._recognition_recent,
                                  key=lambda key: self._recognition_recent[key][1])
                     self._recognition_recent.pop(oldest, None)
-        self.event_for_window.emit(self.hwnd, event)
+        event.payload["duplicate"] = duplicate
+        event.payload["dedupe_reason"] = dedupe_reason
+        trace = event.payload.get("trace")
+        if isinstance(trace, dict):
+            trace["status"] = event.payload.get("status")
+            trace["duplicate"] = duplicate
+            trace["dedupe_reason"] = dedupe_reason
+        event_hwnd = int(event.payload.get("window_hwnd") or self.hwnd)
+        self.event_for_window.emit(event_hwnd, event)
 
     def _schedule_panel_detail(self, event: Event, image: Any, panel: PanelObservation) -> None:
         """Run attributes/recipient OCR after the fast panel event has been confirmed."""
@@ -677,7 +999,7 @@ class InventoryMonitorWorker(QObject):
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
                     stall_stock_tracker.reset()
-                    self._reset_market_analysis()
+                    self._reset_market_analysis("monitoring_paused")
                     stall_visit_tracker.reset()
                     # Never carry a partly confirmed warning across a manual
                     # pause. Resumed monitoring starts a fresh confirmation.
@@ -699,7 +1021,7 @@ class InventoryMonitorWorker(QObject):
                     panel_tracker.reset_pending()
                     money_tracker.reset_pending()
                     stall_stock_tracker.reset()
-                    self._reset_market_analysis()
+                    self._reset_market_analysis("window_minimized")
                     stall_visit_tracker.reset()
                     continue
                 now = monotonic()
@@ -714,7 +1036,7 @@ class InventoryMonitorWorker(QObject):
                     if last_panel_frame_ms is not None and packet.timestamp_ms - last_panel_frame_ms > 1500:
                         panel_tracker.reset_pending()
                         stall_stock_tracker.reset()
-                        self._reset_market_analysis()
+                        self._reset_market_analysis("panel_gap")
                         stall_visit_tracker.reset()
                     last_panel_frame_ms = packet.timestamp_ms
                     panel_events = panel_tracker.update(panel, packet.timestamp_ms, packet.frame_index)
@@ -728,7 +1050,7 @@ class InventoryMonitorWorker(QObject):
                     if money_character_id != current_character_id:
                         money_tracker = MoneyTracker()
                         stall_stock_tracker.reset()
-                        self._reset_market_analysis()
+                        self._reset_market_analysis("identity_changed")
                         stall_visit_tracker.reset()
                         money_character_id = current_character_id
                     signal = _analysis_signal(analysis)
@@ -756,29 +1078,14 @@ class InventoryMonitorWorker(QObject):
                         and event.type in {"panel_opened", "market_stall_changed"}
                         for event in panel_events + visit_events
                     ) and self._market_visit is None:
-                        # Three captures per visit: the first stable frame plus
-                        # two retries, so a slow fade-in or a fast page flip
-                        # cannot turn a readable stall into an empty result.
-                        self._market_visit = {"id": uuid4().hex, "start_ms": packet.timestamp_ms, "attempt": 0}
-                        self._visit_traces[self._market_visit["id"]] = {
-                            "visit_id": self._market_visit["id"],
-                            "panel_at": wall_time(),
-                            "captures": [],
-                            "ocr": [],
-                        }
-                    visit = self._market_visit
-                    if visit is not None:
-                        if panel.panel_type != "stall_other_buy":
-                            self._market_visit = None
-                        elif (visit["attempt"] < 3
-                              and packet.timestamp_ms - visit["start_ms"] >= 400 * (visit["attempt"] + 1)):
-                            self._enqueue_market_visit(
-                                packet.image, panel, packet.timestamp_ms, packet.frame_index,
-                                visit["id"], visit["attempt"],
-                            )
-                            visit["attempt"] += 1
-                            if visit["attempt"] >= 3:
-                                self._market_visit = None
+                        # Enqueue the confirmed frame now. A short-lived or
+                        # fast-closing panel must not depend on a later frame.
+                        self._begin_other_stall_visit(
+                            packet.image, panel, packet.timestamp_ms, packet.frame_index
+                        )
+                    self._advance_other_stall_visit(
+                        packet.image, panel, packet.timestamp_ms, packet.frame_index
+                    )
                     if panel.panel_type == "stall_buy" and panel_tracker.stable == "stall_buy":
                         signature = self._own_stall_signature(packet.image, panel)
                         if signature is not None:
@@ -793,23 +1100,18 @@ class InventoryMonitorWorker(QObject):
                             fallback = (self._own_last_enqueue_ms is None
                                         or packet.timestamp_ms - self._own_last_enqueue_ms >= 30_000)
                             if (changed or fallback) and not throttled:
+                                self._close_own_stall_visit("own_stall_changed")
                                 self._own_active_sig = signature
                                 self._own_last_enqueue_ms = packet.timestamp_ms
-                                self._enqueue_market_visit(
+                                self._begin_own_stall_visit(
+                                    packet.image, panel, packet.timestamp_ms, packet.frame_index
+                                )
+                            elif self._own_market_visit is not None:
+                                self._advance_own_stall_visit(
                                     packet.image, panel, packet.timestamp_ms, packet.frame_index
                                 )
                     elif panel.panel_type != "stall_buy":
-                        self._own_pending_sig = None
-                        self._own_stable = 0
-                        self._own_active_sig = None
-                        self._own_last_enqueue_ms = None
-                    if any(
-                        event.type == "panel_opened" and event.payload.get("panel_type") == "stall_buy"
-                        for event in panel_events
-                    ):
-                        self._enqueue_market_visit(
-                            packet.image, panel, packet.timestamp_ms, packet.frame_index
-                        )
+                        self._reset_own_stall_visit()
                     signal["character_id"] = current_character_id
                     # Expensive OCR runs only after the base panel event is
                     # emitted.  Existing confirmed stamina may remain visible
